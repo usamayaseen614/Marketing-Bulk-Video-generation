@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+editor_component/
+.claude/
+sample_assets/
+static/
+create_sample_assets.py
+README.md
+DEPLOYMENT.md
+Caddyfile
+docker-compose.yml

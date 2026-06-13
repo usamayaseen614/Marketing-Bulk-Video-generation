@@ -1,0 +1,12 @@
+# Replace videos.example.com with your domain (DNS A record -> VM external IP).
+# Caddy obtains and renews the Let's Encrypt certificate automatically.
+#
+# Generate the password hash with:
+#   docker run --rm caddy:2 caddy hash-password --plaintext 'YOUR_PASSWORD'
+
+videos.example.com {
+	basic_auth {
+		marketing $2a$14$REPLACE_WITH_GENERATED_HASH
+	}
+	reverse_proxy app:8501
+}

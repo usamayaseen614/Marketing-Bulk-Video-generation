@@ -1,0 +1,4 @@
+# "minimal" hides the Deploy button and the three-dot options menu in the
+# top-right toolbar. Switch back to "auto" (or delete this line) to restore them.
+[client]
+toolbarMode = "minimal"

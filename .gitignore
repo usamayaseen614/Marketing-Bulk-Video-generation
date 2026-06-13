@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Environment & secrets
+.env
+.env.*
+*.env
+
+# Temporary / scratch files
+_tmp_*.py
+*.tmp
+*.log
+
+# Generated output
+output/
+outputs/
+generated_videos/
+
+# Sample / test assets (keep the directory, ignore large media)
+sample_assets/*.mp4
+sample_assets/*.mov
+sample_assets/*.avi
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker
+*.pid
+
+# Claude Code
+.claude/

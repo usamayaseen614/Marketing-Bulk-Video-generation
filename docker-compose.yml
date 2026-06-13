@@ -1,0 +1,37 @@
+# Two ways to run:
+#
+#   1. App only (access controlled elsewhere, e.g. IAP tunnel / VPN):
+#        docker compose up -d
+#
+#   2. App + Caddy reverse proxy with HTTPS and basic auth (public VM + domain):
+#        docker compose --profile caddy up -d
+#      Then REMOVE the "ports" mapping on the app service below so the app is
+#      only reachable through Caddy, and edit Caddyfile with your domain/users.
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    volumes:
+      # Renders write heavily to /tmp; keep it on a named volume so the
+      # container filesystem stays small.
+      - app_tmp:/tmp
+
+  caddy:
+    image: caddy:2
+    profiles: ["caddy"]
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  app_tmp:
+  caddy_data:
+  caddy_config:
