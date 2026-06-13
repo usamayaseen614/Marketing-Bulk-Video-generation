@@ -52,7 +52,7 @@ STATIC_ROOT = Path(__file__).parent / "static"
 STATIC_DOWNLOADS = STATIC_ROOT / "downloads"
 
 # Above this size the ZIP is not loaded into memory for the download button.
-MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024
+MAX_DOWNLOAD_BYTES = 5 * 1024 * 1024 * 1024
 
 # Output folders from sessions idle longer than this are deleted on the next
 # batch run, so a long-lived server never fills its disk.
