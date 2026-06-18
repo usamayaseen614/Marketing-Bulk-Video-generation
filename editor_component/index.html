@@ -8,7 +8,12 @@
   .el { position: absolute; cursor: move; touch-action: none; }
   .el:hover, .el.drag { outline: 1.5px dashed rgba(255,255,255,.85); outline-offset: 1px; }
   .el > img { width: 100%; height: 100%; display: block; pointer-events: none; }
-  #videoBox > img.frame { position: absolute; width: auto; height: auto; }
+  #videoBox > img.frame, #ctaVideoBox > img.frame { position: absolute; width: auto; height: auto; }
+  /* Texts are layered (bottom to top): the live CSS background box, the baked
+     decoration (outline/shadow/neon glow), then the recolorable glyph mask.
+     All position:absolute so they paint in DOM order. */
+  .bgbox { position: absolute; pointer-events: none; }
+  .el > img.deco { position: absolute; inset: 0; pointer-events: none; }
   /* Texts: the mask+color live on an inner layer so the mask can't clip the
      resize handle (a mask on the outer div would hide everything outside the
      glyph pixels, including children). */
@@ -34,6 +39,10 @@
   tr.changed td { color: #ffd166; font-weight: 600; }
   input[type=color] { width: 26px; height: 18px; border: none; background: none;
                       padding: 0; margin-left: 6px; cursor: pointer; vertical-align: middle; }
+  .miniBtn { margin-left: 4px; background: #3b3f4a; color: #fff;
+             border: 1px solid rgba(255,255,255,.2); border-radius: 4px;
+             font-size: 11px; padding: 1px 6px; cursor: pointer; vertical-align: middle; }
+  .ro { color: #cfd3db; }
   #btnRow { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
   #btnRow button { background: #3b3f4a; color: #fff; border: 1px solid rgba(255,255,255,.2);
                    border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 12.5px; }
@@ -49,8 +58,10 @@
   <div id="panel">
     <h3>Excel values</h3>
     <div class="hint">Drag elements to move them, drag the corner handle to resize
-      (texts resize their font size), and recolor texts with the swatches. A dotted
-      line appears when an element is centered on the canvas. Changed values are
+      (texts resize their font size), recolor texts with the swatches, and give any
+      text a background box with the bg swatch (“none” removes it). Font and artistic
+      style come from the sidebar / Excel and are shown for reference. A dotted line
+      appears when an element is centered on the canvas. Changed values are
       highlighted — click “Save to Excel” to apply them to your sheet in one go.</div>
     <table class="vals">
       <thead><tr><th>Column</th><th>Was</th><th>Now</th></tr></thead>
@@ -295,12 +306,77 @@
     addHandle(ctaEl, ctaItem);
     items.push(ctaItem);
 
+    // --- CTA video box (optional; same behavior as the promo video box) ---
+    if (DATA.cta_video) {
+      const cv = DATA.cta_video;
+      const cvEl = document.createElement('div');
+      cvEl.className = 'el';
+      cvEl.id = 'ctaVideoBox';
+      const cvFrame = document.createElement('img');
+      cvFrame.className = 'frame';
+      cvFrame.src = cv.frame;
+      cvFrame.draggable = false;
+      cvEl.appendChild(cvFrame);
+      stage.appendChild(cvEl);
+      const cvItem = {
+        x: cv.x, y: cv.y, w: cv.w, h: cv.h,
+        center() { return { cx: this.x + this.w / 2, cy: this.y + this.h / 2 }; },
+        snapResize() { snapResizeBox(this, 50); },
+        bounds() {
+          return { minX: 0, maxX: DATA.canvas_w - this.w, minY: 0, maxY: DATA.canvas_h - this.h };
+        },
+        place() {
+          cvEl.style.left = px(this.x);
+          cvEl.style.top = px(this.y);
+          cvEl.style.width = px(this.w);
+          cvEl.style.height = px(this.h);
+          const r = Math.min(this.w / cv.frame_w, this.h / cv.frame_h);
+          const fw = cv.frame_w * r, fh = cv.frame_h * r;
+          cvFrame.style.width = px(fw);
+          cvFrame.style.height = px(fh);
+          cvFrame.style.left = px((this.w - fw) / 2);
+          cvFrame.style.top = px((this.h - fh) / 2);
+        },
+        startResize(e) { return { w0: this.w, h0: this.h, sx: e.clientX, sy: e.clientY }; },
+        resize(ctx, ev) {
+          this.w = clamp(ctx.w0 + (ev.clientX - ctx.sx) / scale, 50, DATA.canvas_w - this.x);
+          this.h = clamp(ctx.h0 + (ev.clientY - ctx.sy) / scale, 50, DATA.canvas_h - this.y);
+        },
+        endResize() { this.w = Math.round(this.w); this.h = Math.round(this.h); },
+        reset() { this.x = cv.x; this.y = cv.y; this.w = cv.w; this.h = cv.h; this.place(); },
+        cols() {
+          return [
+            ['CTA_Video_X', cv.x, Math.round(this.x)],
+            ['CTA_Video_Y', cv.y, Math.round(this.y)],
+            ['CTA_Video_Width', cv.w, Math.round(this.w)],
+            ['CTA_Video_Height', cv.h, Math.round(this.h)],
+          ];
+        },
+      };
+      cvItem.place();
+      makeDraggable(cvEl, cvItem);
+      addHandle(cvEl, cvItem);
+      items.push(cvItem);
+    }
+
     // --- texts (x/y is the block CENTER; resizing scales the font size
     //     around that center, so X/Y stay put and centeredness can't change —
-    //     hence no snapResize) ---
+    //     hence no snapResize). Layers, bottom to top: a live CSS background
+    //     box, the baked decoration (outline/shadow/neon), the recolorable
+    //     glyph mask. ---
     DATA.texts.forEach(t => {
       const el = document.createElement('div');
       el.className = 'el textEl';
+      const bgBox = document.createElement('div');
+      bgBox.className = 'bgbox';
+      bgBox.style.display = t.bg ? 'block' : 'none';
+      if (t.bg) bgBox.style.backgroundColor = t.bg;
+      el.appendChild(bgBox);
+      const deco = document.createElement('img');
+      deco.className = 'deco';
+      deco.src = t.deco;
+      deco.draggable = false;
+      el.appendChild(deco);
       const ink = document.createElement('div');
       ink.className = 'ink';
       ink.style.backgroundColor = t.color;
@@ -309,7 +385,7 @@
       el.appendChild(ink);
       stage.appendChild(el);
       const item = {
-        x: t.cx, y: t.cy, s: 1, color: t.color,
+        x: t.cx, y: t.cy, s: 1, color: t.color, bg: t.bg || null,
         curW() { return t.w * this.s; },
         curH() { return t.h * this.s; },
         fontSize() { return Math.round(t.size * this.s); },
@@ -324,6 +400,18 @@
           el.style.height = px(h);
           el.style.left = px(this.x - w / 2);
           el.style.top = px(this.y - h / 2);
+          // background box: centered, sized from the baked text bbox + padding
+          const bw = t.bg_w * this.s, bh = t.bg_h * this.s;
+          bgBox.style.width = px(bw);
+          bgBox.style.height = px(bh);
+          bgBox.style.left = px((w - bw) / 2);
+          bgBox.style.top = px((h - bh) / 2);
+          bgBox.style.borderRadius = px(t.bg_radius * this.s);
+        },
+        applyBg() {
+          if (this.bg) { bgBox.style.display = 'block'; bgBox.style.backgroundColor = this.bg; }
+          else { bgBox.style.display = 'none'; }
+          if (this.bgPicker && this.bg) this.bgPicker.value = this.bg;
         },
         startResize(e) {
           const r = el.getBoundingClientRect();
@@ -340,17 +428,23 @@
         endResize() { this.s = this.fontSize() / t.size; },  // snap to a whole font size
         reset() {
           this.x = t.cx; this.y = t.cy; this.s = 1; this.color = t.color;
+          this.bg = t.bg || null;
           ink.style.backgroundColor = t.color;
           if (this.picker) this.picker.value = t.color;
+          this.applyBg();
           this.place();
         },
         setColor(hex) { this.color = hex.toUpperCase(); ink.style.backgroundColor = this.color; },
+        setBg(hex) { this.bg = hex ? hex.toUpperCase() : null; this.applyBg(); },
         cols() {
           return [
             [t.role + '_X', t.cx, Math.round(this.x)],
             [t.role + '_Y', t.cy, Math.round(this.y)],
             [t.role + '_Size', t.size, this.fontSize()],
             [t.role + '_Color', t.color, this.color],
+            [t.role + '_BgColor', t.bg || '', this.bg || ''],
+            [t.role + '_Font', t.font || '', t.font || ''],
+            [t.role + '_Style', t.style || 'classic', t.style || 'classic'],
           ];
         },
       };
@@ -372,13 +466,29 @@
         tdWas.textContent = col[1];
         const nowSpan = document.createElement('span');
         tdNow.appendChild(nowSpan);
-        if (col[0].endsWith('_Color')) {
+        if (col[0].endsWith('_BgColor')) {
+          // Live background box: a swatch turns it on / recolors it, "none" clears it.
+          const picker = document.createElement('input');
+          picker.type = 'color';
+          picker.value = col[1] || '#FF2D55';
+          picker.addEventListener('input', () => { item.setBg(picker.value); refresh(); });
+          item.bgPicker = picker;
+          const off = document.createElement('button');
+          off.type = 'button';
+          off.className = 'miniBtn';
+          off.textContent = 'none';
+          off.addEventListener('click', () => { item.setBg(null); refresh(); });
+          tdNow.append(picker, off);
+        } else if (col[0].endsWith('_Color')) {
           const picker = document.createElement('input');
           picker.type = 'color';
           picker.value = col[1];
           picker.addEventListener('input', () => { item.setColor(picker.value); refresh(); });
           item.picker = picker;
           tdNow.appendChild(picker);
+        } else if (col[0].endsWith('_Font') || col[0].endsWith('_Style')) {
+          // Informational only — chosen in the sidebar / Excel, not edited here.
+          nowSpan.classList.add('ro');
         }
         tr.append(tdName, tdWas, tdNow);
         tbody.appendChild(tr);

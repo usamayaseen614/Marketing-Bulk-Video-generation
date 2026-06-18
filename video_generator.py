@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
-from PIL import Image, ImageColor, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 logger = logging.getLogger("video_generator")
 
@@ -43,7 +43,9 @@ CANVAS_H = 1920
 FPS = 30
 
 # The CTA is invisible until CTA_FADE_START seconds, then fades in (alpha
-# only) and is fully visible at CTA_FADE_START + CTA_FADE_DURATION.
+# only) and is fully visible at CTA_FADE_START + CTA_FADE_DURATION. These are
+# only defaults now — RenderConfig.cta_fade_* / cta_video_fade_* (set from the
+# sidebar, overridable per row) carry the live values.
 CTA_FADE_START = 1.0
 CTA_FADE_DURATION = 0.5
 
@@ -58,9 +60,15 @@ OPTIONAL_COLUMNS = [
     "BG_Image",
     "Video_X", "Video_Y", "Video_Width", "Video_Height",
     "CTA_X", "CTA_Y", "CTA_Width", "CTA_Height",
+    "CTA_Fade_Start", "CTA_Fade_Duration",
+    "CTA_Video_X", "CTA_Video_Y", "CTA_Video_Width", "CTA_Video_Height",
+    "CTA_Video_Fade_Start", "CTA_Video_Fade_Duration",
     "Headline", "Headline_Size", "Headline_Color", "Headline_X", "Headline_Y",
+    "Headline_Font", "Headline_BgColor", "Headline_Style",
     "Subheading", "Subheading_Size", "Subheading_Color", "Subheading_X", "Subheading_Y",
+    "Subheading_Font", "Subheading_BgColor", "Subheading_Style",
     "Footer", "Footer_Size", "Footer_Color", "Footer_X", "Footer_Y",
+    "Footer_Font", "Footer_BgColor", "Footer_Style",
 ]
 ALL_COLUMNS = REQUIRED_COLUMNS + OPTIONAL_COLUMNS
 
@@ -76,6 +84,55 @@ FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/System/Library/Fonts/Helvetica.ttc",
 ]
+
+# Bundled font library (run `python fetch_fonts.py` to populate ./fonts). Maps
+# the display name shown in the UI / typed into a *_Font cell to (filename,
+# optional named variation). The two variable fonts are pinned to their Bold
+# instance; the rest are single-weight display faces. Picking from this library
+# (instead of system fonts) makes the look identical on Windows and Docker.
+FONTS_DIR = Path(__file__).parent / "fonts"
+FONT_LIBRARY: dict[str, tuple[str, Optional[str]]] = {
+    "Impact (Bebas Neue)": ("BebasNeue-Regular.ttf", None),
+    "Heavy (Anton)": ("Anton-Regular.ttf", None),
+    "Clean (Montserrat)": ("Montserrat-Variable.ttf", "Bold"),
+    "Elegant (Playfair)": ("PlayfairDisplay-Variable.ttf", "Bold"),
+    "Script (Pacifico)": ("Pacifico-Regular.ttf", None),
+    "Marker (Permanent Marker)": ("PermanentMarker-Regular.ttf", None),
+    "Typewriter (Special Elite)": ("SpecialElite-Regular.ttf", None),
+    "Bold Script (Lobster)": ("Lobster-Regular.ttf", None),
+    "Retro (Press Start 2P)": ("PressStart2P-Regular.ttf", None),
+    "Urban (Bungee)": ("Bungee-Regular.ttf", None),
+}
+
+# Font choices that aren't bundled families: the system font, or the user's
+# uploaded TTF/OTF. These plus FONT_LIBRARY keys are what the UI offers.
+FONT_SYSTEM = "System default"
+FONT_CUSTOM = "Custom upload"
+FONT_CHOICES = [FONT_SYSTEM, *FONT_LIBRARY, FONT_CUSTOM]
+
+
+def _font_norm(name: str) -> str:
+    """Loose key for font matching: lowercase, strip everything but a-z0-9."""
+    return re.sub(r"[^a-z0-9]", "", str(name).lower())
+
+
+# Accept the full library name, the leading vibe word ("Impact"), or the family
+# in parentheses ("Bebas Neue") — case/space/punctuation-insensitive — so a
+# *_Font cell is forgiving to type.
+_FONT_ALIASES: dict[str, str] = {}
+for _key in FONT_LIBRARY:
+    _vibe, _, _fam = _key.partition(" (")
+    _FONT_ALIASES[_font_norm(_key)] = _key
+    _FONT_ALIASES[_font_norm(_vibe)] = _key
+    if _fam:
+        _FONT_ALIASES[_font_norm(_fam.rstrip(")"))] = _key
+for _alias in ("system", "systemdefault", "default", ""):
+    _FONT_ALIASES[_alias] = FONT_SYSTEM
+for _alias in ("custom", "customupload", "upload"):
+    _FONT_ALIASES[_alias] = FONT_CUSTOM
+
+# Artistic text treatments (TikTok-style), applied on top of the fill color.
+TEXT_STYLES = ["classic", "outline", "shadow", "neon"]
 
 # Random fallbacks for blank size/color cells. Size ranges are per element
 # role so an auto-sized footer never dwarfs an auto-sized headline; colors are
@@ -158,6 +215,17 @@ def _parse_opt_int(value, warnings: list[str], label: str) -> Optional[int]:
         return None
 
 
+def _parse_opt_float(value, warnings: list[str], label: str) -> Optional[float]:
+    """Like _parse_opt_int but keeps fractional values (used for fade seconds)."""
+    if _clean_str(value) == "":
+        return None
+    try:
+        return max(0.0, float(value))
+    except (ValueError, TypeError):
+        warnings.append(f"{label}: invalid value '{value}', the default will be used")
+        return None
+
+
 def _img_to_data_uri(img: Image.Image, fmt: str = "PNG") -> str:
     """Encode a PIL image as a data URI for embedding in the preview editor."""
     buf = io.BytesIO()
@@ -217,10 +285,12 @@ def _balanced_lines(words: list[str], n_lines: int, width) -> list[str]:
     return lines
 
 
-def _parse_color(value, warnings: list[str], label: str) -> Optional[tuple]:
+def _parse_color(value, warnings: list[str], label: str,
+                 fallback_desc: str = "a random color") -> Optional[tuple]:
     """Accept '#RRGGBB', '#RGB', 'rgb(...)' or CSS color names ('yellow',
-    'blue', 'Light Yellow'...). Blank => None (a random palette color is
-    chosen later); unrecognized => warn + None."""
+    'blue', 'Light Yellow'...). Blank => None (the caller picks a default —
+    a palette color for text, no box for backgrounds); unrecognized => warn
+    + None. `fallback_desc` only tailors the warning message."""
     raw = _clean_str(value)
     if not raw:
         return None
@@ -231,7 +301,7 @@ def _parse_color(value, warnings: list[str], label: str) -> Optional[tuple]:
             # Be forgiving with names: 'Light Yellow' -> 'lightyellow'
             rgb = ImageColor.getrgb(re.sub(r"\s+", "", raw.lower()))
         except ValueError:
-            warnings.append(f"{label}: unrecognized color '{raw}', using a random color")
+            warnings.append(f"{label}: unrecognized color '{raw}', using {fallback_desc}")
             return None
     return rgb if len(rgb) == 4 else (*rgb, 255)
 
@@ -251,6 +321,20 @@ class RenderConfig:
     cta_y: int = 1600
     cta_w: int = 400
     cta_h: int = 160
+    # CTA-image fade: invisible until cta_fade_start, fully visible
+    # cta_fade_duration seconds later (per-row CTA_Fade_* cells override).
+    cta_fade_start: float = CTA_FADE_START
+    cta_fade_duration: float = CTA_FADE_DURATION
+    # Optional CTA *video*: a separate element layered with the CTA image, in
+    # its own box, with its own configurable fade-in. Box defaults below; the
+    # video itself is supplied to VideoGenerator (absent => the element is
+    # skipped and the output is identical to before).
+    cta_video_x: int = 360
+    cta_video_y: int = 1200
+    cta_video_w: int = 360
+    cta_video_h: int = 360
+    cta_video_fade_start: float = 0.5
+    cta_video_fade_duration: float = 0.5
     crf: int = 18                 # 16-28; lower = higher quality / bigger files
     preset: str = "medium"        # x264 speed/size tradeoff
     # When True, video_x/video_y are ignored and each row's video box gets a
@@ -258,7 +342,11 @@ class RenderConfig:
     randomize_video_pos: bool = False
     audio_bitrate: str = "192k"
     include_audio: bool = True
-    font_path: Optional[str] = None
+    font_path: Optional[str] = None   # the user's uploaded TTF/OTF, if any
+    # Default font + artistic style for texts whose *_Font / *_Style cells are
+    # blank. default_font is a FONT_LIBRARY key, FONT_SYSTEM, or FONT_CUSTOM.
+    default_font: str = FONT_SYSTEM
+    default_style: str = "classic"
     ffmpeg_timeout: int = 600     # seconds per row before a render is killed
 
 
@@ -270,6 +358,9 @@ class TextSpec:
     color: Optional[tuple]   # None = random palette color
     x: Optional[int]         # None = auto-place (X/Y cell left blank in the Excel)
     y: Optional[int]
+    font: Optional[str] = None       # font choice name; None = config.default_font
+    bg_color: Optional[tuple] = None # highlight box behind the text; None = no box
+    style: Optional[str] = None      # classic|outline|shadow|neon; None = default_style
 
 
 @dataclass
@@ -294,6 +385,15 @@ class RowSpec:
     cta_y: Optional[int] = None
     cta_w: Optional[int] = None
     cta_h: Optional[int] = None
+    cta_fade_start: Optional[float] = None
+    cta_fade_duration: Optional[float] = None
+    # Per-row CTA-video box + fade (CTA_Video_* cells); blank => sidebar values.
+    cta_video_x: Optional[int] = None
+    cta_video_y: Optional[int] = None
+    cta_video_w: Optional[int] = None
+    cta_video_h: Optional[int] = None
+    cta_video_fade_start: Optional[float] = None
+    cta_video_fade_duration: Optional[float] = None
     resolved: bool = False
 
     @classmethod
@@ -308,6 +408,10 @@ class RowSpec:
                 color=_parse_color(row.get(f"{prefix}_Color"), warnings, f"{prefix}_Color"),
                 x=_parse_opt_int(row.get(f"{prefix}_X"), warnings, f"{prefix}_X"),
                 y=_parse_opt_int(row.get(f"{prefix}_Y"), warnings, f"{prefix}_Y"),
+                font=_clean_str(row.get(f"{prefix}_Font")) or None,
+                bg_color=_parse_color(row.get(f"{prefix}_BgColor"), warnings,
+                                      f"{prefix}_BgColor", fallback_desc="no background"),
+                style=(_clean_str(row.get(f"{prefix}_Style")).lower() or None),
             )
 
         return cls(
@@ -323,6 +427,16 @@ class RowSpec:
             cta_y=_parse_opt_int(row.get("CTA_Y"), warnings, "CTA_Y"),
             cta_w=_parse_opt_int(row.get("CTA_Width"), warnings, "CTA_Width"),
             cta_h=_parse_opt_int(row.get("CTA_Height"), warnings, "CTA_Height"),
+            cta_fade_start=_parse_opt_float(row.get("CTA_Fade_Start"), warnings, "CTA_Fade_Start"),
+            cta_fade_duration=_parse_opt_float(row.get("CTA_Fade_Duration"), warnings, "CTA_Fade_Duration"),
+            cta_video_x=_parse_opt_int(row.get("CTA_Video_X"), warnings, "CTA_Video_X"),
+            cta_video_y=_parse_opt_int(row.get("CTA_Video_Y"), warnings, "CTA_Video_Y"),
+            cta_video_w=_parse_opt_int(row.get("CTA_Video_Width"), warnings, "CTA_Video_Width"),
+            cta_video_h=_parse_opt_int(row.get("CTA_Video_Height"), warnings, "CTA_Video_Height"),
+            cta_video_fade_start=_parse_opt_float(
+                row.get("CTA_Video_Fade_Start"), warnings, "CTA_Video_Fade_Start"),
+            cta_video_fade_duration=_parse_opt_float(
+                row.get("CTA_Video_Fade_Duration"), warnings, "CTA_Video_Fade_Duration"),
             warnings=warnings,
         )
 
@@ -364,9 +478,12 @@ class VideoGenerator:
         cta_path: Path,
         work_dir: Path,
         output_dir: Path,
+        cta_video_path: Optional[Path] = None,
     ):
         self.config = config
         self.video_path = Path(video_path)
+        # Optional CTA video — a separate layered element. None => skipped.
+        self.cta_video_path = Path(cta_video_path) if cta_video_path else None
         self.work_dir = Path(work_dir)
         self.output_dir = Path(output_dir)
         self.work_dir.mkdir(parents=True, exist_ok=True)
@@ -376,10 +493,14 @@ class VideoGenerator:
         logger.info("Using FFmpeg binary: %s", self.ffmpeg)
 
         self._bg_index, self._bg_names = self._build_bg_index(Path(bg_dir))
-        self._fonts: dict[int, ImageFont.FreeTypeFont] = {}
+        # Fonts are cached by (file path, named variation, size). The uploaded
+        # custom font and the resolved system font back the FONT_CUSTOM /
+        # FONT_SYSTEM choices; FONT_LIBRARY names resolve to ./fonts files.
+        self._fonts: dict[tuple, ImageFont.FreeTypeFont] = {}
         self._font_lock = threading.Lock()
-        self._font_path = config.font_path or find_default_font()
-        if self._font_path is None:
+        self._custom_font = config.font_path
+        self._system_font = find_default_font()
+        if self._system_font is None:
             logger.warning("No TrueType font found; falling back to PIL default font")
 
         # One CTA image is shared by every row, but rows may override its box
@@ -388,8 +509,10 @@ class VideoGenerator:
         self._cta_cache: dict[tuple[int, int], Image.Image] = {}
         self._cta_lock = threading.Lock()
 
+        # First frame of each video, by path (promo + optional CTA video), for
+        # the static preview / editor stand-in.
         self._preview_frame_lock = threading.Lock()
-        self._preview_frame: Optional[Image.Image] = None
+        self._video_frames: dict[str, Image.Image] = {}
 
     # ------------------------------------------------------------- background lookup
 
@@ -470,16 +593,67 @@ class VideoGenerator:
 
     # ------------------------------------------------------------- PIL layers
 
-    def _get_font(self, size: int) -> ImageFont.ImageFont:
+    def _resolve_font(self, choice: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+        """Map a font choice to (file path, named variation). A FONT_LIBRARY
+        name/alias -> its bundled file; FONT_CUSTOM -> the uploaded font;
+        FONT_SYSTEM/blank/unknown -> the system font (path may be None, meaning
+        PIL's built-in default)."""
+        key = _FONT_ALIASES.get(_font_norm(choice or ""), choice)
+        if key in FONT_LIBRARY:
+            filename, variation = FONT_LIBRARY[key]
+            path = FONTS_DIR / filename
+            if path.is_file():
+                return str(path), variation
+            # bundled file missing (fonts not fetched) — fall back gracefully
+            return self._system_font, None
+        if key == FONT_CUSTOM:
+            return (self._custom_font or self._system_font), None
+        return self._system_font, None
+
+    def _get_font(self, path: Optional[str], variation: Optional[str],
+                  size: int) -> ImageFont.ImageFont:
+        cache_key = (path, variation, size)
         with self._font_lock:
-            font = self._fonts.get(size)
+            font = self._fonts.get(cache_key)
             if font is None:
-                if self._font_path:
-                    font = ImageFont.truetype(self._font_path, size)
+                if path:
+                    font = ImageFont.truetype(path, size)
+                    if variation:
+                        try:
+                            font.set_variation_by_name(variation)
+                        except Exception:  # noqa: BLE001 — not all fonts are variable
+                            pass
                 else:
                     font = ImageFont.load_default(size=size)
-                self._fonts[size] = font
+                self._fonts[cache_key] = font
             return font
+
+    def _font_for(self, element: TextSpec) -> ImageFont.ImageFont:
+        """The FreeType font for a text element at its (resolved) size, honoring
+        its *_Font choice and falling back to the configured default font."""
+        path, variation = self._resolve_font(element.font or self.config.default_font)
+        return self._get_font(path, variation, element.size)
+
+    @staticmethod
+    def _contrast(color: tuple) -> tuple:
+        """Black on light text, white on dark text — used for outline strokes."""
+        r, g, b = color[:3]
+        return (0, 0, 0, 255) if (0.299 * r + 0.587 * g + 0.114 * b) > 140 else (255, 255, 255, 255)
+
+    @staticmethod
+    def _style_metrics(element: TextSpec) -> tuple[int, int, int, int, int, int]:
+        """Pixel sizes for an element's artistic style, derived from its font
+        size: (outline stroke, shadow offset, shadow blur, neon glow blur,
+        background padding, total tile padding). Zero where a feature is off."""
+        s = max(1, int(element.size or 1))
+        style = element.style or "classic"
+        stroke = max(2, round(s / 12)) if style == "outline" else 0
+        sh_off = max(2, round(s / 16)) if style == "shadow" else 0
+        sh_blur = max(2, round(s / 18)) if style == "shadow" else 0
+        glow = max(4, round(s / 6)) if style == "neon" else 0
+        bg_pad = max(6, round(s * 0.30)) if element.bg_color else 0
+        pad = stroke + sh_off + sh_blur * 3 + glow * 3 + bg_pad + 8
+        return stroke, sh_off, sh_blur, glow, bg_pad, pad
 
     def _get_cta(self, w: int, h: int) -> Image.Image:
         with self._cta_lock:
@@ -510,10 +684,10 @@ class VideoGenerator:
             return
         max_w = CANVAS_W - 2 * PLACEMENT_MARGIN
 
-        font = self._get_font(element.size)
+        font = self._font_for(element)
         while element.size > 18 and max(font.getlength(w) for w in words) > max_w:
             element.size -= 2
-            font = self._get_font(element.size)
+            font = self._font_for(element)
 
         if element.role == "Footer":
             lines = _balanced_lines(words, min(3, len(words)), font.getlength)
@@ -531,7 +705,7 @@ class VideoGenerator:
         """Rendered width/height of a text block at its font size."""
         draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
         bbox = draw.multiline_textbbox(
-            (0, 0), element.text, font=self._get_font(element.size),
+            (0, 0), element.text, font=self._font_for(element),
             anchor="mm", align="center",
         )
         return bbox[2] - bbox[0], bbox[3] - bbox[1]
@@ -607,13 +781,44 @@ class VideoGenerator:
             spec.cta_x = cfg.cta_x
         if spec.cta_y is None:
             spec.cta_y = cfg.cta_y
+        if spec.cta_fade_start is None:
+            spec.cta_fade_start = cfg.cta_fade_start
+        if spec.cta_fade_duration is None:
+            spec.cta_fade_duration = cfg.cta_fade_duration
         cta_rect = (spec.cta_x, spec.cta_y,
                     spec.cta_x + spec.cta_w, spec.cta_y + spec.cta_h)
+
+        # CTA video box (resolved unconditionally so the FFmpeg command / preview
+        # always have concrete numbers; only treated as a no-go zone for text
+        # auto-placement when a CTA video is actually supplied).
+        spec.cta_video_w = box_dim(spec.cta_video_w, cfg.cta_video_w, CANVAS_W, "CTA_Video_Width")
+        spec.cta_video_h = box_dim(spec.cta_video_h, cfg.cta_video_h, CANVAS_H, "CTA_Video_Height")
+        if spec.cta_video_x is None:
+            spec.cta_video_x = cfg.cta_video_x
+        if spec.cta_video_y is None:
+            spec.cta_video_y = cfg.cta_video_y
+        if spec.cta_video_fade_start is None:
+            spec.cta_video_fade_start = cfg.cta_video_fade_start
+        if spec.cta_video_fade_duration is None:
+            spec.cta_video_fade_duration = cfg.cta_video_fade_duration
+        cta_video_rect = (spec.cta_video_x, spec.cta_video_y,
+                          spec.cta_video_x + spec.cta_video_w,
+                          spec.cta_video_y + spec.cta_video_h)
 
         color_deck = list(RANDOM_TEXT_COLORS)
         for element in spec.text_elements:
             if not element.text:
                 continue
+            # Resolve font + artistic style defaults before sizing/wrapping,
+            # since the font affects text width and the style affects padding.
+            if element.font is None:
+                element.font = cfg.default_font
+            if not element.style:
+                element.style = cfg.default_style
+            if element.style not in TEXT_STYLES:
+                spec.warnings.append(
+                    f"{element.role}_Style: unknown style '{element.style}', using 'classic'")
+                element.style = "classic"
             if element.size is None:
                 lo, hi = RANDOM_SIZE_RANGES[element.role]
                 element.size = rng.randint(lo, hi)
@@ -659,6 +864,8 @@ class VideoGenerator:
         video_rect = (spec.video_x, spec.video_y,
                       spec.video_x + spec.video_w, spec.video_y + spec.video_h)
         occupied = [video_rect, cta_rect] + explicit_rects
+        if self.cta_video_path is not None:
+            occupied.append(cta_video_rect)
         for element, w, h in pending:
             x, y, clean = self._find_spot(element.x, element.y, w, h, occupied, rng)
             element.x, element.y = x, y
@@ -669,28 +876,90 @@ class VideoGenerator:
                 )
             occupied.append(_rect_from_center(x, y, w, h))
 
+    def _paint_text(self, target: Image.Image, ax: float, ay: float, element: TextSpec,
+                    what: str = "full", fill: Optional[tuple] = None) -> None:
+        """Draw one text element onto `target` (any RGBA image) with its block
+        center at (ax, ay). Single source of truth for both the overlay render
+        and the editor payload:
+
+          what='full'       background box + artistic decoration + colored fill
+          what='decoration' artistic decoration only (shadow/glow/outline ring),
+                            no bg box, no fill — baked behind the editor's
+                            recolorable glyph layer (the bg box is drawn live in
+                            CSS, so it is intentionally excluded here)
+          what='ink'        the fill glyphs only, in `fill` (white for the
+                            editor's recolorable mask)
+
+        Shadow/glow use temporary layers the same size as `target`, so this
+        works equally on a full canvas (overlay) or a small tile (editor)."""
+        font = self._font_for(element)
+        style = element.style or "classic"
+        stroke, sh_off, sh_blur, glow, _bg_pad, _pad = self._style_metrics(element)
+        draw = ImageDraw.Draw(target)
+        common = dict(font=font, anchor="mm", align="center")
+
+        if what == "full" and element.bg_color:
+            l, t, r, b = draw.multiline_textbbox((ax, ay), element.text,
+                                                 stroke_width=stroke, **common)
+            pad = max(6, round(element.size * 0.30))
+            radius = round((b - t + 2 * pad) * 0.30)
+            draw.rounded_rectangle((l - pad, t - pad, r + pad, b + pad),
+                                   radius=radius, fill=element.bg_color)
+
+        if what in ("full", "decoration"):
+            if sh_off:
+                sh = Image.new("RGBA", target.size, (0, 0, 0, 0))
+                ImageDraw.Draw(sh).multiline_text((ax + sh_off, ay + sh_off), element.text,
+                                                  fill=(0, 0, 0, 170), **common)
+                if sh_blur:
+                    sh = sh.filter(ImageFilter.GaussianBlur(sh_blur))
+                target.alpha_composite(sh)
+            if glow:
+                gl = Image.new("RGBA", target.size, (0, 0, 0, 0))
+                ImageDraw.Draw(gl).multiline_text((ax, ay), element.text,
+                                                  fill=(*element.color[:3], 255), **common)
+                gl = gl.filter(ImageFilter.GaussianBlur(glow))
+                target.alpha_composite(gl)
+                target.alpha_composite(gl)  # double up for a brighter halo
+            if what == "decoration" and stroke:
+                # Outline ring only (transparent glyph body); the fill is the
+                # editor's separate recolorable ink layer.
+                draw.multiline_text((ax, ay), element.text, fill=(0, 0, 0, 0),
+                                    stroke_width=stroke, stroke_fill=self._contrast(element.color),
+                                    **common)
+
+        if what in ("full", "ink"):
+            fillc = fill if fill is not None else element.color
+            if what == "full" and stroke:
+                draw.multiline_text((ax, ay), element.text, fill=fillc,
+                                    stroke_width=stroke, stroke_fill=self._contrast(element.color),
+                                    **common)
+            else:
+                draw.multiline_text((ax, ay), element.text, fill=fillc, **common)
+
     def build_overlay_image(self, spec: RowSpec, include_cta: bool = True) -> Image.Image:
-        """Text layer: transparent canvas with the three texts — plus the CTA
-        image for static composites (previews). The video render passes
-        include_cta=False because the CTA is a separate FFmpeg input there,
-        faded in over CTA_FADE_START..+DURATION (z-order preserved: the CTA
-        still ends up above the texts).
-        Text X/Y are interpreted as the CENTER of the text block (anchor='mm');
-        blank coordinates are auto-placed (see _resolve_positions)."""
+        """Text layer: transparent canvas with the three styled texts — plus the
+        CTA video's first frame and the CTA image for static composites
+        (previews). The video render passes include_cta=False because the CTA
+        image and CTA video are separate FFmpeg inputs there, faded in (z-order
+        preserved: CTA video over texts, CTA image on top).
+        Each text is painted onto its own full-canvas layer and alpha-composited
+        so styles (glow/shadow/outline/bg box) blend correctly even when texts
+        overlap or run off-canvas. Text X/Y are the CENTER of the block."""
         self._resolve_positions(spec)
         canvas = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(canvas)
         for element in spec.text_elements:
-            if element.text:
-                draw.text(
-                    (element.x, element.y),
-                    element.text,
-                    font=self._get_font(element.size),
-                    fill=element.color,
-                    anchor="mm",
-                    align="center",
-                )
+            if not element.text:
+                continue
+            layer = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
+            self._paint_text(layer, element.x, element.y, element, "full")
+            canvas = Image.alpha_composite(canvas, layer)
         if include_cta:
+            if self.cta_video_path is not None:
+                frame = self._fit_frame(spec.cta_video_w, spec.cta_video_h, self.cta_video_path)
+                fx = spec.cta_video_x + (spec.cta_video_w - frame.width) // 2
+                fy = spec.cta_video_y + (spec.cta_video_h - frame.height) // 2
+                canvas.paste(frame.convert("RGBA"), (fx, fy))
             cta = self._get_cta(spec.cta_w, spec.cta_h)
             canvas.paste(cta, (spec.cta_x, spec.cta_y), cta)
         return canvas
@@ -719,15 +988,21 @@ class VideoGenerator:
           [bgvid][2:v]overlay=0:0
               Stamp the full-canvas text layer on top.
 
-          [3:v]format=rgba,fade=t=in:st=1:d=0.5:alpha=1
+          [4:v]scale=...,format=rgba,fade=t=in:st=CVS:d=CVD:alpha=1   (optional)
+              The CTA *video* (input 4, present only when one was uploaded):
+              scaled to fit its box, alpha-faded in, then overlaid centered in
+              its box ABOVE the texts. Looped with -stream_loop -1 so it fills
+              the whole clip; -shortest at the muxer trims it.
+
+          [3:v]format=rgba,fade=t=in:st=CFS:d=CFD:alpha=1
               The CTA image as its own stream: force an alpha-capable format,
               then fade ONLY the alpha channel — fully transparent until
-              CTA_FADE_START, fully visible CTA_FADE_DURATION later.
+              cta_fade_start, fully visible cta_fade_duration later.
 
-          [txt][cta]overlay=CTA_X:CTA_Y,format=yuv420p
-              Place the fading CTA at its box (above the texts, matching the
-              static preview's z-order), then convert to yuv420p — required
-              for maximum player/social-platform compatibility.
+          [...][cta]overlay=CTA_X:CTA_Y,format=yuv420p
+              Place the fading CTA image at its box (on top, matching the static
+              preview's z-order), then convert to yuv420p — required for maximum
+              player/social-platform compatibility.
 
         Inputs use -loop 1 -framerate 30 so the still images behave as 30fps
         streams aligned with the output rate. -shortest at the muxer trims audio
@@ -738,28 +1013,49 @@ class VideoGenerator:
         # spec.video_* are the per-row resolved box (Excel Video_* overrides,
         # the configured values, or a randomized spot when randomize_video_pos
         # is enabled).
-        filter_complex = (
+        parts = [
             f"[1:v]scale={spec.video_w}:{spec.video_h}"
-            f":force_original_aspect_ratio=decrease:force_divisible_by=2[vid];"
+            f":force_original_aspect_ratio=decrease:force_divisible_by=2[vid];",
             f"[0:v][vid]overlay="
             f"x='{spec.video_x}+({spec.video_w}-w)/2'"
-            f":y='{spec.video_y}+({spec.video_h}-h)/2':shortest=1[bgvid];"
-            f"[bgvid][2:v]overlay=0:0[txt];"
+            f":y='{spec.video_y}+({spec.video_h}-h)/2':shortest=1[bgvid];",
+            "[bgvid][2:v]overlay=0:0[txt];",
+        ]
+        last = "txt"
+        if self.cta_video_path is not None:
+            parts.append(
+                f"[4:v]scale={spec.cta_video_w}:{spec.cta_video_h}"
+                f":force_original_aspect_ratio=decrease:force_divisible_by=2,"
+                f"format=rgba,fade=t=in:st={spec.cta_video_fade_start}"
+                f":d={spec.cta_video_fade_duration}:alpha=1[ctav];"
+            )
+            parts.append(
+                f"[{last}][ctav]overlay="
+                f"x='{spec.cta_video_x}+({spec.cta_video_w}-w)/2'"
+                f":y='{spec.cta_video_y}+({spec.cta_video_h}-h)/2'[txtv];"
+            )
+            last = "txtv"
+        parts.append(
             f"[3:v]format=rgba,"
-            f"fade=t=in:st={CTA_FADE_START}:d={CTA_FADE_DURATION}:alpha=1[cta];"
-            f"[txt][cta]overlay={spec.cta_x}:{spec.cta_y},format=yuv420p[out]"
+            f"fade=t=in:st={spec.cta_fade_start}:d={spec.cta_fade_duration}:alpha=1[cta];"
         )
+        parts.append(f"[{last}][cta]overlay={spec.cta_x}:{spec.cta_y},format=yuv420p[out]")
+        filter_complex = "".join(parts)
+
         cmd = [
             self.ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
             "-loop", "1", "-framerate", str(FPS), "-i", str(base_png),
             "-i", str(self.video_path),
             "-loop", "1", "-framerate", str(FPS), "-i", str(overlay_png),
             "-loop", "1", "-framerate", str(FPS), "-i", str(cta_png),
-            "-filter_complex", filter_complex,
-            "-map", "[out]",
         ]
+        if self.cta_video_path is not None:
+            # -stream_loop -1 repeats the CTA video to cover the whole clip.
+            cmd += ["-stream_loop", "-1", "-i", str(self.cta_video_path)]
+        cmd += ["-filter_complex", filter_complex, "-map", "[out]"]
         if cfg.include_audio:
-            # '1:a?' = take audio from the video if it exists; never fail without it.
+            # '1:a?' = take audio from the promo video if it exists; never fail
+            # without it. The CTA video's audio is intentionally ignored.
             cmd += ["-map", "1:a?", "-c:a", "aac", "-b:a", cfg.audio_bitrate]
         else:
             cmd += ["-an"]
@@ -819,29 +1115,35 @@ class VideoGenerator:
 
     # ------------------------------------------------------------- preview
 
-    def _first_video_frame(self) -> Image.Image:
-        """Extract (and cache) the uploaded video's first frame for previews."""
+    def _first_video_frame(self, path: Optional[Path] = None) -> Image.Image:
+        """Extract (and cache, per path) a video's first frame for previews.
+        Defaults to the promo video."""
+        path = Path(path) if path else self.video_path
+        key = str(path)
         with self._preview_frame_lock:
-            if self._preview_frame is None:
-                frame_png = self.work_dir / "preview_frame.png"
+            frame = self._video_frames.get(key)
+            if frame is None:
+                frame_png = self.work_dir / f"preview_frame_{abs(hash(key)):x}.png"
                 cmd = [
                     self.ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
-                    "-i", str(self.video_path),
+                    "-i", str(path),
                     "-frames:v", "1", "-update", "1", str(frame_png),
                 ]
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
                 if proc.returncode != 0 or not frame_png.is_file():
                     raise RuntimeError(f"Could not extract preview frame:\n{proc.stderr[-2000:]}")
                 with Image.open(frame_png) as img:
-                    self._preview_frame = img.convert("RGB").copy()
+                    frame = img.convert("RGB").copy()
                 frame_png.unlink(missing_ok=True)
-            return self._preview_frame
+                self._video_frames[key] = frame
+            return frame
 
-    def _fit_frame(self, box_w: int, box_h: int) -> Image.Image:
-        """Scale the preview frame into a box exactly like FFmpeg's
+    def _fit_frame(self, box_w: int, box_h: int, path: Optional[Path] = None) -> Image.Image:
+        """Scale a video's first frame into a box exactly like FFmpeg's
         scale=W:H:force_original_aspect_ratio=decrease — including upscaling
-        small sources (Image.thumbnail only ever shrinks)."""
-        frame = self._first_video_frame()
+        small sources (Image.thumbnail only ever shrinks). Defaults to the
+        promo video; pass `path` for the CTA video."""
+        frame = self._first_video_frame(path)
         ratio = min(box_w / frame.width, box_h / frame.height)
         size = (max(2, round(frame.width * ratio)), max(2, round(frame.height * ratio)))
         return frame.resize(size, Image.LANCZOS)
@@ -863,9 +1165,13 @@ class VideoGenerator:
     def build_editor_payload(self, row: pd.Series) -> dict:
         """Everything the interactive preview editor needs, with each layer
         shipped separately so the browser can move/recolor elements without a
-        server round-trip: the background, the video's first frame scaled into
-        its box, the CTA, and one white alpha-mask PNG per text (recolored
-        client-side via CSS mask-image, preserving PIL's exact glyphs).
+        server round-trip: the background, the promo video's first frame scaled
+        into its box, the optional CTA video's first frame, the CTA image, and
+        per text — a white alpha-mask PNG of the fill glyphs (recolored
+        client-side via CSS mask-image) plus a baked 'decoration' PNG carrying
+        the artistic style (outline/shadow/neon) behind it. The text's
+        background highlight box is described geometrically (bg_w/bg_h/bg_radius)
+        so the editor can draw and recolor it live in CSS.
 
         Texts carry their CENTER point (the Excel convention for *_X/*_Y);
         the video and CTA boxes carry their top-left corner."""
@@ -875,25 +1181,43 @@ class VideoGenerator:
         frame = self._fit_frame(spec.video_w, spec.video_h)
 
         texts = []
+        measure = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
         for element in spec.text_elements:
             if not element.text:
                 continue
-            w, h = self._measure_text(element)
-            iw, ih = int(w) + 6, int(h) + 6  # small pad so antialiasing isn't clipped
-            mask = Image.new("RGBA", (iw, ih), (0, 0, 0, 0))
-            ImageDraw.Draw(mask).text(
-                (iw / 2, ih / 2), element.text, font=self._get_font(element.size),
-                fill=(255, 255, 255, 255), anchor="mm", align="center",
+            font = self._font_for(element)
+            stroke, _sh_off, _sh_blur, _glow, _bg_pad, pad = self._style_metrics(element)
+            l, t, r, b = measure.multiline_textbbox(
+                (0, 0), element.text, font=font, anchor="mm", align="center",
+                stroke_width=stroke,
             )
+            iw, ih = int(round(r - l)) + 2 * pad, int(round(b - t)) + 2 * pad
+            ax, ay = iw / 2 - (l + r) / 2, ih / 2 - (t + b) / 2
+
+            ink = Image.new("RGBA", (iw, ih), (0, 0, 0, 0))
+            self._paint_text(ink, ax, ay, element, "ink", fill=(255, 255, 255, 255))
+            deco = Image.new("RGBA", (iw, ih), (0, 0, 0, 0))
+            self._paint_text(deco, ax, ay, element, "decoration")
+
+            # Background highlight box geometry (canvas px), matching _paint_text's
+            # 'full' box, so the editor draws/recolors it live in CSS.
+            bgp = max(6, round(element.size * 0.30))
+            bg_w, bg_h = int(round(r - l)) + 2 * bgp, int(round(b - t)) + 2 * bgp
+
             texts.append({
                 "role": element.role,
                 "cx": element.x, "cy": element.y, "w": iw, "h": ih,
                 "size": element.size,
                 "color": "#%02X%02X%02X" % element.color[:3],
-                "mask": _img_to_data_uri(mask),
+                "font": element.font,
+                "style": element.style,
+                "bg": ("#%02X%02X%02X" % element.bg_color[:3]) if element.bg_color else None,
+                "bg_w": bg_w, "bg_h": bg_h, "bg_radius": round(bg_h * 0.30),
+                "mask": _img_to_data_uri(ink),
+                "deco": _img_to_data_uri(deco),
             })
 
-        return {
+        payload = {
             "canvas_w": CANVAS_W,
             "canvas_h": CANVAS_H,
             "bg": _img_to_data_uri(self.build_base_image(spec), "JPEG"),
@@ -909,3 +1233,12 @@ class VideoGenerator:
             },
             "texts": texts,
         }
+        if self.cta_video_path is not None:
+            cv = self._fit_frame(spec.cta_video_w, spec.cta_video_h, self.cta_video_path)
+            payload["cta_video"] = {
+                "x": spec.cta_video_x, "y": spec.cta_video_y,
+                "w": spec.cta_video_w, "h": spec.cta_video_h,
+                "frame": _img_to_data_uri(cv.convert("RGB"), "JPEG"),
+                "frame_w": cv.width, "frame_h": cv.height,
+            }
+        return payload

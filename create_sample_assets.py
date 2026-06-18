@@ -7,6 +7,7 @@ Produces in ./sample_assets:
     backgrounds.zip  — two gradient background images (1080x1920)
     promo.mp4        — 5-second 16:9 test video with a tone (FFmpeg testsrc)
     cta.png          — a "SHOP NOW" call-to-action button with transparency
+    cta_video.mp4    — a short looping clip to try as the optional CTA video
 
 Usage:  python create_sample_assets.py
 """
@@ -57,6 +58,18 @@ def make_video(path: Path) -> None:
     subprocess.run(cmd, check=True)
 
 
+def make_cta_video(path: Path) -> None:
+    """A short, square, silent clip to drop into the optional CTA-video slot."""
+    ffmpeg = find_ffmpeg()
+    cmd = [
+        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", "testsrc2=size=600x600:rate=30:duration=3",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an",
+        str(path),
+    ]
+    subprocess.run(cmd, check=True)
+
+
 def main() -> None:
     bg1 = OUT / "bg_blue.png"
     bg2 = OUT / "bg_sunset.png"
@@ -71,18 +84,26 @@ def main() -> None:
 
     make_cta(OUT / "cta.png")
     make_video(OUT / "promo.mp4")
+    make_cta_video(OUT / "cta_video.mp4")
 
     rows = [
         {
             # Explicit per-row video box (smaller, pushed down) and a CTA
-            # moved to the bottom-left instead of the default spot.
+            # moved to the bottom-left instead of the default spot. Showcases an
+            # outlined headline on a highlight box, a drop-shadow subheading, and
+            # the optional CTA video placed bottom-right with a custom fade.
             "BG_Image": "bg_blue.png",
             "Video_X": 140, "Video_Y": 420, "Video_Width": 800, "Video_Height": 800,
             "CTA_X": 60, "CTA_Y": 1680, "CTA_Width": None, "CTA_Height": None,
+            "CTA_Video_X": 720, "CTA_Video_Y": 1560, "CTA_Video_Width": 300,
+            "CTA_Video_Height": 300, "CTA_Video_Fade_Start": 1.0, "CTA_Video_Fade_Duration": 0.8,
             "Headline": "Summer Mega Sale", "Headline_Size": 72,
-            "Headline_Color": "#FFD700", "Headline_X": 540, "Headline_Y": 160,
+            "Headline_Color": "#FFFFFF", "Headline_X": 540, "Headline_Y": 160,
+            "Headline_Font": "Impact (Bebas Neue)", "Headline_BgColor": "#FF2D55",
+            "Headline_Style": "outline",
             "Subheading": "Up to 50% off everything", "Subheading_Size": 44,
-            "Subheading_Color": "#FFFFFF", "Subheading_X": 540, "Subheading_Y": 245,
+            "Subheading_Color": "#FFD700", "Subheading_X": 540, "Subheading_Y": 245,
+            "Subheading_Style": "shadow",
             "Footer": "Offer ends June 30", "Footer_Size": 32,
             "Footer_Color": "#CCCCCC", "Footer_X": 540, "Footer_Y": 1850,
         },
@@ -100,10 +121,12 @@ def main() -> None:
         {
             "BG_Image": "BG_SUNSET.png",  # case-insensitive lookup demo
             # Size-only overrides: positions stay at the sidebar defaults.
+            # Neon headline in a script font; the others left to auto-styling.
             "Video_X": None, "Video_Y": None, "Video_Width": 700, "Video_Height": 700,
             "CTA_X": None, "CTA_Y": None, "CTA_Width": 320, "CTA_Height": 128,
             "Headline": "New Arrivals", "Headline_Size": 80,
-            "Headline_Color": "white", "Headline_X": 540, "Headline_Y": 180,
+            "Headline_Color": "#00F5D4", "Headline_X": 540, "Headline_Y": 180,
+            "Headline_Font": "Script (Pacifico)", "Headline_Style": "neon",
             "Subheading": "Fresh styles every week", "Subheading_Size": 40,
             "Subheading_Color": "lightyellow", "Subheading_X": 540, "Subheading_Y": 270,
             "Footer": "www.example.com", "Footer_Size": 30,
@@ -144,11 +167,13 @@ def main() -> None:
     df.to_excel(OUT / "data.xlsx", index=False)
 
     # Fully-automatic variant: only the text columns remain. Backgrounds are
-    # randomly assigned from the ZIP; sizes, colors, and positions are all
-    # randomized per row; the video and CTA boxes use the sidebar settings.
+    # randomly assigned from the ZIP; sizes, colors, positions, fonts, and
+    # styles are all chosen automatically; the video and CTA boxes use the
+    # sidebar settings.
     auto = df.drop(columns=["BG_Image"] + [
         c for c in df.columns
-        if c.startswith(("Video_", "CTA_")) or c.endswith(("_X", "_Y", "_Size", "_Color"))
+        if c.startswith(("Video_", "CTA_"))
+        or c.endswith(("_X", "_Y", "_Size", "_Color", "_Font", "_BgColor", "_Style"))
     ])
     auto.to_excel(OUT / "data_auto.xlsx", index=False)
 

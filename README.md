@@ -9,9 +9,13 @@ Each output video is composed of:
 2. Your **promo video** (one MP4, reused in every output) scaled into a configurable box —
    aspect ratio preserved, the background shows through any leftover area. The box's
    size and position can be set **per row** via the `Video_*` Excel columns
-3. **Headline / Subheading / Footer** text with per-row size, color, and position
+3. **Headline / Subheading / Footer** text with per-row size, color, and position — plus a
+   choice of **bundled fonts**, an optional **background highlight box**, and **artistic
+   styles** (outline, drop shadow, neon glow) à la TikTok
 4. A **CTA image** (PNG with transparency supported) at a configurable position and size,
-   overridable **per row** via the `CTA_*` Excel columns
+   overridable **per row** via the `CTA_*` Excel columns, with a **configurable fade-in**
+5. An optional **CTA video** — a separate clip layered alongside the CTA image, in its own
+   box, looped to fill the clip, with its own **configurable fade-in**
 
 Output: H.264 MP4, 30 fps, `yuv420p`, AAC audio, `+faststart` — upload-ready for social platforms.
 
@@ -29,7 +33,11 @@ python -m venv .venv
 # 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Run the app
+# 3. Download the bundled font library into ./fonts (the .ttf files are also
+#    committed, so this is only needed to refresh them)
+python fetch_fonts.py
+
+# 4. Run the app
 streamlit run app.py
 ```
 
@@ -42,10 +50,11 @@ python create_sample_assets.py
 ```
 
 This creates a `sample_assets/` folder with a demo `data.xlsx`, `backgrounds.zip`,
-`promo.mp4`, and `cta.png` you can upload straight into the app. (Row 2 intentionally
-references a missing background to demonstrate per-row error handling.) There is also
-`data_auto.xlsx` — just the three text columns, nothing else — to try the fully
-automatic mode: random backgrounds, sizes, colors, and positions.
+`promo.mp4`, `cta.png`, and `cta_video.mp4` you can upload straight into the app. (Row 2
+intentionally references a missing background to demonstrate per-row error handling; other
+rows show off custom fonts, background boxes, and the outline/shadow/neon styles.) There is
+also `data_auto.xlsx` — just the three text columns, nothing else — to try the fully
+automatic mode: random backgrounds, sizes, colors, positions, fonts, and styles.
 
 ## Excel format
 
@@ -60,12 +69,19 @@ rows alone determines how many videos are generated:
 | `Video_Width` / `Video_Height` | Size of the video box, per row — the video is scaled to fit inside it, aspect ratio preserved. **Blank/absent = the sidebar default** | `900` / `900` |
 | `CTA_X` / `CTA_Y` | **Top-left corner** of the CTA image, per row. **Blank/absent = the sidebar default** | `340` / `1600` |
 | `CTA_Width` / `CTA_Height` | Size the CTA image is resized to, per row. **Blank/absent = the sidebar default** | `400` / `160` |
+| `CTA_Fade_Start` / `CTA_Fade_Duration` | When the CTA image starts fading in and how long it takes, in **seconds**. **Blank/absent = the sidebar default** | `1.0` / `0.5` |
+| `CTA_Video_X` / `CTA_Video_Y` | **Top-left corner** of the optional CTA-video box, per row. **Blank/absent = the sidebar default** | `720` / `1560` |
+| `CTA_Video_Width` / `CTA_Video_Height` | Size of the CTA-video box (the video is fitted inside, aspect ratio preserved). **Blank/absent = the sidebar default** | `300` / `300` |
+| `CTA_Video_Fade_Start` / `CTA_Video_Fade_Duration` | Fade-in timing for the CTA video, in **seconds**. **Blank/absent = the sidebar default** | `1.0` / `0.8` |
 | `Headline` | Headline text (empty = skipped) | `Summer Mega Sale` |
 | `Headline_Size` | Font size in px. **Blank/absent = random** within a sensible range per element (headline 56–88, subheading 34–52, footer 24–36) | `72` |
 | `Headline_Color` | Hex (`#FFD700`), CSS color name (`yellow`, `blue`, `lightyellow`…), or `rgb(...)`. **Blank/absent = random** vivid palette color, never repeated within one video | `gold` |
 | `Headline_X` / `Headline_Y` | **Center point** of the text, in canvas pixels | `540` / `160` |
-| `Subheading`, `Subheading_Size`, `Subheading_Color`, `Subheading_X`, `Subheading_Y` | Same scheme | |
-| `Footer`, `Footer_Size`, `Footer_Color`, `Footer_X`, `Footer_Y` | Same scheme. The footer is always laid out on **3 balanced lines** (fewer if it has fewer words) | |
+| `Headline_Font` | Font family — a bundled name like `Impact`, `Heavy`, `Script`, `Marker`, `Elegant`, `Typewriter`, `Retro`, `Urban` (or the full `Impact (Bebas Neue)`), `System default`, or `Custom upload`. **Blank/absent = the sidebar default font** | `Impact` |
+| `Headline_BgColor` | Color of a **highlight box** drawn behind the text (same color formats as `_Color`). **Blank/absent = no box** | `#FF2D55` |
+| `Headline_Style` | Artistic treatment: `classic`, `outline`, `shadow`, or `neon`. **Blank/absent = the sidebar default style** | `outline` |
+| `Subheading`, `Subheading_*` | Same scheme (`_Size`, `_Color`, `_X`, `_Y`, `_Font`, `_BgColor`, `_Style`) | |
+| `Footer`, `Footer_*` | Same scheme. The footer is always laid out on **3 balanced lines** (fewer if it has fewer words) | |
 
 Notes:
 
@@ -93,8 +109,20 @@ Notes:
   shrinks the font until it fits. The auto-placer reserves space for the wrapped block.
 - **Not sure which numbers to use?** Preview a row and drag things around — the preview
   editor shows the exact column values and can save them back to the sheet for you.
-- **The CTA fades in**: it's invisible for the first second of every video, then fades
-  to fully visible at 1.5s (the preview shows its final, fully visible state).
+- **The CTA fades in**: by default it's invisible for the first second of every video, then
+  fades to fully visible at 1.5s (the preview shows its final, fully visible state). The
+  start and duration are configurable in the sidebar and per row (`CTA_Fade_*`).
+- **Fonts**: choose a bundled family in the sidebar or per text (`*_Font`). The library
+  ships TikTok-style faces — `Impact`, `Heavy`, `Clean`, `Elegant`, `Script`, `Marker`,
+  `Typewriter`, `Bold Script`, `Retro`, `Urban` — plus `System default` and your own
+  `Custom upload`. Run `python fetch_fonts.py` once to populate `./fonts`.
+- **Background box & artistic styles**: any text can sit on a colored highlight box
+  (`*_BgColor`) and use a `*_Style` of `outline` (contrasting border), `shadow` (drop
+  shadow), or `neon` (glow) — combine them freely. `classic` is plain text.
+- **CTA video (optional)**: upload one in the sidebar to layer a clip alongside the CTA
+  image, in its own box (`CTA_Video_*`), looped to fill the clip with its own fade-in. Its
+  audio is ignored (the promo video supplies the soundtrack). Leave it empty to skip it —
+  output is then identical to before.
 - Output files are named `001_Headline_Text.mp4` (row number + sanitized headline).
 
 ## Sidebar settings
@@ -103,22 +131,27 @@ Notes:
 |---|---|
 | Randomize position per video | Each video gets its own random spot per row (avoids the CTA and explicitly positioned texts; auto-placed texts then avoid the video). Seeded per row, so previews and re-runs are reproducible |
 | Video X/Y/W/H | Default box the promo video is fitted into (aspect ratio preserved, centered). X/Y are hidden when randomize is on. A row's `Video_X`/`Video_Y`/`Video_Width`/`Video_Height` cells override these per video |
-| CTA X/Y/W/H | Default position (top-left corner) and size of the CTA image. A row's `CTA_X`/`CTA_Y`/`CTA_Width`/`CTA_Height` cells override these per video |
+| CTA image X/Y/W/H | Default position (top-left corner) and size of the CTA image. A row's `CTA_X`/`CTA_Y`/`CTA_Width`/`CTA_Height` cells override these per video |
+| CTA fade-in start / duration | When the CTA image fades in and for how long (seconds). Overridable per row via `CTA_Fade_Start` / `CTA_Fade_Duration` |
+| CTA video + box + fade | Optional clip layered with the CTA image, its box (`CTA_Video_*`), and its fade-in. Leave the upload empty to skip the whole element |
+| Default font | The font used when a text's `*_Font` cell is blank — a bundled family, the system font, or your uploaded font |
+| Default artistic style | The style used when a text's `*_Style` cell is blank — `classic`, `outline`, `shadow`, or `neon` |
 | Quality (CRF) | 16 = near-lossless, 28 = small files. 18 is great for social media |
 | Encoder speed | x264 preset; `medium` balances speed and file size |
 | Parallel renders | Concurrent FFmpeg processes — raise on strong multi-core machines |
-| Custom font | Optional TTF/OTF used for all text (defaults to Arial / system font) |
+| Custom font | Optional TTF/OTF; pick **Custom upload** as the default font (or in a `*_Font` cell) to use it |
 
 ## Workflow
 
 1. Upload the four files. The Excel is validated immediately — missing columns are listed.
 2. Pick a row number and click **👁️ Preview Row** — an interactive preview opens.
-   **Drag** the video box, the CTA, or any text to reposition it (a dotted line shows
-   when an element is centered on the canvas, and it gently snaps there), **resize**
-   anything with its corner handle (texts resize their font size around their center),
-   and **recolor** texts with the color swatches. The side panel live-updates the
-   matching Excel values (`Video_X`, `Headline_Size`, `Headline_Color`, …) and
-   highlights what changed. Click **💾 Save to Excel** to apply the changes to that
+   **Drag** the video box, the CTA image, the CTA video box, or any text to reposition it
+   (a dotted line shows when an element is centered on the canvas, and it gently snaps
+   there), **resize** anything with its corner handle (texts resize their font size around
+   their center), **recolor** texts with the color swatches, and give any text a
+   **background box** with the bg swatch (“none” removes it). Texts render with their actual
+   font and artistic style; the side panel live-updates the matching Excel values (`Video_X`,
+   `Headline_Size`, `Headline_Color`, `Headline_BgColor`, …) and highlights what changed. Click **💾 Save to Excel** to apply the changes to that
    row in one go — they're used by subsequent previews and generation, and
    **⬇️ Download updated Excel** gives you the sheet with the edits written in
    (formatting preserved) so your file stays the source of truth. A copy button is
@@ -142,15 +175,19 @@ options (IAP tunnel or HTTPS + basic auth via Caddy), and cost controls.
 ## How rendering works (for developers)
 
 `video_generator.py` pre-renders the static layers with Pillow — `base.png` (cover-cropped
-background), `overlay.png` (transparent layer with texts), and `cta.png` (the resized CTA) —
-then FFmpeg composites everything in a single pass per row:
+background), `overlay.png` (transparent layer with the styled texts: each text painted on its
+own layer with its font, optional background box, and outline/shadow/neon decoration), and
+`cta.png` (the resized CTA image) — then FFmpeg composites everything in a single pass per row:
 
 ```
-[1:v]scale=W:H:force_original_aspect_ratio=decrease[vid]   # fit video in box, no distortion
+[1:v]scale=W:H:force_original_aspect_ratio=decrease[vid]   # fit promo video in box, no distortion
 [0:v][vid]overlay=x='X+(W-w)/2':y='Y+(H-h)/2':shortest=1   # center in box over background
 [bgvid][2:v]overlay=0:0[txt]                               # stamp text layer on top
-[3:v]format=rgba,fade=t=in:st=1:d=0.5:alpha=1[cta]         # CTA: alpha fade-in 1.0s -> 1.5s
-[txt][cta]overlay=CTA_X:CTA_Y,format=yuv420p               # place CTA above everything
+# optional CTA video (input 4, -stream_loop -1) — scaled, faded in, layered over the texts:
+[4:v]scale=...,format=rgba,fade=t=in:st=CVS:d=CVD:alpha=1[ctav]
+[txt][ctav]overlay=x='CVX+(CVW-w)/2':y='CVY+(CVH-h)/2'[txtv]
+[3:v]format=rgba,fade=t=in:st=CFS:d=CFD:alpha=1[cta]       # CTA image: configurable alpha fade-in
+[txtv][cta]overlay=CTA_X:CTA_Y,format=yuv420p              # place CTA image on top
 ```
 
 This is much faster than FFmpeg `drawtext` (text is rasterized once per row, not per frame)

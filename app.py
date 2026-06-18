@@ -26,7 +26,10 @@ from video_generator import (
     ALL_COLUMNS,
     CANVAS_H,
     CANVAS_W,
+    FONT_CHOICES,
+    FONT_CUSTOM,
     REQUIRED_COLUMNS,
+    TEXT_STYLES,
     RenderConfig,
     RowResult,
     VideoGenerator,
@@ -89,9 +92,11 @@ class Workspace:
     cta_path: Path
     font_path: Optional[Path]
     work_dir: Path
+    cta_video_path: Optional[Path] = None
 
 
-def build_workspace(tmp: Path, video_file, zip_file, cta_file, font_file) -> Workspace:
+def build_workspace(tmp: Path, video_file, zip_file, cta_file, font_file,
+                    cta_video_file=None) -> Workspace:
     """Write the in-memory uploads to disk where FFmpeg/PIL can read them."""
     video_path = tmp / "input.mp4"
     video_path.write_bytes(video_file.getvalue())
@@ -108,9 +113,14 @@ def build_workspace(tmp: Path, video_file, zip_file, cta_file, font_file) -> Wor
         font_path = tmp / f"custom_font{Path(font_file.name).suffix.lower()}"
         font_path.write_bytes(font_file.getvalue())
 
+    cta_video_path = None
+    if cta_video_file is not None:
+        cta_video_path = tmp / "cta_video.mp4"
+        cta_video_path.write_bytes(cta_video_file.getvalue())
+
     work_dir = tmp / "work"
     work_dir.mkdir(exist_ok=True)
-    return Workspace(bg_dir, video_path, cta_path, font_path, work_dir)
+    return Workspace(bg_dir, video_path, cta_path, font_path, work_dir, cta_video_path)
 
 
 def make_generator(ws: Workspace, config: RenderConfig, output_dir: Path) -> VideoGenerator:
@@ -122,6 +132,7 @@ def make_generator(ws: Workspace, config: RenderConfig, output_dir: Path) -> Vid
         cta_path=ws.cta_path,
         work_dir=ws.work_dir,
         output_dir=output_dir,
+        cta_video_path=ws.cta_video_path,
     )
 
 
@@ -321,7 +332,7 @@ with st.sidebar:
     video_w = st.number_input("Video width", 50, CANVAS_W, 900)
     video_h = st.number_input("Video height", 50, CANVAS_H, 900)
 
-    st.subheader("CTA placement")
+    st.subheader("CTA image placement")
     st.caption(
         "Defaults for every row — the Excel columns `CTA_X`, `CTA_Y`, "
         "`CTA_Width`, `CTA_Height` override them per video."
@@ -330,6 +341,54 @@ with st.sidebar:
     cta_y = st.number_input("CTA Y", 0, CANVAS_H, 1600)
     cta_w = st.number_input("CTA width", 10, CANVAS_W, 400)
     cta_h = st.number_input("CTA height", 10, CANVAS_H, 160)
+    cta_fade_start = st.number_input(
+        "CTA fade-in start (s)", 0.0, 30.0, 1.0, 0.1,
+        help="The CTA image is invisible until this time, then fades in. "
+             "Per-row override: `CTA_Fade_Start`.",
+    )
+    cta_fade_duration = st.number_input(
+        "CTA fade-in duration (s)", 0.0, 30.0, 0.5, 0.1,
+        help="How long the fade-in takes. Per-row override: `CTA_Fade_Duration`.",
+    )
+
+    st.subheader("CTA video (optional)")
+    st.caption(
+        "An optional video shown alongside the CTA image, in its own box, with "
+        "its own fade-in. Leave empty to skip it entirely."
+    )
+    cta_video_file = st.file_uploader(
+        "CTA video (MP4)", type=["mp4"],
+        help="Looped to fill the clip and faded in. Scaled to fit its box, "
+             "aspect ratio preserved.",
+    )
+    cta_video_x = st.number_input("CTA video X", 0, CANVAS_W, 360)
+    cta_video_y = st.number_input("CTA video Y", 0, CANVAS_H, 1200)
+    cta_video_w = st.number_input("CTA video width", 50, CANVAS_W, 360)
+    cta_video_h = st.number_input("CTA video height", 50, CANVAS_H, 360)
+    cta_video_fade_start = st.number_input(
+        "CTA video fade-in start (s)", 0.0, 30.0, 0.5, 0.1,
+        help="Per-row override: `CTA_Video_Fade_Start`.",
+    )
+    cta_video_fade_duration = st.number_input(
+        "CTA video fade-in duration (s)", 0.0, 30.0, 0.5, 0.1,
+        help="Per-row override: `CTA_Video_Fade_Duration`.",
+    )
+
+    st.subheader("Text style")
+    st.caption(
+        "Defaults for every text — per-row Excel columns `*_Font` and `*_Style` "
+        "override them, and `*_BgColor` adds a highlight box behind any text."
+    )
+    default_font = st.selectbox(
+        "Default font", FONT_CHOICES, index=0,
+        help="A bundled font family, the system font, or your uploaded font. "
+             "Override per text with `Headline_Font` etc.",
+    )
+    default_style = st.selectbox(
+        "Default artistic style", TEXT_STYLES, index=0,
+        help="classic = plain · outline = contrasting border · shadow = drop "
+             "shadow · neon = glow. Override per text with `Headline_Style` etc.",
+    )
 
     st.subheader("Output")
     crf = st.slider("Quality (CRF — lower = better/bigger)", 16, 28, 18)
@@ -345,7 +404,8 @@ with st.sidebar:
     )
     font_file = st.file_uploader(
         "Custom font (TTF/OTF, optional)", type=["ttf", "otf"],
-        help="Used for all text. Defaults to Arial/system font when empty.",
+        help=f"Upload your own font, then pick “{FONT_CUSTOM}” as the default "
+             "font above (or set a `*_Font` cell to it) to use it.",
     )
 
 config = RenderConfig(
@@ -353,6 +413,12 @@ config = RenderConfig(
     video_w=int(video_w), video_h=int(video_h),
     cta_x=int(cta_x), cta_y=int(cta_y),
     cta_w=int(cta_w), cta_h=int(cta_h),
+    cta_fade_start=float(cta_fade_start), cta_fade_duration=float(cta_fade_duration),
+    cta_video_x=int(cta_video_x), cta_video_y=int(cta_video_y),
+    cta_video_w=int(cta_video_w), cta_video_h=int(cta_video_h),
+    cta_video_fade_start=float(cta_video_fade_start),
+    cta_video_fade_duration=float(cta_video_fade_duration),
+    default_font=default_font, default_style=default_style,
     crf=int(crf), preset=preset,
     randomize_video_pos=randomize_video,
 )
@@ -435,7 +501,8 @@ if preview_clicked and ready:
     with st.spinner(f"Rendering preview of row {preview_row}…"):
         with tempfile.TemporaryDirectory(prefix="bvg_preview_") as tmp:
             try:
-                ws = build_workspace(Path(tmp), video_file, zip_file, cta_file, font_file)
+                ws = build_workspace(Path(tmp), video_file, zip_file, cta_file,
+                                     font_file, cta_video_file)
                 generator = make_generator(ws, config, Path(tmp) / "out")
                 # Same deterministic background assignment as the real batch,
                 # so the preview shows the row's actual background.
@@ -458,9 +525,9 @@ if preview_clicked and ready:
 if "preview_payload" in st.session_state and not generate_clicked:
     st.caption(
         f"Row {st.session_state.get('preview_row', 1)} preview (1080x1920) — drag the "
-        "video, CTA, or texts to move them, drag the corner handle to resize, and "
-        "recolor texts; click “Save to Excel” in the panel to apply the changed "
-        "values to that row for previews, generation, and the Excel download below."
+        "video, CTA, or texts to move them, drag the corner handle to resize, recolor "
+        "texts, and add a background box; click “Save to Excel” in the panel to apply the "
+        "changed values to that row for previews, generation, and the Excel download below."
     )
     saved = preview_editor(
         st.session_state["preview_payload"], st.session_state["preview_nonce"]
@@ -521,7 +588,8 @@ if generate_clicked and ready:
     # automatically when the batch finishes (success or failure).
     with tempfile.TemporaryDirectory(prefix="bvg_run_") as tmp:
         try:
-            ws = build_workspace(Path(tmp), video_file, zip_file, cta_file, font_file)
+            ws = build_workspace(Path(tmp), video_file, zip_file, cta_file,
+                                 font_file, cta_video_file)
             generator = make_generator(ws, config, run_dir / "videos")
             df_run, bg_warnings = generator.assign_backgrounds(df)
             for message in bg_warnings:
