@@ -400,6 +400,28 @@ with st.sidebar:
         for i in range(1, CTA_VIDEO_SLOTS + 1)
     ]
 
+    st.subheader("Layer order (z-index)")
+    st.caption(
+        "Which element sits on top when they overlap — higher number = nearer "
+        "the front. The background is always at the back. Applies to every video."
+    )
+    video_z = st.number_input(
+        "Promo video", 1, 99, 1, 1, key="z_video",
+        help="Stacking order of the promo video layer.",
+    )
+    cta_video_z = st.number_input(
+        "CTA video", 1, 99, 2, 1, key="z_cta_video",
+        help="Stacking order of the CTA video layer.",
+    )
+    cta_image_z = st.number_input(
+        "CTA image", 1, 99, 3, 1, key="z_cta_image",
+        help="Stacking order of the CTA image (button) layer.",
+    )
+    text_z = st.number_input(
+        "Texts", 1, 99, 4, 1, key="z_text",
+        help="Stacking order of the headline / subheading / footer texts.",
+    )
+
     st.subheader("Text style")
     st.caption(
         "Defaults for every text — per-row Excel columns `*_Font` and `*_Style` "
@@ -445,6 +467,8 @@ config = RenderConfig(
     cta_video_fade_start=float(cta_video_fade_start),
     cta_video_fade_duration=float(cta_video_fade_duration),
     cta_video_speeds=[float(s) for s in cta_video_speeds],
+    video_z=int(video_z), cta_video_z=int(cta_video_z),
+    cta_image_z=int(cta_image_z), text_z=int(text_z),
     default_font=default_font, default_style=default_style,
     crf=int(crf), preset=preset,
     randomize_video_pos=randomize_video,

@@ -122,7 +122,7 @@ _TEMPLATE = r"""
             background: #fff; border: 1px solid #333; border-radius: 3px;
             cursor: nwse-resize; opacity: 0; touch-action: none; }
   .el:hover .handle, .el.drag .handle { opacity: 1; }
-  .guide { position: absolute; pointer-events: none; display: none; z-index: 40; }
+  .guide { position: absolute; pointer-events: none; display: none; z-index: 1000; }
   #guideV { top: 0; bottom: 0; width: 0; border-left: 2px dotted #00e0ff; }
   #guideH { left: 0; right: 0; height: 0; border-top: 2px dotted #00e0ff; }
   #panel { flex: 1 1 280px; min-width: 260px; background: #262730; color: #fafafa;
@@ -193,6 +193,9 @@ _TEMPLATE = r"""
     const scale = __STAGE_W__ / DATA.canvas_w;
     const px = v => (v * scale) + 'px';
     const items = [];   // editable things, each exposing cols() -> [[column, was, now], ...]
+    // Sidebar layer order (z-index); the render stacks layers the same way.
+    // Default mirrors the engine if an older payload omits it.
+    const Z = DATA.z || { video: 1, cta_video: 2, cta_image: 3, text: 4 };
 
     stage.innerHTML = '';
     tbody.innerHTML = '';
@@ -320,6 +323,7 @@ _TEMPLATE = r"""
     frame.src = v.frame;
     frame.draggable = false;
     videoEl.appendChild(frame);
+    videoEl.style.zIndex = Z.video;
     stage.appendChild(videoEl);
     const videoItem = {
       x: v.x, y: v.y, w: v.w, h: v.h,
@@ -369,6 +373,7 @@ _TEMPLATE = r"""
     ctaImg.src = c.img;
     ctaImg.draggable = false;
     ctaEl.appendChild(ctaImg);
+    ctaEl.style.zIndex = Z.cta_image;
     stage.appendChild(ctaEl);
     const ctaItem = {
       x: c.x, y: c.y, w: c.w, h: c.h,
@@ -404,7 +409,11 @@ _TEMPLATE = r"""
     addHandle(ctaEl, ctaItem);
     items.push(ctaItem);
 
-    // --- CTA video box (optional; same behavior as the promo video box) ---
+    // --- CTA video box (optional; same behavior as the promo video box).
+    //     Each layer's CSS z-index (set from Z above) drives the stacking so the
+    //     editor matches the render; inserting before ctaEl only sets the DOM
+    //     order, which breaks ties when two layers share the same z-index
+    //     (priority promo < CTA video < CTA image < texts, as in the render). ---
     if (DATA.cta_video) {
       const cv = DATA.cta_video;
       const cvEl = document.createElement('div');
@@ -415,7 +424,8 @@ _TEMPLATE = r"""
       cvFrame.src = cv.frame;
       cvFrame.draggable = false;
       cvEl.appendChild(cvFrame);
-      stage.appendChild(cvEl);
+      cvEl.style.zIndex = Z.cta_video;
+      stage.insertBefore(cvEl, ctaEl);
       const cvItem = {
         x: cv.x, y: cv.y, w: cv.w, h: cv.h,
         center() { return { cx: this.x + this.w / 2, cy: this.y + this.h / 2 }; },
@@ -481,6 +491,7 @@ _TEMPLATE = r"""
       ink.style.webkitMaskImage = "url('" + t.mask + "')";
       ink.style.maskImage = "url('" + t.mask + "')";
       el.appendChild(ink);
+      el.style.zIndex = Z.text;
       stage.appendChild(el);
       const item = {
         x: t.cx, y: t.cy, s: 1, color: t.color, bg: t.bg || null,

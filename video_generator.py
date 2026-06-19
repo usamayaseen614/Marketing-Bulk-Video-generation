@@ -353,6 +353,13 @@ class RenderConfig:
     # whole row. Defaults to normal speed for every slot.
     cta_video_speeds: list[float] = field(
         default_factory=lambda: [1.0] * CTA_VIDEO_SLOTS)
+    # Layer order (z-index) for the four overlay layers; higher = nearer the top,
+    # the background is always the base. Equal values fall back to a fixed tie
+    # priority (promo < CTA video < CTA image < texts). Applies to every video.
+    video_z: int = 1
+    cta_video_z: int = 2
+    cta_image_z: int = 3
+    text_z: int = 4
     crf: int = 18                 # 16-28; lower = higher quality / bigger files
     preset: str = "medium"        # x264 speed/size tradeoff
     # When True, video_x/video_y are ignored and each row's video box gets a
@@ -1060,41 +1067,43 @@ class VideoGenerator:
         """
         Single-pass composite. Filter graph explained:
 
-          [1:v]scale=W:H:force_original_aspect_ratio=decrease
+          [1:v]scale=W:H:force_original_aspect_ratio=decrease,split[vidA][vidB]
               Scale the uploaded video to fit INSIDE the configured box while
               preserving its aspect ratio (never distorts; upscales small sources,
               downscales large ones). force_divisible_by=2 keeps yuv chroma happy.
+              `split` duplicates it: [vidA] anchors the render length, [vidB] is
+              the promo's visible layer (painted in z-order below).
 
-          [0:v][vid]overlay=x='X+(W-w)/2':y='Y+(H-h)/2':shortest=1
+          [0:v][vidA]overlay=x='X+(W-w)/2':y='Y+(H-h)/2':shortest=1[anchored]
               Place the scaled video centered within its box on the background.
               'w'/'h' are the scaled video's runtime dimensions, so any leftover
               box area becomes implicit padding where the background shows through
               (nicer than black bars). shortest=1 is critical: the looped base
-              image is an infinite stream, so the overlay must terminate when the
-              video input ends or the render would never finish.
+              image is an infinite stream, so this overlay must terminate when the
+              video ends or the render would never finish. The promo is re-painted
+              at the same box in z-order below, so this anchor paint is idempotent
+              and never disturbs the chosen layering.
 
-          [bgvid][2:v]overlay=0:0
-              Stamp the full-canvas text layer on top.
-
-          CTA videos (inputs 4..4+M-1, present only when uploaded)
+          CTA videos (inputs 4..4+M-1, present only when uploaded) -> [ctav]
               One sample is chosen per slot for this row (inputs are exactly those
               picks). Each is cover-filled to the CTA box (scale=increase + crop,
               so all share one size) and sped up/slowed by its own
               `setpts=PTS/SPEED`, then joined with `concat` in the fixed slot
-              order into one stream, alpha-faded in, and overlaid in the box ABOVE
-              the texts. They play
-              once through (the last frame holds if the promo outlasts them);
-              -shortest at the muxer trims any excess.
+              order into one stream and alpha-faded in. They play once through (the
+              last frame holds if the promo outlasts them); -shortest trims excess.
 
-          [3:v]format=rgba,fade=t=in:st=CFS:d=CFD:alpha=1
-              The CTA image as its own stream: force an alpha-capable format,
-              then fade ONLY the alpha channel — fully transparent until
-              cta_fade_start, fully visible cta_fade_duration later.
+          [3:v]format=rgba,fade=t=in:st=CFS:d=CFD:alpha=1 -> [cta]
+              The CTA image as its own stream: force an alpha-capable format, then
+              fade ONLY the alpha channel — fully transparent until cta_fade_start,
+              fully visible cta_fade_duration later.
 
-          [...][cta]overlay=CTA_X:CTA_Y,format=yuv420p
-              Place the fading CTA image at its box (on top, matching the static
-              preview's z-order), then convert to yuv420p — required for maximum
-              player/social-platform compatibility.
+          Z-order: the four overlay layers — promo video [vidB], CTA video [ctav],
+          CTA image [cta], texts [2:v] — are stacked onto [anchored] in ascending
+          order of their sidebar z-index (video_z / cta_video_z / cta_image_z /
+          text_z; higher = on top). The background is always the base. Equal
+          z-indexes fall back to a fixed priority (promo < CTA video < CTA image <
+          texts) so the order is deterministic. The topmost overlay also converts
+          to yuv420p — required for maximum player/social-platform compatibility.
 
         Inputs use -loop 1 -framerate 30 so the still images behave as 30fps
         streams aligned with the output rate. -shortest at the muxer trims audio
@@ -1104,18 +1113,20 @@ class VideoGenerator:
         cfg = self.config
         # spec.video_* are the per-row resolved box (Excel Video_* overrides,
         # the configured values, or a randomized spot when randomize_video_pos
-        # is enabled).
+        # is enabled). The promo video defines the render length: [vidA] anchors
+        # the otherwise-infinite looped background to the promo's duration, and
+        # [vidB] is the promo's visible layer painted in z-order below.
+        video_pos = (f"x='{spec.video_x}+({spec.video_w}-w)/2'"
+                     f":y='{spec.video_y}+({spec.video_h}-h)/2'")
         parts = [
             f"[1:v]scale={spec.video_w}:{spec.video_h}"
-            f":force_original_aspect_ratio=decrease:force_divisible_by=2[vid];",
-            f"[0:v][vid]overlay="
-            f"x='{spec.video_x}+({spec.video_w}-w)/2'"
-            f":y='{spec.video_y}+({spec.video_h}-h)/2':shortest=1[bgvid];",
-            "[bgvid][2:v]overlay=0:0[txt];",
+            f":force_original_aspect_ratio=decrease:force_divisible_by=2,"
+            f"split[vidA][vidB];",
+            f"[0:v][vidA]overlay={video_pos}:shortest=1[anchored];",
         ]
-        last = "txt"
         clips = spec.cta_video_clips or []
-        if self._has_cta_video and clips:
+        has_ctav = bool(self._has_cta_video and clips)
+        if has_ctav:
             n = len(clips)
             speeds = spec.cta_video_clip_speeds or [1.0] * n
             cw, ch = spec.cta_video_w, spec.cta_video_h
@@ -1141,13 +1152,32 @@ class VideoGenerator:
                 f"{seq}fade=t=in:st={spec.cta_video_fade_start}"
                 f":d={spec.cta_video_fade_duration}:alpha=1[ctav];"
             )
-            parts.append(f"[{last}][ctav]overlay={spec.cta_video_x}:{spec.cta_video_y}[txtv];")
-            last = "txtv"
         parts.append(
             f"[3:v]format=rgba,"
             f"fade=t=in:st={spec.cta_fade_start}:d={spec.cta_fade_duration}:alpha=1[cta];"
         )
-        parts.append(f"[{last}][cta]overlay={spec.cta_x}:{spec.cta_y},format=yuv420p[out]")
+        # Stack the overlay layers by their sidebar z-index (higher = on top; the
+        # background is always the base). Ties fall back to the fixed priority in
+        # the second tuple field so the order stays deterministic. Each tuple:
+        # (z-index, tie-break priority, overlay input, overlay position).
+        layers = [
+            (cfg.video_z, 0, "[vidB]", video_pos),
+            (cfg.cta_image_z, 2, "[cta]", f"{spec.cta_x}:{spec.cta_y}"),
+            (cfg.text_z, 3, "[2:v]", "0:0"),
+        ]
+        if has_ctav:
+            layers.append((cfg.cta_video_z, 1, "[ctav]",
+                           f"{spec.cta_video_x}:{spec.cta_video_y}"))
+        layers.sort(key=lambda layer: (layer[0], layer[1]))
+
+        last = "anchored"
+        for i, (_z, _prio, label, pos) in enumerate(layers):
+            top = i == len(layers) - 1
+            out = "out" if top else f"z{i}"
+            fmt = ",format=yuv420p" if top else ""
+            sep = "" if top else ";"  # the final [out] feeds -map, no trailing ;
+            parts.append(f"[{last}]{label}overlay={pos}{fmt}[{out}]{sep}")
+            last = out
         filter_complex = "".join(parts)
 
         cmd = [
@@ -1347,6 +1377,12 @@ class VideoGenerator:
                 "img": _img_to_data_uri(self._get_cta(spec.cta_w, spec.cta_h)),
             },
             "texts": texts,
+            # Sidebar layer order — the editor applies these as CSS z-index so the
+            # preview stacking matches the render (higher = on top).
+            "z": {
+                "video": self.config.video_z, "cta_video": self.config.cta_video_z,
+                "cta_image": self.config.cta_image_z, "text": self.config.text_z,
+            },
         }
         if self._has_cta_video:
             cv = self._cover_frame(spec.cta_video_w, spec.cta_video_h, self._lead_cta_path(spec))
