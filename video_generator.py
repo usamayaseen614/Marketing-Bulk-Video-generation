@@ -49,6 +49,15 @@ FPS = 30
 CTA_FADE_START = 1.0
 CTA_FADE_DURATION = 0.5
 
+# The CTA video is a sequence of fixed positions ("clips") that always play in
+# order 1..N. Each position is backed by a pool of sample videos; one sample is
+# chosen per output video (pinned by a CTA_Clip_<i> cell, else picked at random).
+CTA_VIDEO_SLOTS = 4
+CTA_CLIP_COLUMNS = [f"CTA_Clip_{i}" for i in range(1, CTA_VIDEO_SLOTS + 1)]
+# Per-clip playback-speed overrides, one column per slot. Blank falls back to
+# the row-wide CTA_Video_Speed cell, then to the sidebar's per-clip default.
+CTA_SPEED_COLUMNS = [f"CTA_Video_Speed_{i}" for i in range(1, CTA_VIDEO_SLOTS + 1)]
+
 # Every column is optional: absent/blank BG_Image cells get an image randomly
 # assigned from the uploaded ZIP (no repeats until the pool is exhausted),
 # absent Video_*/CTA_* cells fall back to the sidebar's boxes (or a randomized
@@ -62,7 +71,9 @@ OPTIONAL_COLUMNS = [
     "CTA_X", "CTA_Y", "CTA_Width", "CTA_Height",
     "CTA_Fade_Start", "CTA_Fade_Duration",
     "CTA_Video_X", "CTA_Video_Y", "CTA_Video_Width", "CTA_Video_Height",
-    "CTA_Video_Fade_Start", "CTA_Video_Fade_Duration",
+    "CTA_Video_Fade_Start", "CTA_Video_Fade_Duration", "CTA_Video_Speed",
+    *CTA_SPEED_COLUMNS,
+    *CTA_CLIP_COLUMNS,
     "Headline", "Headline_Size", "Headline_Color", "Headline_X", "Headline_Y",
     "Headline_Font", "Headline_BgColor", "Headline_Style",
     "Subheading", "Subheading_Size", "Subheading_Color", "Subheading_X", "Subheading_Y",
@@ -326,15 +337,22 @@ class RenderConfig:
     cta_fade_start: float = CTA_FADE_START
     cta_fade_duration: float = CTA_FADE_DURATION
     # Optional CTA *video*: a separate element layered with the CTA image, in
-    # its own box, with its own configurable fade-in. Box defaults below; the
-    # video itself is supplied to VideoGenerator (absent => the element is
-    # skipped and the output is identical to before).
+    # its own box, with its own configurable fade-in. One or more clips may be
+    # supplied to VideoGenerator; they play back-to-back as a single clip in this
+    # one box (the box + fade are shared, but each clip slot has its own
+    # playback speed), and the play order is shuffled per output video. Absent =>
+    # the element is skipped and the output is identical to before.
     cta_video_x: int = 360
     cta_video_y: int = 1200
     cta_video_w: int = 360
     cta_video_h: int = 360
     cta_video_fade_start: float = 0.5
     cta_video_fade_duration: float = 0.5
+    # Playback speed per clip slot (1..N); >1 = faster, <1 = slower. A row's
+    # CTA_Video_Speed_<i> cell overrides one clip; CTA_Video_Speed overrides the
+    # whole row. Defaults to normal speed for every slot.
+    cta_video_speeds: list[float] = field(
+        default_factory=lambda: [1.0] * CTA_VIDEO_SLOTS)
     crf: int = 18                 # 16-28; lower = higher quality / bigger files
     preset: str = "medium"        # x264 speed/size tradeoff
     # When True, video_x/video_y are ignored and each row's video box gets a
@@ -394,6 +412,17 @@ class RowSpec:
     cta_video_h: Optional[int] = None
     cta_video_fade_start: Optional[float] = None
     cta_video_fade_duration: Optional[float] = None
+    # Row-wide speed override (CTA_Video_Speed); None = use per-clip values.
+    cta_video_speed: Optional[float] = None
+    # Per-slot speed overrides from the CTA_Video_Speed_<i> cells (None where
+    # blank). Resolved into cta_video_clip_speeds (aligned with cta_video_clips).
+    cta_clip_speeds: Optional[list] = None
+    cta_video_clip_speeds: Optional[list] = None
+    # Per-slot pinned sample names from the CTA_Clip_<i> cells (None = pick at
+    # random). Resolved to actual file paths (in play order) in cta_video_clips
+    # by _resolve_positions.
+    cta_clip_names: Optional[list] = None
+    cta_video_clips: Optional[list] = None
     resolved: bool = False
 
     @classmethod
@@ -437,6 +466,10 @@ class RowSpec:
                 row.get("CTA_Video_Fade_Start"), warnings, "CTA_Video_Fade_Start"),
             cta_video_fade_duration=_parse_opt_float(
                 row.get("CTA_Video_Fade_Duration"), warnings, "CTA_Video_Fade_Duration"),
+            cta_video_speed=_parse_opt_float(row.get("CTA_Video_Speed"), warnings, "CTA_Video_Speed"),
+            cta_clip_speeds=[_parse_opt_float(row.get(col), warnings, col)
+                             for col in CTA_SPEED_COLUMNS],
+            cta_clip_names=[_clean_str(row.get(col)) or None for col in CTA_CLIP_COLUMNS],
             warnings=warnings,
         )
 
@@ -478,12 +511,16 @@ class VideoGenerator:
         cta_path: Path,
         work_dir: Path,
         output_dir: Path,
-        cta_video_path: Optional[Path] = None,
+        cta_video_slots: Optional[list] = None,
     ):
         self.config = config
         self.video_path = Path(video_path)
-        # Optional CTA video — a separate layered element. None => skipped.
-        self.cta_video_path = Path(cta_video_path) if cta_video_path else None
+        # Optional CTA video: a list of slots (positions 1..N that play in fixed
+        # order); each slot is a pool of sample clips, one of which is chosen per
+        # output video. Empty/all-empty => the CTA video element is skipped.
+        self.cta_video_slots = [[Path(p) for p in (slot or [])]
+                                for slot in (cta_video_slots or [])]
+        self._has_cta_video = any(self.cta_video_slots)
         self.work_dir = Path(work_dir)
         self.output_dir = Path(output_dir)
         self.work_dir.mkdir(parents=True, exist_ok=True)
@@ -801,9 +838,45 @@ class VideoGenerator:
             spec.cta_video_fade_start = cfg.cta_video_fade_start
         if spec.cta_video_fade_duration is None:
             spec.cta_video_fade_duration = cfg.cta_video_fade_duration
+        # Row-wide speed override (CTA_Video_Speed): clamp if present, else leave
+        # None so each clip falls back to its per-clip default below.
+        if spec.cta_video_speed is not None:
+            spec.cta_video_speed = max(0.25, min(float(spec.cta_video_speed), 4.0))
         cta_video_rect = (spec.cta_video_x, spec.cta_video_y,
                           spec.cta_video_x + spec.cta_video_w,
                           spec.cta_video_y + spec.cta_video_h)
+        # Pick one sample per CTA slot (positions play in fixed order 1..N). A
+        # CTA_Clip_<i> cell pins a sample by name; otherwise one is chosen at
+        # random — seeded per row so it varies across output videos yet matches
+        # the preview and re-runs. Each chosen clip also gets a resolved speed
+        # (per-clip cell > row-wide cell > sidebar default), kept aligned with
+        # cta_video_clips so build_ffmpeg_command can speed each clip separately.
+        if self._has_cta_video:
+            clip_rng = random.Random(spec.placement_seed() ^ 0xC7A)
+            names = spec.cta_clip_names or []
+            clip_speeds = spec.cta_clip_speeds or []
+            chosen: list[Path] = []
+            chosen_speeds: list[float] = []
+            for i, slot in enumerate(self.cta_video_slots):
+                if not slot:
+                    continue
+                name = names[i] if i < len(names) else None
+                path = self._match_clip(slot, name) if name else None
+                if name and path is None:
+                    spec.warnings.append(
+                        f"CTA_Clip_{i + 1}: '{name}' not found in clip {i + 1}'s "
+                        f"samples, picking one at random"
+                    )
+                if path is None:
+                    path = clip_rng.choice(slot)
+                chosen.append(path)
+                per_clip = clip_speeds[i] if i < len(clip_speeds) else None
+                default = cfg.cta_video_speeds[i] if i < len(cfg.cta_video_speeds) else 1.0
+                speed = per_clip if per_clip is not None else (
+                    spec.cta_video_speed if spec.cta_video_speed is not None else default)
+                chosen_speeds.append(max(0.25, min(float(speed), 4.0)))
+            spec.cta_video_clips = chosen
+            spec.cta_video_clip_speeds = chosen_speeds
 
         color_deck = list(RANDOM_TEXT_COLORS)
         for element in spec.text_elements:
@@ -864,7 +937,7 @@ class VideoGenerator:
         video_rect = (spec.video_x, spec.video_y,
                       spec.video_x + spec.video_w, spec.video_y + spec.video_h)
         occupied = [video_rect, cta_rect] + explicit_rects
-        if self.cta_video_path is not None:
+        if self._has_cta_video:
             occupied.append(cta_video_rect)
         for element, w, h in pending:
             x, y, clean = self._find_spot(element.x, element.y, w, h, occupied, rng)
@@ -955,14 +1028,29 @@ class VideoGenerator:
             self._paint_text(layer, element.x, element.y, element, "full")
             canvas = Image.alpha_composite(canvas, layer)
         if include_cta:
-            if self.cta_video_path is not None:
-                frame = self._fit_frame(spec.cta_video_w, spec.cta_video_h, self.cta_video_path)
-                fx = spec.cta_video_x + (spec.cta_video_w - frame.width) // 2
-                fy = spec.cta_video_y + (spec.cta_video_h - frame.height) // 2
-                canvas.paste(frame.convert("RGBA"), (fx, fy))
+            if self._has_cta_video:
+                # Cover-fill the box with the first clip in this row's order
+                # (matches the render, which cover-fills each clip to the box).
+                frame = self._cover_frame(spec.cta_video_w, spec.cta_video_h,
+                                          self._lead_cta_path(spec))
+                canvas.paste(frame.convert("RGBA"), (spec.cta_video_x, spec.cta_video_y))
             cta = self._get_cta(spec.cta_w, spec.cta_h)
             canvas.paste(cta, (spec.cta_x, spec.cta_y), cta)
         return canvas
+
+    @staticmethod
+    def _match_clip(slot: list, name: str) -> Optional[Path]:
+        """Find a sample in a slot by file name (case-insensitive, with or
+        without extension). None if no match."""
+        key = name.strip().lower()
+        for p in slot:
+            if p.name.lower() == key or p.stem.lower() == key:
+                return p
+        return None
+
+    def _lead_cta_path(self, spec: RowSpec) -> Path:
+        """The clip shown first in this row's CTA sequence (slot 1's pick)."""
+        return spec.cta_video_clips[0]
 
     # ------------------------------------------------------------- FFmpeg
 
@@ -988,11 +1076,15 @@ class VideoGenerator:
           [bgvid][2:v]overlay=0:0
               Stamp the full-canvas text layer on top.
 
-          [4:v]scale=...,format=rgba,fade=t=in:st=CVS:d=CVD:alpha=1   (optional)
-              The CTA *video* (input 4, present only when one was uploaded):
-              scaled to fit its box, alpha-faded in, then overlaid centered in
-              its box ABOVE the texts. Looped with -stream_loop -1 so it fills
-              the whole clip; -shortest at the muxer trims it.
+          CTA videos (inputs 4..4+M-1, present only when uploaded)
+              One sample is chosen per slot for this row (inputs are exactly those
+              picks). Each is cover-filled to the CTA box (scale=increase + crop,
+              so all share one size) and sped up/slowed by its own
+              `setpts=PTS/SPEED`, then joined with `concat` in the fixed slot
+              order into one stream, alpha-faded in, and overlaid in the box ABOVE
+              the texts. They play
+              once through (the last frame holds if the promo outlasts them);
+              -shortest at the muxer trims any excess.
 
           [3:v]format=rgba,fade=t=in:st=CFS:d=CFD:alpha=1
               The CTA image as its own stream: force an alpha-capable format,
@@ -1022,18 +1114,34 @@ class VideoGenerator:
             "[bgvid][2:v]overlay=0:0[txt];",
         ]
         last = "txt"
-        if self.cta_video_path is not None:
+        clips = spec.cta_video_clips or []
+        if self._has_cta_video and clips:
+            n = len(clips)
+            speeds = spec.cta_video_clip_speeds or [1.0] * n
+            cw, ch = spec.cta_video_w, spec.cta_video_h
+            # Cover-fill each chosen clip to the box so they share one size
+            # (needed to concat); inputs 4..4+n-1 are the per-row picks in order.
+            # setpts=PTS/SPEED is applied per clip BEFORE the concat so each slot
+            # plays at its own speed; concat then re-stamps the joined timeline.
+            labels = []
+            for k in range(n):
+                sp = speeds[k] if k < len(speeds) else 1.0
+                parts.append(
+                    f"[{4 + k}:v]fps={FPS},"
+                    f"scale={cw}:{ch}:force_original_aspect_ratio=increase,"
+                    f"crop={cw}:{ch},setsar=1,setpts=PTS/{sp:.4f},format=rgba[cv{k}];"
+                )
+                labels.append(f"[cv{k}]")
+            if n > 1:
+                parts.append(f"{''.join(labels)}concat=n={n}:v=1:a=0[cseq];")
+                seq = "[cseq]"
+            else:
+                seq = labels[0]
             parts.append(
-                f"[4:v]scale={spec.cta_video_w}:{spec.cta_video_h}"
-                f":force_original_aspect_ratio=decrease:force_divisible_by=2,"
-                f"format=rgba,fade=t=in:st={spec.cta_video_fade_start}"
+                f"{seq}fade=t=in:st={spec.cta_video_fade_start}"
                 f":d={spec.cta_video_fade_duration}:alpha=1[ctav];"
             )
-            parts.append(
-                f"[{last}][ctav]overlay="
-                f"x='{spec.cta_video_x}+({spec.cta_video_w}-w)/2'"
-                f":y='{spec.cta_video_y}+({spec.cta_video_h}-h)/2'[txtv];"
-            )
+            parts.append(f"[{last}][ctav]overlay={spec.cta_video_x}:{spec.cta_video_y}[txtv];")
             last = "txtv"
         parts.append(
             f"[3:v]format=rgba,"
@@ -1049,9 +1157,10 @@ class VideoGenerator:
             "-loop", "1", "-framerate", str(FPS), "-i", str(overlay_png),
             "-loop", "1", "-framerate", str(FPS), "-i", str(cta_png),
         ]
-        if self.cta_video_path is not None:
-            # -stream_loop -1 repeats the CTA video to cover the whole clip.
-            cmd += ["-stream_loop", "-1", "-i", str(self.cta_video_path)]
+        # CTA clips: this row's chosen sample per slot, in fixed play order; the
+        # filter concats them. They play once through (no -stream_loop).
+        for clip_path in clips:
+            cmd += ["-i", str(clip_path)]
         cmd += ["-filter_complex", filter_complex, "-map", "[out]"]
         if cfg.include_audio:
             # '1:a?' = take audio from the promo video if it exists; never fail
@@ -1148,6 +1257,12 @@ class VideoGenerator:
         size = (max(2, round(frame.width * ratio)), max(2, round(frame.height * ratio)))
         return frame.resize(size, Image.LANCZOS)
 
+    def _cover_frame(self, box_w: int, box_h: int, path: Path) -> Image.Image:
+        """Cover-fill a video's first frame to exactly box_w x box_h (center-crop)
+        — matches how the CTA clips are scaled+cropped in the render so they line
+        up edge to edge in the box."""
+        return ImageOps.fit(self._first_video_frame(path), (box_w, box_h), Image.LANCZOS)
+
     def render_preview(self, row: pd.Series) -> Image.Image:
         """Static composite of one row — same layout math as the real render,
         with the video represented by its first frame."""
@@ -1233,8 +1348,8 @@ class VideoGenerator:
             },
             "texts": texts,
         }
-        if self.cta_video_path is not None:
-            cv = self._fit_frame(spec.cta_video_w, spec.cta_video_h, self.cta_video_path)
+        if self._has_cta_video:
+            cv = self._cover_frame(spec.cta_video_w, spec.cta_video_h, self._lead_cta_path(spec))
             payload["cta_video"] = {
                 "x": spec.cta_video_x, "y": spec.cta_video_y,
                 "w": spec.cta_video_w, "h": spec.cta_video_h,

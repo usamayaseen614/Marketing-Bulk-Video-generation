@@ -12,7 +12,7 @@ import time
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -26,6 +26,7 @@ from video_generator import (
     ALL_COLUMNS,
     CANVAS_H,
     CANVAS_W,
+    CTA_VIDEO_SLOTS,
     FONT_CHOICES,
     FONT_CUSTOM,
     REQUIRED_COLUMNS,
@@ -92,11 +93,11 @@ class Workspace:
     cta_path: Path
     font_path: Optional[Path]
     work_dir: Path
-    cta_video_path: Optional[Path] = None
+    cta_video_slots: list = field(default_factory=list)
 
 
 def build_workspace(tmp: Path, video_file, zip_file, cta_file, font_file,
-                    cta_video_file=None) -> Workspace:
+                    cta_video_slot_files=None) -> Workspace:
     """Write the in-memory uploads to disk where FFmpeg/PIL can read them."""
     video_path = tmp / "input.mp4"
     video_path.write_bytes(video_file.getvalue())
@@ -113,14 +114,23 @@ def build_workspace(tmp: Path, video_file, zip_file, cta_file, font_file,
         font_path = tmp / f"custom_font{Path(font_file.name).suffix.lower()}"
         font_path.write_bytes(font_file.getvalue())
 
-    cta_video_path = None
-    if cta_video_file is not None:
-        cta_video_path = tmp / "cta_video.mp4"
-        cta_video_path.write_bytes(cta_video_file.getvalue())
+    # One sub-folder per CTA slot, keeping each sample's original filename so the
+    # Excel CTA_Clip_<n> cells can pin one by name.
+    cta_video_slots = []
+    for i, files in enumerate(cta_video_slot_files or [], start=1):
+        slot_paths = []
+        if files:
+            slot_dir = tmp / f"cta_slot_{i}"
+            slot_dir.mkdir(parents=True, exist_ok=True)
+            for f in files:
+                p = slot_dir / Path(f.name).name
+                p.write_bytes(f.getvalue())
+                slot_paths.append(p)
+        cta_video_slots.append(slot_paths)
 
     work_dir = tmp / "work"
     work_dir.mkdir(exist_ok=True)
-    return Workspace(bg_dir, video_path, cta_path, font_path, work_dir, cta_video_path)
+    return Workspace(bg_dir, video_path, cta_path, font_path, work_dir, cta_video_slots)
 
 
 def make_generator(ws: Workspace, config: RenderConfig, output_dir: Path) -> VideoGenerator:
@@ -132,7 +142,7 @@ def make_generator(ws: Workspace, config: RenderConfig, output_dir: Path) -> Vid
         cta_path=ws.cta_path,
         work_dir=ws.work_dir,
         output_dir=output_dir,
-        cta_video_path=ws.cta_video_path,
+        cta_video_slots=ws.cta_video_slots,
     )
 
 
@@ -353,14 +363,19 @@ with st.sidebar:
 
     st.subheader("CTA video (optional)")
     st.caption(
-        "An optional video shown alongside the CTA image, in its own box, with "
-        "its own fade-in. Leave empty to skip it entirely."
+        f"A sequence of {CTA_VIDEO_SLOTS} clips that always play in order "
+        "(1 → 2 → 3 → 4) in one shared box. Each clip is a *pool* of sample "
+        "videos (up to ~30): one is chosen per output video — pinned by an Excel "
+        "`CTA_Clip_<n>` cell, otherwise picked at random. Leave all empty to skip."
     )
-    cta_video_file = st.file_uploader(
-        "CTA video (MP4)", type=["mp4"],
-        help="Looped to fill the clip and faded in. Scaled to fit its box, "
-             "aspect ratio preserved.",
-    )
+    cta_video_slot_files = [
+        st.file_uploader(
+            f"Clip {i} — sample videos (MP4)", type=["mp4"],
+            accept_multiple_files=True, key=f"cta_clip_{i}",
+            help="One of these is chosen per output video for this position.",
+        )
+        for i in range(1, CTA_VIDEO_SLOTS + 1)
+    ]
     cta_video_x = st.number_input("CTA video X", 0, CANVAS_W, 360)
     cta_video_y = st.number_input("CTA video Y", 0, CANVAS_H, 1200)
     cta_video_w = st.number_input("CTA video width", 50, CANVAS_W, 360)
@@ -373,6 +388,17 @@ with st.sidebar:
         "CTA video fade-in duration (s)", 0.0, 30.0, 0.5, 0.1,
         help="Per-row override: `CTA_Video_Fade_Duration`.",
     )
+    st.caption(
+        "Playback speed per clip position — 1 = normal, 2 = twice as fast, "
+        "0.5 = half. Per-row overrides: `CTA_Video_Speed_<n>` for one clip, or "
+        "`CTA_Video_Speed` for the whole row."
+    )
+    cta_video_speeds = [
+        st.number_input(
+            f"Clip {i} speed (×)", 0.25, 4.0, 1.0, 0.05, key=f"cta_speed_{i}",
+        )
+        for i in range(1, CTA_VIDEO_SLOTS + 1)
+    ]
 
     st.subheader("Text style")
     st.caption(
@@ -418,6 +444,7 @@ config = RenderConfig(
     cta_video_w=int(cta_video_w), cta_video_h=int(cta_video_h),
     cta_video_fade_start=float(cta_video_fade_start),
     cta_video_fade_duration=float(cta_video_fade_duration),
+    cta_video_speeds=[float(s) for s in cta_video_speeds],
     default_font=default_font, default_style=default_style,
     crf=int(crf), preset=preset,
     randomize_video_pos=randomize_video,
@@ -502,7 +529,7 @@ if preview_clicked and ready:
         with tempfile.TemporaryDirectory(prefix="bvg_preview_") as tmp:
             try:
                 ws = build_workspace(Path(tmp), video_file, zip_file, cta_file,
-                                     font_file, cta_video_file)
+                                     font_file, cta_video_slot_files)
                 generator = make_generator(ws, config, Path(tmp) / "out")
                 # Same deterministic background assignment as the real batch,
                 # so the preview shows the row's actual background.
@@ -589,7 +616,7 @@ if generate_clicked and ready:
     with tempfile.TemporaryDirectory(prefix="bvg_run_") as tmp:
         try:
             ws = build_workspace(Path(tmp), video_file, zip_file, cta_file,
-                                 font_file, cta_video_file)
+                                 font_file, cta_video_slot_files)
             generator = make_generator(ws, config, run_dir / "videos")
             df_run, bg_warnings = generator.assign_backgrounds(df)
             for message in bg_warnings:

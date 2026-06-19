@@ -7,7 +7,8 @@ Produces in ./sample_assets:
     backgrounds.zip  — two gradient background images (1080x1920)
     promo.mp4        — 5-second 16:9 test video with a tone (FFmpeg testsrc)
     cta.png          — a "SHOP NOW" call-to-action button with transparency
-    cta_video.mp4    — a short looping clip to try as the optional CTA video
+    cta_video_1..4.mp4 — four short clips to try as the optional CTA videos
+                       (they play back-to-back in a shuffled order)
 
 Usage:  python create_sample_assets.py
 """
@@ -58,16 +59,20 @@ def make_video(path: Path) -> None:
     subprocess.run(cmd, check=True)
 
 
-def make_cta_video(path: Path) -> None:
-    """A short, square, silent clip to drop into the optional CTA-video slot."""
+def make_cta_videos(out_dir: Path, count: int = 4) -> None:
+    """A few short, silent clips for the optional CTA-video slot — distinct
+    sources so the shuffled back-to-back sequence is easy to see."""
     ffmpeg = find_ffmpeg()
-    cmd = [
-        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
-        "-f", "lavfi", "-i", "testsrc2=size=600x600:rate=30:duration=3",
-        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an",
-        str(path),
-    ]
-    subprocess.run(cmd, check=True)
+    sources = ["testsrc2", "smptebars", "rgbtestsrc", "testsrc"]
+    for i in range(count):
+        src = sources[i % len(sources)]
+        cmd = [
+            ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", f"{src}=size=600x600:rate=30:duration=2",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an",
+            str(out_dir / f"cta_video_{i + 1}.mp4"),
+        ]
+        subprocess.run(cmd, check=True)
 
 
 def main() -> None:
@@ -84,7 +89,7 @@ def main() -> None:
 
     make_cta(OUT / "cta.png")
     make_video(OUT / "promo.mp4")
-    make_cta_video(OUT / "cta_video.mp4")
+    make_cta_videos(OUT, count=4)
 
     rows = [
         {
@@ -96,7 +101,12 @@ def main() -> None:
             "Video_X": 140, "Video_Y": 420, "Video_Width": 800, "Video_Height": 800,
             "CTA_X": 60, "CTA_Y": 1680, "CTA_Width": None, "CTA_Height": None,
             "CTA_Video_X": 720, "CTA_Video_Y": 1560, "CTA_Video_Width": 300,
-            "CTA_Video_Height": 300, "CTA_Video_Fade_Start": 1.0, "CTA_Video_Fade_Duration": 0.8,
+            "CTA_Video_Height": 300, "CTA_Video_Fade_Start": 1.0,
+            "CTA_Video_Fade_Duration": 0.8,
+            # Per-clip playback speeds: clip 1 fast, clip 2 normal, clip 3 slow,
+            # clip 4 brisk. (CTA_Video_Speed would set them all at once instead.)
+            "CTA_Video_Speed_1": 2.0, "CTA_Video_Speed_2": 1.0,
+            "CTA_Video_Speed_3": 0.5, "CTA_Video_Speed_4": 1.5,
             "Headline": "Summer Mega Sale", "Headline_Size": 72,
             "Headline_Color": "#FFFFFF", "Headline_X": 540, "Headline_Y": 160,
             "Headline_Font": "Impact (Bebas Neue)", "Headline_BgColor": "#FF2D55",

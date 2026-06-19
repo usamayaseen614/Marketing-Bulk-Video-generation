@@ -14,8 +14,10 @@ Each output video is composed of:
    styles** (outline, drop shadow, neon glow) à la TikTok
 4. A **CTA image** (PNG with transparency supported) at a configurable position and size,
    overridable **per row** via the `CTA_*` Excel columns, with a **configurable fade-in**
-5. An optional **CTA video** — a separate clip layered alongside the CTA image, in its own
-   box, looped to fill the clip, with its own **configurable fade-in**
+5. An optional **CTA video** — a fixed sequence of up to 4 clips that always play in order
+   (1 → 2 → 3 → 4) in one shared box. Each position is a **pool of sample videos**; one
+   sample is **chosen per output video** (pinned by an Excel `CTA_Clip_<n>` cell, otherwise
+   at random), with a shared **configurable fade-in** and a **per-clip playback speed**
 
 Output: H.264 MP4, 30 fps, `yuv420p`, AAC audio, `+faststart` — upload-ready for social platforms.
 
@@ -50,7 +52,7 @@ python create_sample_assets.py
 ```
 
 This creates a `sample_assets/` folder with a demo `data.xlsx`, `backgrounds.zip`,
-`promo.mp4`, `cta.png`, and `cta_video.mp4` you can upload straight into the app. (Row 2
+`promo.mp4`, `cta.png`, and four `cta_video_*.mp4` clips you can upload straight into the app. (Row 2
 intentionally references a missing background to demonstrate per-row error handling; other
 rows show off custom fonts, background boxes, and the outline/shadow/neon styles.) There is
 also `data_auto.xlsx` — just the three text columns, nothing else — to try the fully
@@ -70,9 +72,12 @@ rows alone determines how many videos are generated:
 | `CTA_X` / `CTA_Y` | **Top-left corner** of the CTA image, per row. **Blank/absent = the sidebar default** | `340` / `1600` |
 | `CTA_Width` / `CTA_Height` | Size the CTA image is resized to, per row. **Blank/absent = the sidebar default** | `400` / `160` |
 | `CTA_Fade_Start` / `CTA_Fade_Duration` | When the CTA image starts fading in and how long it takes, in **seconds**. **Blank/absent = the sidebar default** | `1.0` / `0.5` |
-| `CTA_Video_X` / `CTA_Video_Y` | **Top-left corner** of the optional CTA-video box, per row. **Blank/absent = the sidebar default** | `720` / `1560` |
-| `CTA_Video_Width` / `CTA_Video_Height` | Size of the CTA-video box (the video is fitted inside, aspect ratio preserved). **Blank/absent = the sidebar default** | `300` / `300` |
-| `CTA_Video_Fade_Start` / `CTA_Video_Fade_Duration` | Fade-in timing for the CTA video, in **seconds**. **Blank/absent = the sidebar default** | `1.0` / `0.8` |
+| `CTA_Video_X` / `CTA_Video_Y` | **Top-left corner** of the shared CTA-video box, per row. **Blank/absent = the sidebar default** | `720` / `1560` |
+| `CTA_Video_Width` / `CTA_Video_Height` | Size of the CTA-video box (each clip is cover-filled to it). **Blank/absent = the sidebar default** | `300` / `300` |
+| `CTA_Video_Fade_Start` / `CTA_Video_Fade_Duration` | Fade-in timing for the CTA-video sequence, in **seconds**. **Blank/absent = the sidebar default** | `1.0` / `0.8` |
+| `CTA_Video_Speed_1` … `CTA_Video_Speed_4` | Playback speed of clip position 1…4 individually (1 = normal, 2 = twice as fast, 0.5 = half). **Blank/absent = `CTA_Video_Speed`, then the sidebar's per-clip default** | `2.0` |
+| `CTA_Video_Speed` | Playback speed for **every** clip in the row at once — a shortcut for setting all of `CTA_Video_Speed_<n>`. A specific `CTA_Video_Speed_<n>` cell overrides it. **Blank/absent = the sidebar per-clip defaults** | `1.5` |
+| `CTA_Clip_1` … `CTA_Clip_4` | Pin which sample plays in clip position 1…4 for this video, by file name (with or without extension). **Blank/absent = a random sample from that position's pool** | `intro_a.mp4` |
 | `Headline` | Headline text (empty = skipped) | `Summer Mega Sale` |
 | `Headline_Size` | Font size in px. **Blank/absent = random** within a sensible range per element (headline 56–88, subheading 34–52, footer 24–36) | `72` |
 | `Headline_Color` | Hex (`#FFD700`), CSS color name (`yellow`, `blue`, `lightyellow`…), or `rgb(...)`. **Blank/absent = random** vivid palette color, never repeated within one video | `gold` |
@@ -119,10 +124,14 @@ Notes:
 - **Background box & artistic styles**: any text can sit on a colored highlight box
   (`*_BgColor`) and use a `*_Style` of `outline` (contrasting border), `shadow` (drop
   shadow), or `neon` (glow) — combine them freely. `classic` is plain text.
-- **CTA video (optional)**: upload one in the sidebar to layer a clip alongside the CTA
-  image, in its own box (`CTA_Video_*`), looped to fill the clip with its own fade-in. Its
-  audio is ignored (the promo video supplies the soundtrack). Leave it empty to skip it —
-  output is then identical to before.
+- **CTA videos (optional)**: upload one or more clips in the sidebar to layer them alongside
+  the CTA image in a single shared box (`CTA_Video_*`). They play **back-to-back as one clip
+  in a shuffled order** — re-shuffled for every output video (so video 1 might run clips
+  1,3,4,2 and video 2 runs 3,4,1,2), seeded per row so the preview matches and re-runs are
+  reproducible. The box and fade-in are shared by all clips, but **each clip slot has its own
+  playback speed** (`CTA_Video_Speed_<n>`, or `CTA_Video_Speed` to set them all at once);
+  each clip is cover-filled to the box, and their audio is ignored (the promo video supplies
+  the soundtrack). Leave the upload empty to skip the element — output is identical to before.
 - Output files are named `001_Headline_Text.mp4` (row number + sanitized headline).
 
 ## Sidebar settings
@@ -133,7 +142,7 @@ Notes:
 | Video X/Y/W/H | Default box the promo video is fitted into (aspect ratio preserved, centered). X/Y are hidden when randomize is on. A row's `Video_X`/`Video_Y`/`Video_Width`/`Video_Height` cells override these per video |
 | CTA image X/Y/W/H | Default position (top-left corner) and size of the CTA image. A row's `CTA_X`/`CTA_Y`/`CTA_Width`/`CTA_Height` cells override these per video |
 | CTA fade-in start / duration | When the CTA image fades in and for how long (seconds). Overridable per row via `CTA_Fade_Start` / `CTA_Fade_Duration` |
-| CTA video + box + fade | Optional clip layered with the CTA image, its box (`CTA_Video_*`), and its fade-in. Leave the upload empty to skip the whole element |
+| CTA videos + box + fade + per-clip speed | Optional clips layered with the CTA image; they play back-to-back in a shuffled order in one shared box (`CTA_Video_*`), with a shared fade-in and a separate speed per clip slot (overridable per row via `CTA_Video_Speed_<n>`, or `CTA_Video_Speed` for the whole row). Leave the upload empty to skip the whole element |
 | Default font | The font used when a text's `*_Font` cell is blank — a bundled family, the system font, or your uploaded font |
 | Default artistic style | The style used when a text's `*_Style` cell is blank — `classic`, `outline`, `shadow`, or `neon` |
 | Quality (CRF) | 16 = near-lossless, 28 = small files. 18 is great for social media |
@@ -183,9 +192,11 @@ own layer with its font, optional background box, and outline/shadow/neon decora
 [1:v]scale=W:H:force_original_aspect_ratio=decrease[vid]   # fit promo video in box, no distortion
 [0:v][vid]overlay=x='X+(W-w)/2':y='Y+(H-h)/2':shortest=1   # center in box over background
 [bgvid][2:v]overlay=0:0[txt]                               # stamp text layer on top
-# optional CTA video (input 4, -stream_loop -1) — scaled, faded in, layered over the texts:
-[4:v]scale=...,format=rgba,fade=t=in:st=CVS:d=CVD:alpha=1[ctav]
-[txt][ctav]overlay=x='CVX+(CVW-w)/2':y='CVY+(CVH-h)/2'[txtv]
+# optional CTA videos (inputs 4..4+N-1) — cover-filled to the box, each sped up/slowed by
+# its own clip speed, concatenated in the row's shuffled order, faded in, then over the texts:
+[4:v]...,scale=increase,crop=CVW:CVH,setpts=PTS/SPEED0,format=rgba[cv0]; ... ; [cv0][cv1]...concat=n=N:v=1:a=0[cseq]
+[cseq]fade=t=in:st=CVS:d=CVD:alpha=1[ctav]
+[txt][ctav]overlay=CVX:CVY[txtv]
 [3:v]format=rgba,fade=t=in:st=CFS:d=CFD:alpha=1[cta]       # CTA image: configurable alpha fade-in
 [txtv][cta]overlay=CTA_X:CTA_Y,format=yuv420p              # place CTA image on top
 ```
