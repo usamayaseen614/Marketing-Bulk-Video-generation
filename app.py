@@ -114,7 +114,7 @@ def build_workspace(tmp: Path, video_file, zip_file, cta_file, font_file,
         font_path = tmp / f"custom_font{Path(font_file.name).suffix.lower()}"
         font_path.write_bytes(font_file.getvalue())
 
-    # One sub-folder per CTA slot, keeping each sample's original filename so the
+    # One sub-folder per CTA slot, keepings each sample's original filename so the
     # Excel CTA_Clip_<n> cells can pin one by name.
     cta_video_slots = []
     for i, files in enumerate(cta_video_slot_files or [], start=1):
