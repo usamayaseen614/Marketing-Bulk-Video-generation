@@ -365,49 +365,54 @@ _TEMPLATE = r"""
     addHandle(videoEl, videoItem);
     items.push(videoItem);
 
-    // --- CTA (stretches to its box, like the render) ---
-    const c = DATA.cta;
-    const ctaEl = document.createElement('div');
-    ctaEl.className = 'el';
-    const ctaImg = document.createElement('img');
-    ctaImg.src = c.img;
-    ctaImg.draggable = false;
-    ctaEl.appendChild(ctaImg);
-    ctaEl.style.zIndex = Z.cta_image;
-    stage.appendChild(ctaEl);
-    const ctaItem = {
-      x: c.x, y: c.y, w: c.w, h: c.h,
-      center() { return { cx: this.x + this.w / 2, cy: this.y + this.h / 2 }; },
-      snapResize() { snapResizeBox(this, __MIN_CTA_DIM__); },
-      bounds() {
-        return { minX: 0, maxX: DATA.canvas_w - this.w, minY: 0, maxY: DATA.canvas_h - this.h };
-      },
-      place() {
-        ctaEl.style.left = px(this.x);
-        ctaEl.style.top = px(this.y);
-        ctaEl.style.width = px(this.w);
-        ctaEl.style.height = px(this.h);
-      },
-      startResize(e) { return { w0: this.w, h0: this.h, sx: e.clientX, sy: e.clientY }; },
-      resize(ctx, ev) {
-        this.w = clamp(ctx.w0 + (ev.clientX - ctx.sx) / scale, __MIN_CTA_DIM__, DATA.canvas_w - this.x);
-        this.h = clamp(ctx.h0 + (ev.clientY - ctx.sy) / scale, __MIN_CTA_DIM__, DATA.canvas_h - this.y);
-      },
-      endResize() { this.w = Math.round(this.w); this.h = Math.round(this.h); },
-      reset() { this.x = c.x; this.y = c.y; this.w = c.w; this.h = c.h; this.place(); },
-      cols() {
-        return [
-          ['CTA_X', c.x, Math.round(this.x)],
-          ['CTA_Y', c.y, Math.round(this.y)],
-          ['CTA_Width', c.w, Math.round(this.w)],
-          ['CTA_Height', c.h, Math.round(this.h)],
-        ];
-      },
-    };
-    ctaItem.place();
-    makeDraggable(ctaEl, ctaItem);
-    addHandle(ctaEl, ctaItem);
-    items.push(ctaItem);
+    // --- CTA image (optional; stretches to its box, like the render).
+    //     Absent when no CTA image was uploaded — the layer is skipped and the
+    //     CTA video box (below) appends instead of inserting before it. ---
+    let ctaEl = null;
+    if (DATA.cta) {
+      const c = DATA.cta;
+      ctaEl = document.createElement('div');
+      ctaEl.className = 'el';
+      const ctaImg = document.createElement('img');
+      ctaImg.src = c.img;
+      ctaImg.draggable = false;
+      ctaEl.appendChild(ctaImg);
+      ctaEl.style.zIndex = Z.cta_image;
+      stage.appendChild(ctaEl);
+      const ctaItem = {
+        x: c.x, y: c.y, w: c.w, h: c.h,
+        center() { return { cx: this.x + this.w / 2, cy: this.y + this.h / 2 }; },
+        snapResize() { snapResizeBox(this, __MIN_CTA_DIM__); },
+        bounds() {
+          return { minX: 0, maxX: DATA.canvas_w - this.w, minY: 0, maxY: DATA.canvas_h - this.h };
+        },
+        place() {
+          ctaEl.style.left = px(this.x);
+          ctaEl.style.top = px(this.y);
+          ctaEl.style.width = px(this.w);
+          ctaEl.style.height = px(this.h);
+        },
+        startResize(e) { return { w0: this.w, h0: this.h, sx: e.clientX, sy: e.clientY }; },
+        resize(ctx, ev) {
+          this.w = clamp(ctx.w0 + (ev.clientX - ctx.sx) / scale, __MIN_CTA_DIM__, DATA.canvas_w - this.x);
+          this.h = clamp(ctx.h0 + (ev.clientY - ctx.sy) / scale, __MIN_CTA_DIM__, DATA.canvas_h - this.y);
+        },
+        endResize() { this.w = Math.round(this.w); this.h = Math.round(this.h); },
+        reset() { this.x = c.x; this.y = c.y; this.w = c.w; this.h = c.h; this.place(); },
+        cols() {
+          return [
+            ['CTA_X', c.x, Math.round(this.x)],
+            ['CTA_Y', c.y, Math.round(this.y)],
+            ['CTA_Width', c.w, Math.round(this.w)],
+            ['CTA_Height', c.h, Math.round(this.h)],
+          ];
+        },
+      };
+      ctaItem.place();
+      makeDraggable(ctaEl, ctaItem);
+      addHandle(ctaEl, ctaItem);
+      items.push(ctaItem);
+    }
 
     // --- CTA video box (optional; same behavior as the promo video box).
     //     Each layer's CSS z-index (set from Z above) drives the stacking so the
@@ -425,7 +430,10 @@ _TEMPLATE = r"""
       cvFrame.draggable = false;
       cvEl.appendChild(cvFrame);
       cvEl.style.zIndex = Z.cta_video;
-      stage.insertBefore(cvEl, ctaEl);
+      // DOM order breaks z-index ties: sit just under the CTA image when it
+      // exists; otherwise just append.
+      if (ctaEl) stage.insertBefore(cvEl, ctaEl);
+      else stage.appendChild(cvEl);
       const cvItem = {
         x: cv.x, y: cv.y, w: cv.w, h: cv.h,
         center() { return { cx: this.x + this.w / 2, cy: this.y + this.h / 2 }; },

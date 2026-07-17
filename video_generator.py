@@ -52,7 +52,7 @@ CTA_FADE_DURATION = 0.5
 # The CTA video is a sequence of fixed positions ("clips") that always play in
 # order 1..N. Each position is backed by a pool of sample videos; one sample is
 # chosen per output video (pinned by a CTA_Clip_<i> cell, else picked at random).
-CTA_VIDEO_SLOTS = 4
+CTA_VIDEO_SLOTS = 5
 CTA_CLIP_COLUMNS = [f"CTA_Clip_{i}" for i in range(1, CTA_VIDEO_SLOTS + 1)]
 # Per-clip playback-speed overrides, one column per slot. Blank falls back to
 # the row-wide CTA_Video_Speed cell, then to the sidebar's per-clip default.
@@ -515,7 +515,7 @@ class VideoGenerator:
         config: RenderConfig,
         bg_dir: Path,
         video_path: Path,
-        cta_path: Path,
+        cta_path: Optional[Path],
         work_dir: Path,
         output_dir: Path,
         cta_video_slots: Optional[list] = None,
@@ -547,9 +547,12 @@ class VideoGenerator:
         if self._system_font is None:
             logger.warning("No TrueType font found; falling back to PIL default font")
 
-        # One CTA image is shared by every row, but rows may override its box
-        # via CTA_Width/CTA_Height — cache one resized copy per distinct size.
-        self._cta_src = Image.open(cta_path).convert("RGBA")
+        # The CTA image is optional. When supplied it's shared by every row, but
+        # rows may override its box via CTA_Width/CTA_Height — cache one resized
+        # copy per distinct size. Without one, the CTA-image layer is skipped
+        # entirely (no reserved space, no FFmpeg input, no editor payload).
+        self._has_cta = cta_path is not None
+        self._cta_src = Image.open(cta_path).convert("RGBA") if self._has_cta else None
         self._cta_cache: dict[tuple[int, int], Image.Image] = {}
         self._cta_lock = threading.Lock()
 
@@ -831,6 +834,10 @@ class VideoGenerator:
             spec.cta_fade_duration = cfg.cta_fade_duration
         cta_rect = (spec.cta_x, spec.cta_y,
                     spec.cta_x + spec.cta_w, spec.cta_y + spec.cta_h)
+        # Only treat the CTA-image box as a no-go zone for auto-placement when an
+        # image is actually supplied (its position is still resolved for the
+        # editor payload, but an absent image reserves no space).
+        cta_occupied = [cta_rect] if self._has_cta else []
 
         # CTA video box (resolved unconditionally so the FFmpeg command / preview
         # always have concrete numbers; only treated as a no-go zone for text
@@ -926,7 +933,7 @@ class VideoGenerator:
             fixed_cy = None if spec.video_y is None else int(spec.video_y + spec.video_h / 2)
             cx, cy, clean = self._find_spot(
                 fixed_cx, fixed_cy, spec.video_w, spec.video_h,
-                [cta_rect] + explicit_rects, rng,
+                cta_occupied + explicit_rects, rng,
             )
             spec.video_x = int(cx - spec.video_w / 2)
             spec.video_y = int(cy - spec.video_h / 2)
@@ -943,7 +950,7 @@ class VideoGenerator:
 
         video_rect = (spec.video_x, spec.video_y,
                       spec.video_x + spec.video_w, spec.video_y + spec.video_h)
-        occupied = [video_rect, cta_rect] + explicit_rects
+        occupied = [video_rect] + cta_occupied + explicit_rects
         if self._has_cta_video:
             occupied.append(cta_video_rect)
         for element, w, h in pending:
@@ -1041,8 +1048,9 @@ class VideoGenerator:
                 frame = self._cover_frame(spec.cta_video_w, spec.cta_video_h,
                                           self._lead_cta_path(spec))
                 canvas.paste(frame.convert("RGBA"), (spec.cta_video_x, spec.cta_video_y))
-            cta = self._get_cta(spec.cta_w, spec.cta_h)
-            canvas.paste(cta, (spec.cta_x, spec.cta_y), cta)
+            if self._has_cta:
+                cta = self._get_cta(spec.cta_w, spec.cta_h)
+                canvas.paste(cta, (spec.cta_x, spec.cta_y), cta)
         return canvas
 
     @staticmethod
@@ -1062,7 +1070,7 @@ class VideoGenerator:
     # ------------------------------------------------------------- FFmpeg
 
     def build_ffmpeg_command(self, spec: RowSpec, base_png: Path,
-                             overlay_png: Path, cta_png: Path,
+                             overlay_png: Path, cta_png: Optional[Path],
                              out_path: Path) -> list[str]:
         """
         Single-pass composite. Filter graph explained:
@@ -1084,25 +1092,28 @@ class VideoGenerator:
               at the same box in z-order below, so this anchor paint is idempotent
               and never disturbs the chosen layering.
 
-          CTA videos (inputs 4..4+M-1, present only when uploaded) -> [ctav]
+          CTA videos (present only when uploaded) -> [ctav]
               One sample is chosen per slot for this row (inputs are exactly those
-              picks). Each is cover-filled to the CTA box (scale=increase + crop,
-              so all share one size) and sped up/slowed by its own
-              `setpts=PTS/SPEED`, then joined with `concat` in the fixed slot
-              order into one stream and alpha-faded in. They play once through (the
-              last frame holds if the promo outlasts them); -shortest trims excess.
+              picks, starting at clip_input_base — 4 with a CTA image, else 3).
+              Each is cover-filled to the CTA box (scale=increase + crop, so all
+              share one size) and sped up/slowed by its own `setpts=PTS/SPEED`,
+              then joined with `concat` in the fixed slot order into one stream and
+              alpha-faded in. They play once through (the last frame holds if the
+              promo outlasts them); -shortest trims excess.
 
           [3:v]format=rgba,fade=t=in:st=CFS:d=CFD:alpha=1 -> [cta]
-              The CTA image as its own stream: force an alpha-capable format, then
-              fade ONLY the alpha channel — fully transparent until cta_fade_start,
-              fully visible cta_fade_duration later.
+              The CTA image (input 3, present only when one is uploaded) as its own
+              stream: force an alpha-capable format, then fade ONLY the alpha
+              channel — fully transparent until cta_fade_start, fully visible
+              cta_fade_duration later.
 
-          Z-order: the four overlay layers — promo video [vidB], CTA video [ctav],
-          CTA image [cta], texts [2:v] — are stacked onto [anchored] in ascending
-          order of their sidebar z-index (video_z / cta_video_z / cta_image_z /
-          text_z; higher = on top). The background is always the base. Equal
-          z-indexes fall back to a fixed priority (promo < CTA video < CTA image <
-          texts) so the order is deterministic. The topmost overlay also converts
+          Z-order: the overlay layers — promo video [vidB], optional CTA video
+          [ctav], optional CTA image [cta], texts [2:v] — are stacked onto
+          [anchored] in ascending order of their sidebar z-index (video_z /
+          cta_video_z / cta_image_z / text_z; higher = on top). The background is
+          always the base. Equal z-indexes fall back to a fixed priority (promo <
+          CTA video < CTA image < texts) so the order is deterministic. The
+          topmost overlay also converts
           to yuv420p — required for maximum player/social-platform compatibility.
 
         Inputs use -loop 1 -framerate 30 so the still images behave as 30fps
@@ -1124,6 +1135,11 @@ class VideoGenerator:
             f"split[vidA][vidB];",
             f"[0:v][vidA]overlay={video_pos}:shortest=1[anchored];",
         ]
+        has_cta = self._has_cta
+        # Fixed inputs: 0=base, 1=promo video, 2=overlay(texts). The CTA image is
+        # input 3 only when supplied; the per-row CTA clips follow it, so their
+        # first input index shifts down by one when there's no CTA image.
+        clip_input_base = 4 if has_cta else 3
         clips = spec.cta_video_clips or []
         has_ctav = bool(self._has_cta_video and clips)
         if has_ctav:
@@ -1131,14 +1147,15 @@ class VideoGenerator:
             speeds = spec.cta_video_clip_speeds or [1.0] * n
             cw, ch = spec.cta_video_w, spec.cta_video_h
             # Cover-fill each chosen clip to the box so they share one size
-            # (needed to concat); inputs 4..4+n-1 are the per-row picks in order.
-            # setpts=PTS/SPEED is applied per clip BEFORE the concat so each slot
-            # plays at its own speed; concat then re-stamps the joined timeline.
+            # (needed to concat); inputs clip_input_base..+n-1 are the per-row
+            # picks in order. setpts=PTS/SPEED is applied per clip BEFORE the
+            # concat so each slot plays at its own speed; concat then re-stamps
+            # the joined timeline.
             labels = []
             for k in range(n):
                 sp = speeds[k] if k < len(speeds) else 1.0
                 parts.append(
-                    f"[{4 + k}:v]fps={FPS},"
+                    f"[{clip_input_base + k}:v]fps={FPS},"
                     f"scale={cw}:{ch}:force_original_aspect_ratio=increase,"
                     f"crop={cw}:{ch},setsar=1,setpts=PTS/{sp:.4f},format=rgba[cv{k}];"
                 )
@@ -1152,19 +1169,21 @@ class VideoGenerator:
                 f"{seq}fade=t=in:st={spec.cta_video_fade_start}"
                 f":d={spec.cta_video_fade_duration}:alpha=1[ctav];"
             )
-        parts.append(
-            f"[3:v]format=rgba,"
-            f"fade=t=in:st={spec.cta_fade_start}:d={spec.cta_fade_duration}:alpha=1[cta];"
-        )
+        if has_cta:
+            parts.append(
+                f"[3:v]format=rgba,"
+                f"fade=t=in:st={spec.cta_fade_start}:d={spec.cta_fade_duration}:alpha=1[cta];"
+            )
         # Stack the overlay layers by their sidebar z-index (higher = on top; the
         # background is always the base). Ties fall back to the fixed priority in
         # the second tuple field so the order stays deterministic. Each tuple:
         # (z-index, tie-break priority, overlay input, overlay position).
         layers = [
             (cfg.video_z, 0, "[vidB]", video_pos),
-            (cfg.cta_image_z, 2, "[cta]", f"{spec.cta_x}:{spec.cta_y}"),
             (cfg.text_z, 3, "[2:v]", "0:0"),
         ]
+        if has_cta:
+            layers.append((cfg.cta_image_z, 2, "[cta]", f"{spec.cta_x}:{spec.cta_y}"))
         if has_ctav:
             layers.append((cfg.cta_video_z, 1, "[ctav]",
                            f"{spec.cta_video_x}:{spec.cta_video_y}"))
@@ -1185,8 +1204,11 @@ class VideoGenerator:
             "-loop", "1", "-framerate", str(FPS), "-i", str(base_png),
             "-i", str(self.video_path),
             "-loop", "1", "-framerate", str(FPS), "-i", str(overlay_png),
-            "-loop", "1", "-framerate", str(FPS), "-i", str(cta_png),
         ]
+        # CTA image is input 3 only when supplied (keeps clip indices aligned
+        # with clip_input_base above).
+        if has_cta:
+            cmd += ["-loop", "1", "-framerate", str(FPS), "-i", str(cta_png)]
         # CTA clips: this row's chosen sample per slot, in fixed play order; the
         # filter concats them. They play once through (no -stream_loop).
         for clip_path in clips:
@@ -1217,7 +1239,8 @@ class VideoGenerator:
         spec = RowSpec.from_row(row)
         base_png = self.work_dir / f"row_{row_number:04d}_base.png"
         overlay_png = self.work_dir / f"row_{row_number:04d}_overlay.png"
-        cta_png = self.work_dir / f"row_{row_number:04d}_cta.png"
+        # The CTA image is optional — no PNG (and no FFmpeg input) without one.
+        cta_png = self.work_dir / f"row_{row_number:04d}_cta.png" if self._has_cta else None
         filename = safe_filename(row_number, spec.headline.text)
         out_path = self.output_dir / filename
         try:
@@ -1225,7 +1248,8 @@ class VideoGenerator:
             # resolves positions; the CTA ships as its own input so FFmpeg
             # can fade it in (see build_ffmpeg_command)
             self.build_overlay_image(spec, include_cta=False).save(overlay_png)
-            self._get_cta(spec.cta_w, spec.cta_h).save(cta_png)
+            if cta_png is not None:
+                self._get_cta(spec.cta_w, spec.cta_h).save(cta_png)
 
             cmd = self.build_ffmpeg_command(spec, base_png, overlay_png, cta_png, out_path)
             proc = subprocess.run(
@@ -1250,7 +1274,8 @@ class VideoGenerator:
         finally:
             base_png.unlink(missing_ok=True)
             overlay_png.unlink(missing_ok=True)
-            cta_png.unlink(missing_ok=True)
+            if cta_png is not None:
+                cta_png.unlink(missing_ok=True)
 
     # ------------------------------------------------------------- preview
 
@@ -1311,8 +1336,8 @@ class VideoGenerator:
         """Everything the interactive preview editor needs, with each layer
         shipped separately so the browser can move/recolor elements without a
         server round-trip: the background, the promo video's first frame scaled
-        into its box, the optional CTA video's first frame, the CTA image, and
-        per text — a white alpha-mask PNG of the fill glyphs (recolored
+        into its box, the optional CTA video's first frame, the optional CTA
+        image, and per text — a white alpha-mask PNG of the fill glyphs (recolored
         client-side via CSS mask-image) plus a baked 'decoration' PNG carrying
         the artistic style (outline/shadow/neon) behind it. The text's
         background highlight box is described geometrically (bg_w/bg_h/bg_radius)
@@ -1372,10 +1397,6 @@ class VideoGenerator:
                 "frame": _img_to_data_uri(frame.convert("RGB"), "JPEG"),
                 "frame_w": frame.width, "frame_h": frame.height,
             },
-            "cta": {
-                "x": spec.cta_x, "y": spec.cta_y, "w": spec.cta_w, "h": spec.cta_h,
-                "img": _img_to_data_uri(self._get_cta(spec.cta_w, spec.cta_h)),
-            },
             "texts": texts,
             # Sidebar layer order — the editor applies these as CSS z-index so the
             # preview stacking matches the render (higher = on top).
@@ -1384,6 +1405,11 @@ class VideoGenerator:
                 "cta_image": self.config.cta_image_z, "text": self.config.text_z,
             },
         }
+        if self._has_cta:
+            payload["cta"] = {
+                "x": spec.cta_x, "y": spec.cta_y, "w": spec.cta_w, "h": spec.cta_h,
+                "img": _img_to_data_uri(self._get_cta(spec.cta_w, spec.cta_h)),
+            }
         if self._has_cta_video:
             cv = self._cover_frame(spec.cta_video_w, spec.cta_video_h, self._lead_cta_path(spec))
             payload["cta_video"] = {

@@ -7,7 +7,8 @@ Produces in ./sample_assets:
     backgrounds.zip  — two gradient background images (1080x1920)
     promo.mp4        — 5-second 16:9 test video with a tone (FFmpeg testsrc)
     cta.png          — a "SHOP NOW" call-to-action button with transparency
-    cta_video_1..4.mp4 — four short clips to try as the optional CTA videos
+                       (the CTA image is optional — omit it to skip that layer)
+    cta_video_1..5.mp4 — five short clips to try as the optional CTA videos
                        (they play back-to-back in a shuffled order)
 
 Usage:  python create_sample_assets.py
@@ -59,7 +60,7 @@ def make_video(path: Path) -> None:
     subprocess.run(cmd, check=True)
 
 
-def make_cta_videos(out_dir: Path, count: int = 4) -> None:
+def make_cta_videos(out_dir: Path, count: int = 5) -> None:
     """A few short, silent clips for the optional CTA-video slot — distinct
     sources so the shuffled back-to-back sequence is easy to see."""
     ffmpeg = find_ffmpeg()
@@ -89,7 +90,7 @@ def main() -> None:
 
     make_cta(OUT / "cta.png")
     make_video(OUT / "promo.mp4")
-    make_cta_videos(OUT, count=4)
+    make_cta_videos(OUT, count=5)
 
     rows = [
         {

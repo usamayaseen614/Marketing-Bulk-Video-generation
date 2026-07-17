@@ -90,7 +90,7 @@ class Workspace:
     """Uploaded assets materialized on disk inside a temp directory."""
     bg_dir: Path
     video_path: Path
-    cta_path: Path
+    cta_path: Optional[Path]
     font_path: Optional[Path]
     work_dir: Path
     cta_video_slots: list = field(default_factory=list)
@@ -102,8 +102,11 @@ def build_workspace(tmp: Path, video_file, zip_file, cta_file, font_file,
     video_path = tmp / "input.mp4"
     video_path.write_bytes(video_file.getvalue())
 
-    cta_path = tmp / "cta.png"
-    cta_path.write_bytes(cta_file.getvalue())
+    # The CTA image is optional — leave cta_path None when none was uploaded.
+    cta_path = None
+    if cta_file is not None:
+        cta_path = tmp / "cta.png"
+        cta_path.write_bytes(cta_file.getvalue())
 
     bg_dir = tmp / "backgrounds"
     with zipfile.ZipFile(io.BytesIO(zip_file.getvalue())) as zf:
@@ -314,8 +317,8 @@ if st_config.get_option("server.enableStaticServing"):
 st.set_page_config(page_title="Bulk Video Generator", page_icon="🎬", layout="wide")
 st.title("🎬 Bulk Marketing Video Generator")
 st.caption(
-    "Upload an Excel sheet, a promo video, background images, and a CTA image — "
-    "get one 1080x1920 (9:16) MP4 per row, ready for Reels, TikTok, and Shorts."
+    "Upload an Excel sheet, a promo video, background images, and an optional CTA "
+    "image — get one 1080x1920 (9:16) MP4 per row, ready for Reels, TikTok, and Shorts."
 )
 
 # ---- sidebar: layout & output configuration
@@ -364,7 +367,7 @@ with st.sidebar:
     st.subheader("CTA video (optional)")
     st.caption(
         f"A sequence of {CTA_VIDEO_SLOTS} clips that always play in order "
-        "(1 → 2 → 3 → 4) in one shared box. Each clip is a *pool* of sample "
+        "(1 → 2 → 3 → 4 → 5) in one shared box. Each clip is a *pool* of sample "
         "videos (up to ~30): one is chosen per output video — pinned by an Excel "
         "`CTA_Clip_<n>` cell, otherwise picked at random. Leave all empty to skip."
     )
@@ -482,7 +485,7 @@ with col1:
     video_file = st.file_uploader("Promo video (MP4) — used in every output", type=["mp4"])
 with col2:
     zip_file = st.file_uploader("Background images (ZIP)", type=["zip"])
-    cta_file = st.file_uploader("CTA image (PNG)", type=["png"])
+    cta_file = st.file_uploader("CTA image (PNG, optional)", type=["png"])
 
 # ---- Excel validation & preview table
 df = None
@@ -532,9 +535,12 @@ if excel_file is not None:
             with st.expander("Preview spreadsheet data"):
                 st.dataframe(df, hide_index=True, width="stretch")
 
-ready = df is not None and video_file is not None and zip_file is not None and cta_file is not None
+ready = df is not None and video_file is not None and zip_file is not None
 if not ready:
-    st.info("Upload all four files to enable preview and generation.")
+    st.info(
+        "Upload the Excel sheet, a promo video, and background images to enable "
+        "preview and generation. The CTA image is optional."
+    )
 
 # ---- actions
 st.subheader("2. Generate")
