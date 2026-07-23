@@ -209,6 +209,26 @@ _TEMPLATE = r"""
     bg.draggable = false;
     stage.appendChild(bg);
 
+    // Split-screen: show the centerline dividing the two panels (visual only).
+    if (DATA.layout === 'split') {
+      const divider = document.createElement('div');
+      divider.style.cssText = 'position:absolute;top:0;bottom:0;left:50%;width:0;'
+        + 'border-left:2px dashed rgba(255,255,255,.7);pointer-events:none;z-index:9999;';
+      stage.appendChild(divider);
+    }
+    // crop_to_panels: dim everything outside the band — those areas are cropped
+    // out of the finished video (visual aid only).
+    if (DATA.crop) {
+      [[0, DATA.crop.y], [DATA.crop.y + DATA.crop.h, DATA.canvas_h]].forEach(([a, b]) => {
+        if (b <= a) return;
+        const dim = document.createElement('div');
+        dim.style.cssText = 'position:absolute;left:0;right:0;top:' + px(a) + ';'
+          + 'height:' + px(b - a) + ';background:rgba(0,0,0,.65);pointer-events:none;'
+          + 'z-index:9998;';
+        stage.appendChild(dim);
+      });
+    }
+
     // --- center guides: while moving or resizing, an element whose center
     //     comes within __SNAP__ canvas px of the canvas centerline snaps onto
     //     it and shows a dotted line (vertical, horizontal, or both). ---
@@ -499,6 +519,18 @@ _TEMPLATE = r"""
       ink.style.webkitMaskImage = "url('" + t.mask + "')";
       ink.style.maskImage = "url('" + t.mask + "')";
       el.appendChild(ink);
+      // Subliminal texts render as a fast per-frame flicker that a static preview
+      // can't show; flag them so the full text here is understood as the
+      // whole-in-motion look. (See build_subliminal_layers.)
+      if (t.subliminal) {
+        const badge = document.createElement('div');
+        badge.textContent = '⚡ subliminal · ' + (t.subliminal_k || '?') + ' frames';
+        badge.style.cssText = 'position:absolute;left:0;top:-16px;font-size:9px;'
+          + 'line-height:14px;padding:0 4px;white-space:nowrap;border-radius:3px;'
+          + 'background:rgba(120,0,180,.85);color:#fff;pointer-events:none;z-index:99;';
+        el.appendChild(badge);
+        el.style.outline = '1px dashed rgba(180,90,255,.9)';
+      }
       el.style.zIndex = Z.text;
       stage.appendChild(el);
       const item = {

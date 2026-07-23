@@ -67,7 +67,7 @@ rows alone determines how many videos are generated:
 
 | Column | Meaning | Example |
 |---|---|---|
-| `BG_Image` | Background filename inside the ZIP (case-insensitive, subfolders OK). **Blank/absent = randomly assigned** from the ZIP — no image repeats until all have been used | `summer_bg.jpg` |
+| `BG_Image` | Background filename inside the ZIP (case-insensitive, subfolders OK). **Blank/absent = randomly assigned** from the ZIP — no image repeats until all have been used. The ZIP itself is **optional**: without one, rows render on the sidebar's solid background color | `summer_bg.jpg` |
 | `Video_X` / `Video_Y` | **Top-left corner** of the box the promo video is placed into, per row. **Blank/absent = the sidebar default** (or a random per-row spot when *Randomize position per video* is on) | `90` / `300` |
 | `Video_Width` / `Video_Height` | Size of the video box, per row — the video is scaled to fit inside it, aspect ratio preserved. **Blank/absent = the sidebar default** | `900` / `900` |
 | `CTA_X` / `CTA_Y` | **Top-left corner** of the CTA image, per row. **Blank/absent = the sidebar default** | `340` / `1600` |
@@ -75,10 +75,10 @@ rows alone determines how many videos are generated:
 | `CTA_Fade_Start` / `CTA_Fade_Duration` | When the CTA image starts fading in and how long it takes, in **seconds**. **Blank/absent = the sidebar default** | `1.0` / `0.5` |
 | `CTA_Video_X` / `CTA_Video_Y` | **Top-left corner** of the shared CTA-video box, per row. **Blank/absent = the sidebar default** | `720` / `1560` |
 | `CTA_Video_Width` / `CTA_Video_Height` | Size of the CTA-video box (each clip is cover-filled to it). **Blank/absent = the sidebar default** | `300` / `300` |
-| `CTA_Video_Fade_Start` / `CTA_Video_Fade_Duration` | Fade-in timing for the CTA-video sequence, in **seconds**. **Blank/absent = the sidebar default** | `1.0` / `0.8` |
-| `CTA_Video_Speed_1` … `CTA_Video_Speed_5` | Playback speed of clip position 1…5 individually (1 = normal, 2 = twice as fast, 0.5 = half). **Blank/absent = `CTA_Video_Speed`, then the sidebar's per-clip default** | `2.0` |
-| `CTA_Video_Speed` | Playback speed for **every** clip in the row at once — a shortcut for setting all of `CTA_Video_Speed_<n>`. A specific `CTA_Video_Speed_<n>` cell overrides it. **Blank/absent = the sidebar per-clip defaults** | `1.5` |
-| `CTA_Clip_1` … `CTA_Clip_5` | Pin which sample plays in clip position 1…5 for this video, by file name (with or without extension). **Blank/absent = a random sample from that position's pool** | `intro_a.mp4` |
+| `CTA_Video_Fade_Start` / `CTA_Video_Fade_Duration` | Fade-in timing for the CTA-video sequence, in **seconds**. **Blank/absent = the sidebar default. Ignored in split-screen mode**, where the panel is always visible from the first frame | `1.0` / `0.8` |
+| `CTA_Video_Speed_1` … `CTA_Video_Speed_10` | Playback speed of clip position 1…N individually (1 = normal, 2 = twice as fast, 0.5 = half). Columns exist up to 10; the sidebar's *Number of clip slots* sets how many are active. **Blank/absent = `CTA_Video_Speed`, then the sidebar's per-clip default** | `2.0` |
+| `CTA_Video_Speed` | Playback speed for **every** clip in the row at once — a shortcut for setting all of `CTA_Video_Speed_<n>`. A specific `CTA_Video_Speed_<n>` cell overrides it. Also the speed used by fill clips (see *Keep clips playing to fill the whole video*). **Blank/absent = normal / the sidebar per-clip defaults** | `1.5` |
+| `CTA_Clip_1` … `CTA_Clip_10` | Pin which sample plays in clip position 1…N for this video, by file name (with or without extension). **Blank/absent = a random sample from that position's pool** | `intro_a.mp4` |
 | `Headline` | Headline text (empty = skipped) | `Summer Mega Sale` |
 | `Headline_Size` | Font size in px. **Blank/absent = random** within a sensible range per element (headline 56–88, subheading 34–52, footer 24–36) | `72` |
 | `Headline_Color` | Hex (`#FFD700`), CSS color name (`yellow`, `blue`, `lightyellow`…), or `rgb(...)`. **Blank/absent = random** vivid palette color, never repeated within one video | `gold` |
@@ -86,7 +86,8 @@ rows alone determines how many videos are generated:
 | `Headline_Font` | Font family — a bundled name like `Impact`, `Heavy`, `Script`, `Marker`, `Elegant`, `Typewriter`, `Retro`, `Urban` (or the full `Impact (Bebas Neue)`), `System default`, or `Custom upload`. **Blank/absent = the sidebar default font** | `Impact` |
 | `Headline_BgColor` | Color of a **highlight box** drawn behind the text (same color formats as `_Color`). **Blank/absent = no box** | `#FF2D55` |
 | `Headline_Style` | Artistic treatment: `classic`, `outline`, `shadow`, or `neon`. **Blank/absent = the sidebar default style** | `outline` |
-| `Subheading`, `Subheading_*` | Same scheme (`_Size`, `_Color`, `_X`, `_Y`, `_Font`, `_BgColor`, `_Style`) | |
+| `Headline_Subliminal` / `Subheading_Subliminal` / `Footer_Subliminal` | Turn the **experimental subliminal / persistence-of-vision effect** on or off for that one text (`yes`/`no`), overriding the sidebar's *Apply to* choice for this row. **Blank/absent = on only if the sidebar targets that role.** See *Subliminal text* below | `yes` |
+| `Subheading`, `Subheading_*` | Same scheme (`_Size`, `_Color`, `_X`, `_Y`, `_Font`, `_BgColor`, `_Style`, `_Subliminal`) | |
 | `Footer`, `Footer_*` | Same scheme. The footer is always laid out on **3 balanced lines** (fewer if it has fewer words) | |
 
 Notes:
@@ -135,13 +136,72 @@ Notes:
   playback speed** (`CTA_Video_Speed_<n>`, or `CTA_Video_Speed` to set them all at once);
   each clip is cover-filled to the box, and their audio is ignored (the promo video supplies
   the soundtrack). Leave the upload empty to skip the element — output is identical to before.
+- **Split-screen layout (sidebar)**: switch *Layout mode* to **Split-screen** to place the
+  promo video in one half of the canvas and the CTA-video sequence in the other, as a centered
+  band (height set by *Panel height*). *Swap left / right* flips which side is which. In this
+  mode the side keeps drawing fresh random clips until the promo ends (never freezing), the
+  whole video ends when the promo ends, and per-row `Video_*` / `CTA_Video_*` positions and
+  *Randomize position* are ignored (a warning notes any that were set). The promo is fitted
+  inside its panel (letterboxed against the background); side clips are cropped to fill theirs.
+  **The side panel never fades** in split-screen — it's part of the layout, so it is fully
+  visible from the first frame through to the end, and the CTA-video fade settings are ignored.
+  *No background — output only the panels* goes further: the finished video is **exactly the two
+  panels** (1080 × panel height) with no background at all. Texts and the CTA are drawn **on top
+  of the videos**; auto-placed texts are confined to the band, and anything explicitly placed
+  outside it triggers a warning (it would be cropped out).
+- **Fill the whole video (sidebar / split mode)**: *Keep clips playing to fill the whole video*
+  keeps appending random clips from the pools after the fixed slots until the side covers the
+  full promo length, so it never holds a last frame. Off = play once, then hold. Split-screen
+  turns it on automatically.
+- **Subliminal text (experimental)**: pick **one** text in the sidebar's *Apply to* box
+  (Headline, Subheading, or Footer — default **Off**) and it renders so **no single frame shows
+  the whole thing** — each frame omits ~1/K of the words and the set cycles every K frames
+  (K/30 s), so it reads as whole in motion but is only partial when scrubbed frame-by-frame.
+  It is a CTA treatment, so it deliberately **never applies to every text at once**; override
+  it per text (and per row) with a `<Role>_Subliminal` cell.
+  *Effect style* picks how each frame is built. **Hide a slice** (default) draws the whole text
+  minus part of the words, so most of it is lit each frame and it stays bright and solid.
+  **Show only a slice** draws *only* ~1/K of the words, so every word is lit just 1/K of the
+  time and time-averages to roughly **1/K brightness** — faint and ghostly. Raising the frame
+  rate shortens the cycle but does **not** change that brightness ratio, because the eye
+  averages light over time; it is a duty-cycle limit, not a frame-rate one.
+  For **Hide a slice**, *Hidden characters* chooses how the hidden set is picked each frame:
+  **Random each cycle** (default) hides a different, evenly-spread subset every frame — balanced
+  so no character stays hidden, seeded so the preview still matches the render, and never
+  repeating the same comb; **Fixed pattern** hides the same characters in the same frames every
+  cycle. In random mode *Hidden per frame (%)* sets how much is hidden: ~33% (≈100/K) keeps
+  every character hidden **exactly once per cycle** and stays bright, while higher percentages
+  hide more per frame and look progressively fainter. Every setting guarantees no frame is ever
+  complete and the whole text reassembles over the cycle — the hidden amount is automatically
+  capped so **no word can ever be hidden in every frame**. (Without that cap a high percentage
+  against a small K — e.g. 70% at K=3, or 65% at K=2 — leaves some words hidden in *every* frame,
+  so they never appear in the video at all.) Raise K if you want to hide more per frame.
+  Rendering at **60 fps** (Output → Frame rate) halves the cycle to K/60 s, which blends
+  noticeably more smoothly.
+  A **hardcoded** rule always applies to whichever text has the effect: the **last 4
+  characters** follow their own schedule, independent of the body — they alternate every frame,
+  the **1st & 4th together, then the 2nd & 3rd**, so no more than 2 of them are ever visible at
+  once. This keeps the tail of the text — e.g. a code or domain — from ever appearing whole. Use
+  an **even** Frames-per-cycle (K) for a perfectly regular alternation. **Caveats:** the
+  "never whole" guarantee holds on *this* output file (with *Preserve frame-by-frame* on, which
+  encodes every frame independently and makes files much larger), but **platform re-encoding
+  (TikTok/IG/YouTube) can break it**; the effect reads as a shimmer, not crisp text; and rapid
+  flashing can affect photosensitive viewers and may conflict with platform policy. Off by
+  default — use deliberately.
 - Output files are named `001_Headline_Text.mp4` (row number + sanitized headline).
 
 ## Sidebar settings
 
 | Setting | Purpose |
 |---|---|
-| Randomize position per video | Each video gets its own random spot per row (avoids the CTA and explicitly positioned texts; auto-placed texts then avoid the video). Seeded per row, so previews and re-runs are reproducible |
+| Layout mode | **Free** = every box placed by its own coordinates. **Split-screen** = promo video on one half, CTA-video sequence on the other (with *Swap left / right* and *Panel height*), ending when the promo ends |
+| Background color | Solid canvas color used wherever a row has no background image — e.g. when no background ZIP is uploaded (the ZIP is optional) |
+| No background — output only the panels | Split-screen only: crop the output to exactly the two panels (1080 × panel height). No background at all; texts/CTA overlay the videos |
+| Number of clip slots | How many CTA-video clip positions play in fixed order (1–10). Each is a pool; one sample is picked per output video |
+| Keep clips playing to fill the whole video | After the fixed slots, keep drawing fresh random clips until the side covers the full promo length (never freezes). Split-screen turns this on automatically |
+| Subliminal text (experimental) | *Apply to* picks the **single** text (Headline / Subheading / Footer, default Off) that gets split across frames so no single frame shows all of it — never all texts at once; override per text via `<Role>_Subliminal`. *Effect style* = **Hide a slice** (bright, recommended) or **Show only a slice** (~1/K brightness, faint). For Hide: *Hidden characters* = **Random each cycle** (balanced, non-repeating; default) or **Fixed pattern**, and *Hidden per frame (%)* sets how much is hidden (≈33% stays bright and hides each character exactly once per cycle; higher is fainter). Tunable K (frames/cycle), word/char granularity, and *Preserve frame-by-frame* (all-intra, larger files). See the caveats above |
+| Frame rate (fps) | 30 or 60. 60 doubles the frames to encode but halves the subliminal cycle (K/fps s), so the effect blends more smoothly. Both upload fine to every major platform |
+| Randomize position per video | Each video gets its own random spot per row (avoids the CTA and explicitly positioned texts; auto-placed texts then avoid the video). Seeded per row, so previews and re-runs are reproducible. Ignored in split-screen mode |
 | Video X/Y/W/H | Default box the promo video is fitted into (aspect ratio preserved, centered). X/Y are hidden when randomize is on. A row's `Video_X`/`Video_Y`/`Video_Width`/`Video_Height` cells override these per video |
 | CTA image X/Y/W/H | Default position (top-left corner) and size of the CTA image. A row's `CTA_X`/`CTA_Y`/`CTA_Width`/`CTA_Height` cells override these per video |
 | CTA fade-in start / duration | When the CTA image fades in and for how long (seconds). Overridable per row via `CTA_Fade_Start` / `CTA_Fade_Duration` |
@@ -155,7 +215,8 @@ Notes:
 
 ## Workflow
 
-1. Upload the Excel sheet, a promo video, and background images (the CTA image is optional).
+1. Upload the Excel sheet and a promo video (background ZIP and CTA image are optional —
+   without backgrounds, videos render on the sidebar's background color).
    The Excel is validated immediately — missing columns are listed.
 2. Pick a row number and click **👁️ Preview Row** — an interactive preview opens.
    **Drag** the video box, the CTA image, the CTA video box, or any text to reposition it

@@ -117,6 +117,10 @@ def main() -> None:
             "Subheading_Style": "shadow",
             "Footer": "Offer ends June 30", "Footer_Size": 32,
             "Footer_Color": "#CCCCCC", "Footer_X": 540, "Footer_Y": 1850,
+            # Experimental: split this footer across frames (persistence of
+            # vision) — no single frame shows the whole line. See the sidebar's
+            # "Subliminal text" section and the README caveats.
+            "Footer_Subliminal": "yes",
         },
         {
             "BG_Image": "does_not_exist.png",  # intentional failure demo

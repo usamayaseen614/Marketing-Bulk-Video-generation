@@ -40,7 +40,21 @@ logger = logging.getLogger("video_generator")
 
 CANVAS_W = 1080   # vertical 9:16 canvas for Reels / TikTok / Shorts
 CANVAS_H = 1920
-FPS = 30
+FPS = 30                  # default output frame rate (RenderConfig.fps overrides)
+# Output frame rates offered in the UI. 60 halves the subliminal cycle length
+# (K/fps seconds), so the effect blends more smoothly; both survive upload to
+# every major platform. Higher rates are pointless — platforms re-encode down to
+# 30/60 and most phone screens top out at 60 Hz.
+FPS_CHOICES = (30, 60)
+
+# Hardcoded subliminal rule (applies to whichever text has the effect): of the
+# last SUBLIMINAL_TAIL_CHARS characters, at most SUBLIMINAL_TAIL_MAX_SHOWN may be
+# visible in ANY single frame — the rest are force-hidden (rotated/balanced so
+# all of them still surface across the cycle). This strengthens the "never whole"
+# guarantee for the tail of the text (e.g. a code or domain) regardless of the
+# word/char granularity or the hide percentage chosen elsewhere.
+SUBLIMINAL_TAIL_CHARS = 4
+SUBLIMINAL_TAIL_MAX_SHOWN = 2
 
 # The CTA is invisible until CTA_FADE_START seconds, then fades in (alpha
 # only) and is fully visible at CTA_FADE_START + CTA_FADE_DURATION. These are
@@ -52,11 +66,21 @@ CTA_FADE_DURATION = 0.5
 # The CTA video is a sequence of fixed positions ("clips") that always play in
 # order 1..N. Each position is backed by a pool of sample videos; one sample is
 # chosen per output video (pinned by a CTA_Clip_<i> cell, else picked at random).
-CTA_VIDEO_SLOTS = 5
-CTA_CLIP_COLUMNS = [f"CTA_Clip_{i}" for i in range(1, CTA_VIDEO_SLOTS + 1)]
+# The number of ACTIVE slots is chosen in the UI (defaults to
+# DEFAULT_CTA_VIDEO_SLOTS); the Excel column set is always generated off the MAX
+# so existing sheets keep parsing and users can grow up to MAX_CTA_VIDEO_SLOTS
+# without a code change.
+DEFAULT_CTA_VIDEO_SLOTS = 5
+MAX_CTA_VIDEO_SLOTS = 10
+CTA_CLIP_COLUMNS = [f"CTA_Clip_{i}" for i in range(1, MAX_CTA_VIDEO_SLOTS + 1)]
 # Per-clip playback-speed overrides, one column per slot. Blank falls back to
 # the row-wide CTA_Video_Speed cell, then to the sidebar's per-clip default.
-CTA_SPEED_COLUMNS = [f"CTA_Video_Speed_{i}" for i in range(1, CTA_VIDEO_SLOTS + 1)]
+CTA_SPEED_COLUMNS = [f"CTA_Video_Speed_{i}" for i in range(1, MAX_CTA_VIDEO_SLOTS + 1)]
+# Hard ceiling on the total clips concatenated into the side sequence (the
+# fixed opening picks plus the fill clips that pad out the main video's
+# duration). Guards against a pool of tiny clips exploding the FFmpeg input
+# count / command-line length. See _resolve_cta_sequence.
+CTA_MAX_TOTAL_CLIPS = 40
 
 # Every column is optional: absent/blank BG_Image cells get an image randomly
 # assigned from the uploaded ZIP (no repeats until the pool is exhausted),
@@ -75,11 +99,11 @@ OPTIONAL_COLUMNS = [
     *CTA_SPEED_COLUMNS,
     *CTA_CLIP_COLUMNS,
     "Headline", "Headline_Size", "Headline_Color", "Headline_X", "Headline_Y",
-    "Headline_Font", "Headline_BgColor", "Headline_Style",
+    "Headline_Font", "Headline_BgColor", "Headline_Style", "Headline_Subliminal",
     "Subheading", "Subheading_Size", "Subheading_Color", "Subheading_X", "Subheading_Y",
-    "Subheading_Font", "Subheading_BgColor", "Subheading_Style",
+    "Subheading_Font", "Subheading_BgColor", "Subheading_Style", "Subheading_Subliminal",
     "Footer", "Footer_Size", "Footer_Color", "Footer_X", "Footer_Y",
-    "Footer_Font", "Footer_BgColor", "Footer_Style",
+    "Footer_Font", "Footer_BgColor", "Footer_Style", "Footer_Subliminal",
 ]
 ALL_COLUMNS = REQUIRED_COLUMNS + OPTIONAL_COLUMNS
 
@@ -237,6 +261,20 @@ def _parse_opt_float(value, warnings: list[str], label: str) -> Optional[float]:
         return None
 
 
+def _parse_opt_bool(value, warnings: list[str], label: str) -> Optional[bool]:
+    """Parse a truthy cell. Blank => None (inherit the batch default); recognized
+    true/false tokens => the bool; anything else => warn + None."""
+    text = _clean_str(value).strip().lower()
+    if text == "":
+        return None
+    if text in ("1", "true", "yes", "y", "on"):
+        return True
+    if text in ("0", "false", "no", "n", "off"):
+        return False
+    warnings.append(f"{label}: expected yes/no, got '{value}'; the default will be used")
+    return None
+
+
 def _img_to_data_uri(img: Image.Image, fmt: str = "PNG") -> str:
     """Encode a PIL image as a data URI for embedding in the preview editor."""
     buf = io.BytesIO()
@@ -324,6 +362,22 @@ class RenderConfig:
     """All knobs the UI exposes. Coordinates are in 1080x1920 canvas pixels.
     The video and CTA box values are per-batch defaults — a row's Video_* /
     CTA_* Excel cells override them for that row."""
+    # Layout mode. "free" = every box is placed by its own coordinates (the
+    # classic behavior). "split" = a side-by-side split screen: the main video
+    # fills one half and the CTA-video sequence fills the other. In split mode
+    # the two panel boxes are computed automatically (see _apply_split_layout),
+    # so Video_*/CTA_Video_* positions and randomize_video_pos are ignored, and
+    # the side sequence always fills the main video's duration.
+    layout_mode: str = "free"
+    swap_sides: bool = False          # split mode: main on the right instead of left
+    split_panel_h: int = 960          # split mode: panel height (centered band)
+    # Split mode: crop the OUTPUT to exactly the two panels (1080 x panel
+    # height) — no background at all. Texts and the CTA are then drawn on top
+    # of the videos themselves; auto-placed texts are confined to the band.
+    crop_to_panels: bool = False
+    # Canvas color used when a row has no background image (backgrounds are
+    # optional — without a ZIP every row renders on this solid color).
+    bg_color: str = "#1E1B4B"
     video_x: int = 90
     video_y: int = 300
     video_w: int = 900
@@ -350,9 +404,15 @@ class RenderConfig:
     cta_video_fade_duration: float = 0.5
     # Playback speed per clip slot (1..N); >1 = faster, <1 = slower. A row's
     # CTA_Video_Speed_<i> cell overrides one clip; CTA_Video_Speed overrides the
-    # whole row. Defaults to normal speed for every slot.
-    cta_video_speeds: list[float] = field(
-        default_factory=lambda: [1.0] * CTA_VIDEO_SLOTS)
+    # whole row. Empty by default — the app fills it to the active slot count.
+    # The clip loop guards `i < len(...)`, so a short/empty list is always safe
+    # (missing slots fall back to normal speed).
+    cta_video_speeds: list[float] = field(default_factory=list)
+    # When True, the side sequence keeps drawing fresh random clips (from the
+    # union of all slot pools) until its combined length covers the whole main
+    # video, so the side panel is never frozen on a last frame. Off preserves
+    # the classic play-once/last-frame-hold behavior. Split layout turns this on.
+    cta_video_fill: bool = False
     # Layer order (z-index) for the four overlay layers; higher = nearer the top,
     # the background is always the base. Equal values fall back to a fixed tie
     # priority (promo < CTA video < CTA image < texts). Applies to every video.
@@ -360,6 +420,7 @@ class RenderConfig:
     cta_video_z: int = 2
     cta_image_z: int = 3
     text_z: int = 4
+    fps: int = FPS                # output frame rate; see FPS_CHOICES
     crf: int = 18                 # 16-28; lower = higher quality / bigger files
     preset: str = "medium"        # x264 speed/size tradeoff
     # When True, video_x/video_y are ignored and each row's video box gets a
@@ -372,6 +433,43 @@ class RenderConfig:
     # blank. default_font is a FONT_LIBRARY key, FONT_SYSTEM, or FONT_CUSTOM.
     default_font: str = FONT_SYSTEM
     default_style: str = "classic"
+    # Experimental subliminal / persistence-of-vision text effect (see TextSpec).
+    # subliminal_target names the ONE text role the effect applies to by default
+    # ("none" = off, else "Headline" / "Subheading" / "Footer") — it is a CTA
+    # treatment, so it deliberately never applies to every text at once. A row's
+    # <Role>_Subliminal cell still overrides this per text. K is the number of
+    # frames per cycle (each frame omits ~1/K of the tokens), phase shifts the
+    # cycle, granularity splits by "word" or "char". all_intra forces every output
+    # frame to be independently coded so the "no whole frame" property survives a
+    # frame-by-frame scrub of OUR file — at a big file-size cost.
+    subliminal_target: str = "none"
+    # How each frame is built from the token groups:
+    #   "hide" — show the whole text MINUS one rotating group (~1/K hidden).
+    #            Each token is lit (K-1)/K of the time, so it stays bright and
+    #            reads as solid text. The default.
+    #   "show" — show ONLY one rotating group and hide the rest (~1/K shown).
+    #            Each token is lit just 1/K of the time, so it time-averages to
+    #            roughly 1/K brightness — faint and ghostly. Raising fps does not
+    #            change that ratio; it only shortens the cycle.
+    subliminal_mode: str = "hide"
+    # How the hidden tokens are chosen each frame (hide mode only):
+    #   "ordered" — the fixed comb: token t is hidden in frame t % K, so the same
+    #               characters blank out in the same frames every cycle.
+    #   "random"  — hide a random subset each frame, balanced (least-recently-
+    #               hidden first, random ties) so no token stays hidden and the
+    #               pattern doesn't repeat. Seeded per row, so the preview still
+    #               matches the render. At ~1/K hidden this becomes a random
+    #               partition — every token hidden EXACTLY ONCE per cycle.
+    subliminal_pattern: str = "random"
+    # Random hide only: percent of tokens hidden per frame. ~100/K keeps the
+    # "hidden exactly once per cycle" property and stays bright; higher hides more
+    # per frame (fainter). Clamped so at least one token is hidden and at least
+    # one shown (no frame is ever whole, none ever fully blank).
+    subliminal_hide_pct: int = 33
+    subliminal_k: int = 3
+    subliminal_phase: int = 0
+    subliminal_granularity: str = "word"   # "word" | "char"
+    subliminal_all_intra: bool = True
     ffmpeg_timeout: int = 600     # seconds per row before a render is killed
 
 
@@ -386,6 +484,15 @@ class TextSpec:
     font: Optional[str] = None       # font choice name; None = config.default_font
     bg_color: Optional[tuple] = None # highlight box behind the text; None = no box
     style: Optional[str] = None      # classic|outline|shadow|neon; None = default_style
+    # Experimental "subliminal" / persistence-of-vision effect: the text is split
+    # across frames so no single frame shows all of it, cycling fast enough to
+    # read as whole in motion. `subliminal` is the requested flag (None = inherit
+    # RenderConfig.subliminal_enabled); it is demoted to False during resolution
+    # when the text is too short to split. `sub_k` / `sub_rects` cache the
+    # resolved cycle length and per-token pixel boxes (see _resolve_subliminal).
+    subliminal: Optional[bool] = None
+    sub_k: int = 0
+    sub_rects: Optional[list] = None
 
 
 @dataclass
@@ -448,6 +555,8 @@ class RowSpec:
                 bg_color=_parse_color(row.get(f"{prefix}_BgColor"), warnings,
                                       f"{prefix}_BgColor", fallback_desc="no background"),
                 style=(_clean_str(row.get(f"{prefix}_Style")).lower() or None),
+                subliminal=_parse_opt_bool(row.get(f"{prefix}_Subliminal"), warnings,
+                                           f"{prefix}_Subliminal"),
             )
 
         return cls(
@@ -561,6 +670,12 @@ class VideoGenerator:
         self._preview_frame_lock = threading.Lock()
         self._video_frames: dict[str, Image.Image] = {}
 
+        # Cached probed durations (seconds), by path. The side sequence fills the
+        # main video's length by measuring durations (see _probe_duration /
+        # _resolve_cta_sequence); each distinct file is probed once per batch.
+        self._duration_lock = threading.Lock()
+        self._durations: dict[str, Optional[float]] = {}
+
     # ------------------------------------------------------------- background lookup
 
     @staticmethod
@@ -607,7 +722,9 @@ class VideoGenerator:
         if needed == 0:
             return df, []
         if not self._bg_names:
-            raise ValueError("The backgrounds ZIP contains no images")
+            # Backgrounds are optional: with no images uploaded, blank cells stay
+            # blank and those rows render on the configured solid color.
+            return df, []
 
         warnings: list[str] = []
         used_paths = set()
@@ -711,7 +828,15 @@ class VideoGenerator:
             return cta
 
     def build_base_image(self, spec: RowSpec) -> Image.Image:
-        """Background layer: cover-crop (fill + center-crop) to exactly 1080x1920."""
+        """Background layer: cover-crop (fill + center-crop) to exactly 1080x1920.
+        Backgrounds are optional — a row with a blank BG_Image (no ZIP uploaded,
+        or an empty pool) renders on the configured solid color instead."""
+        if not spec.bg_image:
+            try:
+                color = ImageColor.getrgb(self.config.bg_color or "#1E1B4B")
+            except ValueError:
+                color = (30, 27, 75)
+            return Image.new("RGB", (CANVAS_W, CANVAS_H), color)
         bg_path = self.resolve_bg(spec.bg_image)
         with Image.open(bg_path) as img:
             return ImageOps.fit(img.convert("RGB"), (CANVAS_W, CANVAS_H), Image.LANCZOS)
@@ -759,23 +884,29 @@ class VideoGenerator:
 
     @staticmethod
     def _find_spot(fixed_x: Optional[int], fixed_y: Optional[int], w: float, h: float,
-                   occupied: list[tuple], rng: random.Random) -> tuple[int, int, bool]:
+                   occupied: list[tuple], rng: random.Random,
+                   y_bounds: Optional[tuple] = None) -> tuple[int, int, bool]:
         """Pick a CENTER point for a w x h box: rejection-sample random positions
         until one clears every occupied rect (with PLACEMENT_GAP breathing room).
         If the canvas is too crowded, settle for the sampled spot with the least
         total overlap. A provided coordinate pins that axis and only the missing
-        one is randomized."""
-        def axis_range(fixed: Optional[int], size: float, limit: int) -> tuple[float, float]:
+        one is randomized. `y_bounds` (top, bottom in canvas px) confines the
+        vertical range — used when the output is cropped to the split band so
+        auto-placed texts can't land in the cropped-away area."""
+        def axis_range(fixed: Optional[int], size: float,
+                       lo_lim: float, hi_lim: float) -> tuple[float, float]:
             if fixed is not None:
                 return fixed, fixed
-            lo = PLACEMENT_MARGIN + size / 2
-            hi = limit - PLACEMENT_MARGIN - size / 2
-            return (limit / 2, limit / 2) if lo > hi else (lo, hi)  # oversized: center it
+            lo = lo_lim + PLACEMENT_MARGIN + size / 2
+            hi = hi_lim - PLACEMENT_MARGIN - size / 2
+            mid = (lo_lim + hi_lim) / 2
+            return (mid, mid) if lo > hi else (lo, hi)  # oversized: center it
 
-        x_lo, x_hi = axis_range(fixed_x, w, CANVAS_W)
-        y_lo, y_hi = axis_range(fixed_y, h, CANVAS_H)
+        y_lo_lim, y_hi_lim = y_bounds if y_bounds else (0, CANVAS_H)
+        x_lo, x_hi = axis_range(fixed_x, w, 0, CANVAS_W)
+        y_lo, y_hi = axis_range(fixed_y, h, y_lo_lim, y_hi_lim)
 
-        best, best_overlap = (CANVAS_W / 2, CANVAS_H / 2), float("inf")
+        best, best_overlap = (CANVAS_W / 2, (y_lo_lim + y_hi_lim) / 2), float("inf")
         for _ in range(PLACEMENT_ATTEMPTS):
             cx, cy = rng.uniform(x_lo, x_hi), rng.uniform(y_lo, y_hi)
             rect = _rect_from_center(cx, cy, w, h)
@@ -810,6 +941,13 @@ class VideoGenerator:
 
         cfg = self.config
         rng = random.Random(spec.placement_seed())
+
+        # Split-screen: compute the two side-by-side panels up front. This sets
+        # spec.video_*/cta_video_* to the panels, so the box-sizing, CTA-video
+        # defaulting, and randomize/video-position code below all see concrete
+        # values and leave them untouched.
+        if cfg.layout_mode == "split":
+            self._apply_split_layout(spec)
 
         def box_dim(value: Optional[int], default: int, limit: int,
                     label: str, lo: int = 50) -> int:
@@ -889,6 +1027,14 @@ class VideoGenerator:
                 speed = per_clip if per_clip is not None else (
                     spec.cta_video_speed if spec.cta_video_speed is not None else default)
                 chosen_speeds.append(max(0.25, min(float(speed), 4.0)))
+            # Warn if the sheet pins a clip beyond the active slot count.
+            for j in range(len(self.cta_video_slots), len(names)):
+                if names[j]:
+                    spec.warnings.append(
+                        f"CTA_Clip_{j + 1}: only {len(self.cta_video_slots)} slot(s) "
+                        f"are active, so this cell is ignored")
+            if cfg.cta_video_fill or cfg.layout_mode == "split":
+                self._fill_cta_sequence(spec, chosen, chosen_speeds, clip_rng)
             spec.cta_video_clips = chosen
             spec.cta_video_clip_speeds = chosen_speeds
 
@@ -927,8 +1073,10 @@ class VideoGenerator:
                 pending.append((element, w, h))
 
         # A Video_X/Video_Y cell pins its axis (even when randomize is on);
-        # _find_spot only randomizes the missing one.
-        if cfg.randomize_video_pos and (spec.video_x is None or spec.video_y is None):
+        # _find_spot only randomizes the missing one. (Split mode already fixed
+        # the video box to a panel, so randomization never applies there.)
+        if (cfg.layout_mode != "split" and cfg.randomize_video_pos
+                and (spec.video_x is None or spec.video_y is None)):
             fixed_cx = None if spec.video_x is None else int(spec.video_x + spec.video_w / 2)
             fixed_cy = None if spec.video_y is None else int(spec.video_y + spec.video_h / 2)
             cx, cy, clean = self._find_spot(
@@ -950,11 +1098,34 @@ class VideoGenerator:
 
         video_rect = (spec.video_x, spec.video_y,
                       spec.video_x + spec.video_w, spec.video_y + spec.video_h)
-        occupied = [video_rect] + cta_occupied + explicit_rects
-        if self._has_cta_video:
-            occupied.append(cta_video_rect)
+        # crop_to_panels (split only): the output is exactly the panel band, so
+        # the video boxes are NOT no-go zones (texts overlay the videos) and
+        # auto-placement is confined to the band. Anything explicitly placed
+        # outside it would be cropped away — warn.
+        crop_mode = cfg.layout_mode == "split" and cfg.crop_to_panels
+        if crop_mode:
+            band = (spec.video_y, spec.video_y + spec.video_h)
+            occupied = cta_occupied + explicit_rects
+            y_bounds = band
+            for element in spec.text_elements:
+                if element.text and element.y is not None and not (
+                        band[0] <= element.y <= band[1]):
+                    spec.warnings.append(
+                        f"{element.role}_Y={element.y} is outside the panel band "
+                        f"({band[0]}-{band[1]}) — it will be cropped out of the "
+                        "output")
+            if self._has_cta and not (band[0] <= spec.cta_y <= band[1]):
+                spec.warnings.append(
+                    f"CTA image at y={spec.cta_y} is outside the panel band "
+                    f"({band[0]}-{band[1]}) — it will be cropped out of the output")
+        else:
+            occupied = [video_rect] + cta_occupied + explicit_rects
+            if self._has_cta_video:
+                occupied.append(cta_video_rect)
+            y_bounds = None
         for element, w, h in pending:
-            x, y, clean = self._find_spot(element.x, element.y, w, h, occupied, rng)
+            x, y, clean = self._find_spot(element.x, element.y, w, h, occupied, rng,
+                                          y_bounds)
             element.x, element.y = x, y
             if not clean:
                 spec.warnings.append(
@@ -962,6 +1133,155 @@ class VideoGenerator:
                     f"placed at least-crowded position ({x}, {y})"
                 )
             occupied.append(_rect_from_center(x, y, w, h))
+
+        # Text positions are final now, so decide the subliminal split per text.
+        self._resolve_subliminal(spec)
+
+    def _resolve_subliminal(self, spec: RowSpec) -> None:
+        """Decide the subliminal (persistence-of-vision) split for each text.
+        The batch default applies to exactly ONE role (config.subliminal_target)
+        — it's a CTA treatment, never something every text gets at once — and a
+        row's <Role>_Subliminal cell overrides that per text. For texts that end
+        up asking for it, this computes the token boxes and the effective cycle
+        length K (capped at the token count). Texts too short to split (< 2
+        tokens) are demoted to normal rendering with a warning. Results cache on
+        the element (subliminal / sub_k / sub_rects) so the overlay build, the
+        partial render, and the editor payload all agree."""
+        cfg = self.config
+        target = (cfg.subliminal_target or "none").strip().lower()
+        for element in spec.text_elements:
+            default_on = target == element.role.lower()
+            want = default_on if element.subliminal is None else element.subliminal
+            element.subliminal = False
+            element.sub_k = 0
+            element.sub_rects = None
+            if not want or not element.text:
+                continue
+            k_req = max(2, int(cfg.subliminal_k))
+            gran = (cfg.subliminal_granularity or "word").lower()
+            rects = self._token_rects(element, element.x, element.y, gran)
+            # Fall back to character granularity when there aren't enough word
+            # tokens to guarantee every frame omits at least one.
+            if gran != "char" and len(rects) < k_req:
+                rects_c = self._token_rects(element, element.x, element.y, "char")
+                if len(rects_c) > len(rects):
+                    rects = rects_c
+            if len(rects) < 2:
+                spec.warnings.append(
+                    f"{element.role}: too short to split subliminally — shown normally")
+                continue
+            if element.bg_color:
+                spec.warnings.append(
+                    f"{element.role}: highlight box is ignored for subliminal text")
+            element.subliminal = True
+            # Ordered and show mode partition tokens into groups, so there can be
+            # at most one group per token (K capped at the token count). Random
+            # hide instead cycles K distinct frames (the period) and hides a
+            # rotating random subset, so it can use the full requested K even with
+            # fewer tokens than frames.
+            random_hide = ((cfg.subliminal_mode or "hide").lower() == "hide"
+                           and (cfg.subliminal_pattern or "random").lower() == "random")
+            element.sub_k = k_req if random_hide else min(k_req, len(rects))
+            element.sub_rects = rects
+
+    def _apply_split_layout(self, spec: RowSpec) -> None:
+        """Split-screen: the main video fills one half of the canvas and the
+        CTA-video sequence fills the other, as a centered vertical band whose
+        height is cfg.split_panel_h. Overwrites both boxes' geometry on `spec`
+        (so per-row Video_*/CTA_Video_* cells and randomize_video_pos are
+        ignored). swap_sides puts the main video on the right instead of left."""
+        cfg = self.config
+        overridden = [label for label, val in (
+            ("Video_X", spec.video_x), ("Video_Y", spec.video_y),
+            ("Video_Width", spec.video_w), ("Video_Height", spec.video_h),
+            ("CTA_Video_X", spec.cta_video_x), ("CTA_Video_Y", spec.cta_video_y),
+            ("CTA_Video_Width", spec.cta_video_w), ("CTA_Video_Height", spec.cta_video_h),
+        ) if val is not None]
+        if overridden:
+            spec.warnings.append(
+                "split layout active — these per-row cells are ignored: "
+                + ", ".join(overridden))
+        half = CANVAS_W // 2
+        panel_h = max(50, min(int(cfg.split_panel_h), CANVAS_H))
+        panel_h -= panel_h % 2          # even sizes/offsets keep the yuv420p
+        y0 = (CANVAS_H - panel_h) // 2  # crop (crop_to_panels) chroma-clean
+        y0 -= y0 % 2
+        main_box = (0, y0, half, panel_h)                 # (x, y, w, h)
+        side_box = (half, y0, CANVAS_W - half, panel_h)
+        if cfg.swap_sides:
+            main_box, side_box = side_box, main_box
+        spec.video_x, spec.video_y, spec.video_w, spec.video_h = main_box
+        spec.cta_video_x, spec.cta_video_y, spec.cta_video_w, spec.cta_video_h = side_box
+        # A split-screen panel is part of the layout, not an accent that appears
+        # later: it must be solid from the first frame and stay to the end. Zero
+        # the fade here (set, not None, so the sidebar defaults below don't
+        # re-apply it); build_ffmpeg_command then skips the fade filter entirely.
+        spec.cta_video_fade_start = 0.0
+        spec.cta_video_fade_duration = 0.0
+
+    def _fill_cta_sequence(self, spec: RowSpec, chosen: list, chosen_speeds: list,
+                           clip_rng: random.Random) -> None:
+        """Pad the already-picked side sequence so it covers the full main-video
+        duration by appending fresh random clips drawn from the union of all
+        slot pools. Mutates `chosen` / `chosen_speeds` in place. Degrades
+        gracefully (leaves the sequence as-is, so the last frame holds) whenever
+        a duration can't be measured; the muxer's -shortest trims the final
+        overshoot clip."""
+        main_dur = self._probe_duration(self.video_path)
+        if main_dur is None:
+            spec.warnings.append(
+                "CTA video: couldn't measure the main video's duration; the side "
+                "sequence isn't padded (its last frame may hold).")
+            return
+        # Union of every slot's pool, de-duplicated (a clip may appear in more
+        # than one slot) but order-stable for reproducibility.
+        seen: set[str] = set()
+        pool: list[Path] = []
+        for slot in self.cta_video_slots:
+            for p in slot:
+                if str(p) not in seen:
+                    seen.add(str(p))
+                    pool.append(p)
+        if not pool:
+            return
+
+        # setpts=PTS/speed shortens a clip's on-screen time by its speed factor.
+        def effective(path: Path, speed: float) -> Optional[float]:
+            raw = self._probe_duration(path)
+            return None if raw is None else raw / speed
+
+        cumulative = 0.0
+        for p, s in zip(chosen, chosen_speeds):
+            eff = effective(p, s)
+            if eff is None:
+                spec.warnings.append(
+                    "CTA video: couldn't measure a clip's duration; the side "
+                    "sequence isn't padded (its last frame may hold).")
+                return
+            cumulative += eff
+        # Fill clips have no slot index, so they take the row-wide speed if set,
+        # otherwise normal speed.
+        fill_speed = spec.cta_video_speed if spec.cta_video_speed is not None else 1.0
+        fill_speed = max(0.25, min(float(fill_speed), 4.0))
+        while cumulative < main_dur and len(chosen) < CTA_MAX_TOTAL_CLIPS:
+            candidates = pool
+            if len(pool) > 1 and chosen:
+                prev = str(chosen[-1])
+                candidates = [p for p in pool if str(p) != prev] or pool
+            pick = clip_rng.choice(candidates)
+            eff = effective(pick, fill_speed)
+            if eff is None:
+                spec.warnings.append(
+                    "CTA video: couldn't measure a fill clip's duration; stopped "
+                    "padding the side sequence early.")
+                return
+            chosen.append(pick)
+            chosen_speeds.append(fill_speed)
+            cumulative += eff
+        if cumulative < main_dur and len(chosen) >= CTA_MAX_TOTAL_CLIPS:
+            spec.warnings.append(
+                f"CTA video: reached the {CTA_MAX_TOTAL_CLIPS}-clip cap before "
+                "covering the full main video (clips may be very short).")
 
     def _paint_text(self, target: Image.Image, ax: float, ay: float, element: TextSpec,
                     what: str = "full", fill: Optional[tuple] = None) -> None:
@@ -1036,7 +1356,11 @@ class VideoGenerator:
         self._resolve_positions(spec)
         canvas = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
         for element in spec.text_elements:
-            if not element.text:
+            # Subliminal texts are NOT baked here — they ship as their own K
+            # cycled FFmpeg inputs (see build_subliminal_layers). In a static
+            # preview composite this means the effect isn't shown (it can't be —
+            # it's motion-only); the editor payload renders them separately.
+            if not element.text or element.subliminal:
                 continue
             layer = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
             self._paint_text(layer, element.x, element.y, element, "full")
@@ -1052,6 +1376,226 @@ class VideoGenerator:
                 cta = self._get_cta(spec.cta_w, spec.cta_h)
                 canvas.paste(cta, (spec.cta_x, spec.cta_y), cta)
         return canvas
+
+    # ------------------------------------------------- subliminal text (POV)
+
+    def _token_rects(self, element: TextSpec, ax: float, ay: float,
+                     granularity: str) -> list:
+        """Per-token pixel boxes for `element.text` (already wrapped into lines),
+        in the same coordinate space _paint_text uses: the block is centered at
+        (ax, ay), each line is horizontally centered (anchor='mm', align center).
+        Returns [(token_index, (l, t, r, b)), ...]. `granularity` is 'word' or
+        'char'. Left/right come from measuring the actual line substrings, so
+        intra-line kerning is respected."""
+        font = self._font_for(element)
+        lines = element.text.split("\n")
+        ascent, descent = font.getmetrics()
+        line_h = ascent + descent
+        spacing = 4  # PIL multiline_text default line spacing
+        n = len(lines)
+        block_h = n * line_h + (n - 1) * spacing
+        top = ay - block_h / 2.0
+        measure = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+        rects: list = []
+        t_idx = 0
+        for li, line in enumerate(lines):
+            line_top = top + li * (line_h + spacing)
+            line_w = measure.textlength(line, font=font)
+            x0 = ax - line_w / 2.0
+            if granularity == "char":
+                spans = [(i, i + 1) for i, ch in enumerate(line) if not ch.isspace()]
+            else:
+                spans = []
+                i = 0
+                while i < len(line):
+                    if line[i].isspace():
+                        i += 1
+                        continue
+                    j = i
+                    while j < len(line) and not line[j].isspace():
+                        j += 1
+                    spans.append((i, j))
+                    i = j
+            for a, b in spans:
+                left = x0 + measure.textlength(line[:a], font=font)
+                right = x0 + measure.textlength(line[:b], font=font)
+                rects.append((t_idx, (left, line_top, right, line_top + line_h)))
+                t_idx += 1
+        return rects
+
+    @staticmethod
+    def _balanced_hidden_sets(n: int, k: int, h: int, rng: random.Random) -> list:
+        """K frames, each hiding exactly h of the n token indices, chosen so the
+        per-token hide counts stay as even as possible: each frame hides the
+        least-recently-hidden tokens, breaking ties randomly. Consequences —
+          * every token is hidden close to k*h/n times (spread out, none stuck),
+          * a token hidden this frame has a higher count, so it's unlikely to be
+            picked again immediately (no obvious repeats),
+          * at h == n/k it's a random partition: every token hidden EXACTLY once
+            across the k frames."""
+        counts = [0] * n
+        sets = []
+        for _ in range(k):
+            order = list(range(n))
+            rng.shuffle(order)                    # random tie-break
+            order.sort(key=lambda c: counts[c])   # least-hidden first (stable)
+            hide = order[:h]
+            for c in hide:
+                counts[c] += 1
+            sets.append(set(hide))
+        return sets
+
+    def _subliminal_partials(self, element: TextSpec) -> list:
+        """Render element.sub_k full-canvas RGBA layers, one per frame of the
+        cycle. What each frame drops (or keeps) depends on the config:
+
+          hide + "ordered" — hide token t in frame t % K (a fixed, even comb).
+          hide + "random"  — hide a balanced random subset each frame (seeded per
+                             row, so the preview matches the render); about
+                             subliminal_hide_pct of the tokens per frame. At
+                             ~100/K %% this is a random partition (each token
+                             hidden exactly once per cycle); higher hides more.
+          show             — show ONLY the tokens where t % K == j (~1/K shown).
+
+        In every case no single frame carries the whole text and the union across
+        the K frames is the whole text. Kept pixels are identical across frames
+        because each derives from ONE correctly rendered raster."""
+        k = element.sub_k
+        rects = element.sub_rects or []
+        n = len(rects)
+        cfg = self.config
+        show_only = (cfg.subliminal_mode or "hide").lower() == "show"
+        random_hide = (not show_only
+                       and (cfg.subliminal_pattern or "random").lower() == "random")
+
+        # Per-frame token-index sets: HIDDEN for hide mode, SHOWN for show mode.
+        if random_hide:
+            h = max(1, min(n - 1, round((cfg.subliminal_hide_pct or 33) / 100.0 * n)))
+            # Guarantee every token still appears at least once per cycle: a token
+            # may be hidden in at most k-1 of the k frames, so the total hides
+            # (k*h) must fit within n*(k-1). Without this, a high hide % against a
+            # small K (e.g. 70% at K=3) leaves some words hidden in EVERY frame —
+            # they'd never be seen at all. Raise K to hide more per frame.
+            h = max(1, min(h, (n * (k - 1)) // k))
+            seed = zlib.crc32(("sub|" + element.role + "|" + element.text).encode("utf-8"))
+            frame_sets = self._balanced_hidden_sets(n, k, h, random.Random(seed))
+        else:  # ordered hide, or show — the fixed comb
+            frame_sets = [{i for i in range(n) if i % k == j} for j in range(k)]
+
+        # Render the styled text once. Suppress the highlight box — carving
+        # tokens out of it would notch it (bg_color is ignored for these).
+        saved_bg = element.bg_color
+        element.bg_color = None
+        try:
+            full = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
+            self._paint_text(full, element.x, element.y, element, "full")
+        finally:
+            element.bg_color = saved_bg
+        stroke, sh_off, sh_blur, glow, _bg, _pad = self._style_metrics(element)
+        # Enough to swallow the token's own style halo (glow/shadow/stroke are in
+        # the max()), plus a small margin. Kept tight because at high hide
+        # percentages a large margin would nibble the edges of the few glyphs
+        # that ARE shown (their erased neighbours' boxes reach into them).
+        pad = int(max(stroke, sh_off + sh_blur, glow)) + 2
+
+        def padded(rect):
+            l, t, r, b = rect
+            return (max(0, int(l - pad)), max(0, int(t - pad)),
+                    min(CANVAS_W, int(r + pad)), min(CANVAS_H, int(b + pad)))
+
+        # Hardcoded tail rule: the last SUBLIMINAL_TAIL_CHARS characters follow
+        # their OWN schedule, independent of the body. They alternate every frame
+        # — the 1st & 4th shown together, then the 2nd & 3rd — so at most
+        # SUBLIMINAL_TAIL_MAX_SHOWN of them are ever visible at once (exactly two
+        # for a full 4-char tail). Measured on the CHARACTER boxes so it holds
+        # whatever the body granularity is.
+        char_rects = self._token_rects(element, element.x, element.y, "char")
+        tail = char_rects[-SUBLIMINAL_TAIL_CHARS:]
+        tail_m = len(tail)
+
+        def tail_shown(j):
+            # indices (into `tail`) to SHOW this frame; the rest stay hidden
+            if tail_m >= 4:
+                return (0, tail_m - 1) if j % 2 == 0 else (1, 2)
+            if tail_m == 3:
+                return (0, 2) if j % 2 == 0 else (1,)
+            if tail_m == 2:
+                return (0,) if j % 2 == 0 else (1,)
+            return tuple(range(tail_m))
+
+        # Per-character tail boxes. ERASE boxes are padded for style halos but
+        # clamped so they never reach left of the first tail character —
+        # otherwise the padding eats into the character just before the tail
+        # (e.g. the 'd' of "…Friend.com" losing its right edge). PASTE boxes are
+        # additionally clamped against both neighbours' tight boxes: cropping the
+        # full raster with unclamped padding would carry a pad-wide sliver of a
+        # HIDDEN neighbour's ink back in ("half a letter" artifacts).
+        tail_left = int(tail[0][1][0]) if tail_m else 0
+
+        def tail_erase_box(rect):
+            b = padded(rect)
+            return (max(b[0], tail_left), b[1], b[2], b[3])
+
+        def tail_paste_box(ti):
+            l, t, r, b = tail[ti][1]
+            pl, pt, pr, pb = padded((l, t, r, b))
+            # own territory: from the previous tail char's tight right edge to the
+            # next one's tight left edge (char 0 stops at its own tight left so it
+            # can't resurrect a body-hidden character before the tail).
+            lo = int(tail[ti - 1][1][2]) if ti > 0 else tail_left
+            hi = int(tail[ti + 1][1][0]) if ti + 1 < tail_m else pr
+            return (max(pl, lo), pt, min(pr, hi), pb)
+
+        partials = []
+        for j in range(k):
+            sel = frame_sets[j]
+            if show_only:
+                # Start empty and copy in only the shown tokens, so a neighbour's
+                # padded box can't shave the kept glyphs.
+                img = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
+                for t_idx, rect in rects:
+                    if t_idx in sel:
+                        box = padded(rect)
+                        if box[2] > box[0] and box[3] > box[1]:
+                            img.paste(full.crop(box), (box[0], box[1]))
+            else:
+                # Copy the full text and erase the hidden tokens. ImageDraw writes
+                # pixels directly (no compositing), so this clears them to
+                # transparent.
+                img = full.copy()
+                draw = ImageDraw.Draw(img)
+                for t_idx, rect in rects:
+                    if t_idx in sel:
+                        draw.rectangle(padded(rect), fill=(0, 0, 0, 0))
+            # Apply the tail schedule ON TOP of the body: clear the whole tail
+            # region, then paste back only the scheduled characters, each via its
+            # own alpha mask on its TIGHT box — so a hidden neighbour can't clip a
+            # tiny glyph like '.', and a shown one isn't revealed by padding bleed.
+            if tail_m:
+                tdraw = ImageDraw.Draw(img)
+                for _, rect in tail:
+                    tdraw.rectangle(tail_erase_box(rect), fill=(0, 0, 0, 0))
+                for ti in tail_shown(j):
+                    box = tail_paste_box(ti)
+                    if box[2] > box[0] and box[3] > box[1]:
+                        glyph = full.crop(box)
+                        img.paste(glyph, (box[0], box[1]), glyph)
+            partials.append(img)
+        return partials
+
+    def build_subliminal_layers(self, spec: RowSpec) -> list:
+        """One entry per subliminal text: {'role', 'k', 'images': [K RGBA imgs]}.
+        Empty when no text uses the effect."""
+        self._resolve_positions(spec)
+        out = []
+        for element in spec.text_elements:
+            if element.subliminal and element.sub_k >= 2:
+                out.append({
+                    "role": element.role,
+                    "k": element.sub_k,
+                    "images": self._subliminal_partials(element),
+                })
+        return out
 
     @staticmethod
     def _match_clip(slot: list, name: str) -> Optional[Path]:
@@ -1071,7 +1615,8 @@ class VideoGenerator:
 
     def build_ffmpeg_command(self, spec: RowSpec, base_png: Path,
                              overlay_png: Path, cta_png: Optional[Path],
-                             out_path: Path) -> list[str]:
+                             out_path: Path,
+                             sub_layers: Optional[list] = None) -> list[str]:
         """
         Single-pass composite. Filter graph explained:
 
@@ -1116,12 +1661,13 @@ class VideoGenerator:
           topmost overlay also converts
           to yuv420p — required for maximum player/social-platform compatibility.
 
-        Inputs use -loop 1 -framerate 30 so the still images behave as 30fps
-        streams aligned with the output rate. -shortest at the muxer trims audio
-        to the video length; -movflags +faststart relocates the moov atom for
-        instant playback start after upload.
+        Inputs use -loop 1 -framerate <fps> so the still images behave as streams
+        aligned with the output rate (config.fps, 30 or 60). -shortest at the
+        muxer trims audio to the video length; -movflags +faststart relocates the
+        moov atom for instant playback start after upload.
         """
         cfg = self.config
+        fps = int(cfg.fps or FPS)
         # spec.video_* are the per-row resolved box (Excel Video_* overrides,
         # the configured values, or a randomized spot when randomize_video_pos
         # is enabled). The promo video defines the render length: [vidA] anchors
@@ -1155,7 +1701,7 @@ class VideoGenerator:
             for k in range(n):
                 sp = speeds[k] if k < len(speeds) else 1.0
                 parts.append(
-                    f"[{clip_input_base + k}:v]fps={FPS},"
+                    f"[{clip_input_base + k}:v]fps={fps},"
                     f"scale={cw}:{ch}:force_original_aspect_ratio=increase,"
                     f"crop={cw}:{ch},setsar=1,setpts=PTS/{sp:.4f},format=rgba[cv{k}];"
                 )
@@ -1165,10 +1711,16 @@ class VideoGenerator:
                 seq = "[cseq]"
             else:
                 seq = labels[0]
-            parts.append(
-                f"{seq}fade=t=in:st={spec.cta_video_fade_start}"
-                f":d={spec.cta_video_fade_duration}:alpha=1[ctav];"
-            )
+            # A zero-length fade means "visible from the first frame" (always the
+            # case in split-screen, where the panel is layout, not an accent) —
+            # emit a passthrough instead of a degenerate fade=d=0.
+            if (spec.cta_video_fade_duration or 0) > 0:
+                parts.append(
+                    f"{seq}fade=t=in:st={spec.cta_video_fade_start}"
+                    f":d={spec.cta_video_fade_duration}:alpha=1[ctav];"
+                )
+            else:
+                parts.append(f"{seq}null[ctav];")
         if has_cta:
             parts.append(
                 f"[3:v]format=rgba,"
@@ -1177,7 +1729,7 @@ class VideoGenerator:
         # Stack the overlay layers by their sidebar z-index (higher = on top; the
         # background is always the base). Ties fall back to the fixed priority in
         # the second tuple field so the order stays deterministic. Each tuple:
-        # (z-index, tie-break priority, overlay input, overlay position).
+        # (z-index, tie-break priority, overlay input, overlay position, enable?).
         layers = [
             (cfg.video_z, 0, "[vidB]", video_pos),
             (cfg.text_z, 3, "[2:v]", "0:0"),
@@ -1187,32 +1739,58 @@ class VideoGenerator:
         if has_ctav:
             layers.append((cfg.cta_video_z, 1, "[ctav]",
                            f"{spec.cta_video_x}:{spec.cta_video_y}"))
+        # Subliminal text: each partial is a looped-still input painted at 0,0 but
+        # timeline-gated to one frame slot of the cycle via `enable`, so per output
+        # frame exactly one partial shows and no frame carries the whole text. They
+        # sit at text_z (just above the static texts); their inputs trail the CTA
+        # clips so clip_input_base stays valid.
+        sub_layers = sub_layers or []
+        sub_input_base = clip_input_base + len(clips)
+        for m, sl in enumerate(sub_layers):
+            layers.append((cfg.text_z, 4, f"[{sub_input_base + m}:v]", "x=0:y=0",
+                           sl["enable"]))
         layers.sort(key=lambda layer: (layer[0], layer[1]))
 
+        # crop_to_panels (split only): the finished composite is cropped to
+        # exactly the panel band — the output IS the two videos (1080 x panel
+        # height), no background at all. The band is even-aligned by
+        # _apply_split_layout so the yuv420p chroma stays clean.
+        final = ""
+        if cfg.layout_mode == "split" and cfg.crop_to_panels:
+            final = f",crop={CANVAS_W}:{spec.video_h}:0:{spec.video_y}"
+        final += ",format=yuv420p"
+
         last = "anchored"
-        for i, (_z, _prio, label, pos) in enumerate(layers):
+        for i, layer in enumerate(layers):
+            label, pos = layer[2], layer[3]
+            enable = layer[4] if len(layer) > 4 else None
             top = i == len(layers) - 1
             out = "out" if top else f"z{i}"
-            fmt = ",format=yuv420p" if top else ""
+            fmt = final if top else ""
             sep = "" if top else ";"  # the final [out] feeds -map, no trailing ;
-            parts.append(f"[{last}]{label}overlay={pos}{fmt}[{out}]{sep}")
+            en = f":enable='{enable}'" if enable else ""
+            parts.append(f"[{last}]{label}overlay={pos}{en}{fmt}[{out}]{sep}")
             last = out
         filter_complex = "".join(parts)
 
         cmd = [
             self.ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
-            "-loop", "1", "-framerate", str(FPS), "-i", str(base_png),
+            "-loop", "1", "-framerate", str(fps), "-i", str(base_png),
             "-i", str(self.video_path),
-            "-loop", "1", "-framerate", str(FPS), "-i", str(overlay_png),
+            "-loop", "1", "-framerate", str(fps), "-i", str(overlay_png),
         ]
         # CTA image is input 3 only when supplied (keeps clip indices aligned
         # with clip_input_base above).
         if has_cta:
-            cmd += ["-loop", "1", "-framerate", str(FPS), "-i", str(cta_png)]
+            cmd += ["-loop", "1", "-framerate", str(fps), "-i", str(cta_png)]
         # CTA clips: this row's chosen sample per slot, in fixed play order; the
         # filter concats them. They play once through (no -stream_loop).
         for clip_path in clips:
             cmd += ["-i", str(clip_path)]
+        # Subliminal partials: looped stills (one per cycle frame slot), trailing
+        # the CTA clips so clip_input_base / clip indices stay valid.
+        for sl in sub_layers:
+            cmd += ["-loop", "1", "-framerate", str(fps), "-i", str(sl["png"])]
         cmd += ["-filter_complex", filter_complex, "-map", "[out]"]
         if cfg.include_audio:
             # '1:a?' = take audio from the promo video if it exists; never fail
@@ -1224,7 +1802,24 @@ class VideoGenerator:
             "-c:v", "libx264",
             "-preset", cfg.preset,
             "-crf", str(cfg.crf),
-            "-r", str(FPS),
+            "-r", str(fps),
+        ]
+        # Bound the output to the main video's exact length. The looped base /
+        # overlay / subliminal stills are infinite streams; the muxer -shortest
+        # only trims them when the promo has an audio track to anchor against
+        # (-map 1:a?). A silent or audio-disabled promo would otherwise run away,
+        # so probe the duration and cap it explicitly. This also makes the
+        # "whole video ends when the main video ends" contract exact.
+        main_dur = self._probe_duration(self.video_path)
+        if main_dur:
+            cmd += ["-t", f"{main_dur:.3f}"]
+        if sub_layers and cfg.subliminal_all_intra:
+            # Independently code every frame (keyint=1) so the per-frame
+            # "incomplete text" property survives a frame-by-frame scrub of THIS
+            # file — inter-frame prediction would otherwise smear neighbouring
+            # partials into a decodable whole. Substantially larger files.
+            cmd += ["-x264-params", "keyint=1:scenecut=0"]
+        cmd += [
             "-shortest",
             "-movflags", "+faststart",
             str(out_path),
@@ -1243,6 +1838,7 @@ class VideoGenerator:
         cta_png = self.work_dir / f"row_{row_number:04d}_cta.png" if self._has_cta else None
         filename = safe_filename(row_number, spec.headline.text)
         out_path = self.output_dir / filename
+        sub_pngs: list[Path] = []
         try:
             self.build_base_image(spec).save(base_png)
             # resolves positions; the CTA ships as its own input so FFmpeg
@@ -1251,7 +1847,24 @@ class VideoGenerator:
             if cta_png is not None:
                 self._get_cta(spec.cta_w, spec.cta_h).save(cta_png)
 
-            cmd = self.build_ffmpeg_command(spec, base_png, overlay_png, cta_png, out_path)
+            # Subliminal texts: save each partial and hand FFmpeg the input path
+            # plus its per-frame enable expression (one cycle slot each).
+            sub_layers = []
+            phase = int(self.config.subliminal_phase)
+            for e, item in enumerate(self.build_subliminal_layers(spec)):
+                k = item["k"]
+                for j, img in enumerate(item["images"]):
+                    png = self.work_dir / f"row_{row_number:04d}_sub{e}_{j}.png"
+                    img.save(png)
+                    sub_pngs.append(png)
+                    # Commas stay bare — build_ffmpeg_command wraps the whole
+                    # expression in single quotes, which protects them in the
+                    # filtergraph (like ffmpeg's own enable='between(t,4,6)').
+                    sub_layers.append(
+                        {"png": png, "enable": f"eq(mod(n+{phase},{k}),{j})"})
+
+            cmd = self.build_ffmpeg_command(spec, base_png, overlay_png, cta_png,
+                                            out_path, sub_layers)
             proc = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=self.config.ffmpeg_timeout
             )
@@ -1276,6 +1889,42 @@ class VideoGenerator:
             overlay_png.unlink(missing_ok=True)
             if cta_png is not None:
                 cta_png.unlink(missing_ok=True)
+            for png in sub_pngs:
+                png.unlink(missing_ok=True)
+
+    # ------------------------------------------------------------- duration probe
+
+    _DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
+
+    def _probe_duration(self, path: Optional[Path] = None) -> Optional[float]:
+        """Measure a video's duration in seconds, cached per path.
+
+        Uses FFmpeg itself (NOT ffprobe — imageio-ffmpeg bundles only ffmpeg):
+        `ffmpeg -i <path>` with no output exits non-zero by design and prints
+        the stream info, including a `Duration: HH:MM:SS.ss` line, to stderr.
+        We parse that line and ignore the non-zero return. Returns None if the
+        duration can't be determined (callers degrade gracefully)."""
+        path = Path(path) if path else self.video_path
+        key = str(path)
+        with self._duration_lock:
+            if key in self._durations:
+                return self._durations[key]
+            dur: Optional[float] = None
+            try:
+                proc = subprocess.run(
+                    [self.ffmpeg, "-hide_banner", "-i", str(path)],
+                    capture_output=True, text=True, timeout=120,
+                )
+                # ffmpeg prints info to stderr; exit code is non-zero (no output
+                # file) but that's expected here — parse regardless.
+                match = self._DURATION_RE.search(proc.stderr or "")
+                if match:
+                    h, m, s = match.groups()
+                    dur = int(h) * 3600 + int(m) * 60 + float(s)
+            except (subprocess.TimeoutExpired, OSError, ValueError) as exc:
+                logger.warning("Could not probe duration for %s: %s", path, exc)
+            self._durations[key] = dur
+            return dur
 
     # ------------------------------------------------------------- preview
 
@@ -1385,11 +2034,22 @@ class VideoGenerator:
                 "bg_w": bg_w, "bg_h": bg_h, "bg_radius": round(bg_h * 0.30),
                 "mask": _img_to_data_uri(ink),
                 "deco": _img_to_data_uri(deco),
+                # The static editor can't show the motion-only subliminal effect;
+                # it shows the full text and flags it (the render splits it across
+                # sub_k frames). See build_subliminal_layers.
+                "subliminal": bool(element.subliminal),
+                "subliminal_k": element.sub_k,
             })
 
         payload = {
             "canvas_w": CANVAS_W,
             "canvas_h": CANVAS_H,
+            "layout": self.config.layout_mode,
+            # crop_to_panels: the output is only the panel band — the editor dims
+            # everything outside it so cropped-away areas are obvious.
+            "crop": ({"y": spec.video_y, "h": spec.video_h}
+                     if (self.config.layout_mode == "split"
+                         and self.config.crop_to_panels) else None),
             "bg": _img_to_data_uri(self.build_base_image(spec), "JPEG"),
             "video": {
                 "x": spec.video_x, "y": spec.video_y,

@@ -26,7 +26,9 @@ from video_generator import (
     ALL_COLUMNS,
     CANVAS_H,
     CANVAS_W,
-    CTA_VIDEO_SLOTS,
+    DEFAULT_CTA_VIDEO_SLOTS,
+    FPS_CHOICES,
+    MAX_CTA_VIDEO_SLOTS,
     FONT_CHOICES,
     FONT_CUSTOM,
     REQUIRED_COLUMNS,
@@ -108,9 +110,13 @@ def build_workspace(tmp: Path, video_file, zip_file, cta_file, font_file,
         cta_path = tmp / "cta.png"
         cta_path.write_bytes(cta_file.getvalue())
 
+    # Backgrounds are optional — without a ZIP the folder stays empty and rows
+    # render on the configured solid background color.
     bg_dir = tmp / "backgrounds"
-    with zipfile.ZipFile(io.BytesIO(zip_file.getvalue())) as zf:
-        zf.extractall(bg_dir)
+    bg_dir.mkdir(exist_ok=True)
+    if zip_file is not None:
+        with zipfile.ZipFile(io.BytesIO(zip_file.getvalue())) as zf:
+            zf.extractall(bg_dir)
 
     font_path = None
     if font_file is not None:
@@ -325,25 +331,76 @@ st.caption(
 with st.sidebar:
     st.header("⚙️ Settings")
 
-    st.subheader("Video placement")
-    st.caption(
-        "Defaults for every row — the Excel columns `Video_X`, `Video_Y`, "
-        "`Video_Width`, `Video_Height` override them per video."
+    st.subheader("Layout")
+    layout_mode = st.radio(
+        "Layout mode",
+        options=["free", "split"],
+        format_func=lambda m: {"free": "Free (place each box)",
+                               "split": "Split-screen (side-by-side)"}[m],
+        help="Free = every box is positioned by its own coordinates. "
+             "Split-screen = the main video fills one half and the side clips "
+             "fill the other, ending when the main video ends.",
     )
+    is_split = layout_mode == "split"
+    if is_split:
+        swap_sides = st.checkbox(
+            "Swap left / right",
+            value=False,
+            help="Off = main video left, side clips right. On = flip them.",
+        )
+        split_panel_h = st.number_input(
+            "Panel height (px)", 100, CANVAS_H, 960, 20,
+            help="Height of the two side-by-side panels, centered vertically. "
+                 f"Full height is {CANVAS_H}; a shorter band leaves space above "
+                 "and below for text.",
+        )
+        crop_to_panels = st.checkbox(
+            "No background — output only the panels",
+            value=False,
+            help="The finished video is exactly the two panels (1080 × panel "
+                 "height) with no background at all. Texts and the CTA are drawn "
+                 "ON TOP of the videos; auto-placed texts stay inside the band. "
+                 "Off = the full 1080×1920 canvas with a background.",
+        )
+        st.caption(
+            "Split-screen needs side clips uploaded below (otherwise the other "
+            "half is just background). The side keeps drawing fresh random clips "
+            "until the main video ends. Note: the main video is fitted inside its "
+            "panel (letterboxed); side clips are cropped to fill theirs."
+        )
+    else:
+        swap_sides = False
+        split_panel_h = 960
+        crop_to_panels = False
+    bg_color = st.color_picker(
+        "Background color", "#1E1B4B",
+        help="Used wherever a row has no background image — e.g. when no "
+             "background ZIP is uploaded (the ZIP is optional).",
+    )
+
+    st.subheader("Video placement")
+    if is_split:
+        st.caption("Ignored in split-screen mode — the main video fills its panel.")
+    else:
+        st.caption(
+            "Defaults for every row — the Excel columns `Video_X`, `Video_Y`, "
+            "`Video_Width`, `Video_Height` override them per video."
+        )
     randomize_video = st.checkbox(
         "Randomize position per video",
         value=False,
+        disabled=is_split,
         help="Each video gets its own random spot (avoiding the CTA and any "
              "explicitly positioned texts). Reproducible per row, so the "
              "preview matches the final render.",
     )
-    if randomize_video:
-        video_x, video_y = 0, 0  # ignored; per-row positions are computed
+    if randomize_video or is_split:
+        video_x, video_y = 0, 0  # ignored; positions are computed / from the panel
     else:
         video_x = st.number_input("Video X", 0, CANVAS_W, 90)
         video_y = st.number_input("Video Y", 0, CANVAS_H, 300)
-    video_w = st.number_input("Video width", 50, CANVAS_W, 900)
-    video_h = st.number_input("Video height", 50, CANVAS_H, 900)
+    video_w = st.number_input("Video width", 50, CANVAS_W, 900, disabled=is_split)
+    video_h = st.number_input("Video height", 50, CANVAS_H, 900, disabled=is_split)
 
     st.subheader("CTA image placement")
     st.caption(
@@ -365,11 +422,20 @@ with st.sidebar:
     )
 
     st.subheader("CTA video (optional)")
+    cta_slot_count = st.number_input(
+        "Number of clip slots", 1, MAX_CTA_VIDEO_SLOTS, DEFAULT_CTA_VIDEO_SLOTS, 1,
+        help="How many clip positions play in fixed order. Each is a pool of "
+             "sample videos; one is picked per output video. In split-screen "
+             "mode the side keeps drawing fresh random clips after these to fill "
+             "the whole main video.",
+    )
+    cta_slot_count = int(cta_slot_count)
     st.caption(
-        f"A sequence of {CTA_VIDEO_SLOTS} clips that always play in order "
-        "(1 → 2 → 3 → 4 → 5) in one shared box. Each clip is a *pool* of sample "
-        "videos (up to ~30): one is chosen per output video — pinned by an Excel "
-        "`CTA_Clip_<n>` cell, otherwise picked at random. Leave all empty to skip."
+        f"A sequence of {cta_slot_count} clip"
+        f"{'s' if cta_slot_count != 1 else ''} that always play in order in one "
+        "shared box. Each clip is a *pool* of sample videos (up to ~30): one is "
+        "chosen per output video — pinned by an Excel `CTA_Clip_<n>` cell, "
+        "otherwise picked at random. Leave all empty to skip."
     )
     cta_video_slot_files = [
         st.file_uploader(
@@ -377,19 +443,26 @@ with st.sidebar:
             accept_multiple_files=True, key=f"cta_clip_{i}",
             help="One of these is chosen per output video for this position.",
         )
-        for i in range(1, CTA_VIDEO_SLOTS + 1)
+        for i in range(1, cta_slot_count + 1)
     ]
-    cta_video_x = st.number_input("CTA video X", 0, CANVAS_W, 360)
-    cta_video_y = st.number_input("CTA video Y", 0, CANVAS_H, 1200)
-    cta_video_w = st.number_input("CTA video width", 50, CANVAS_W, 360)
-    cta_video_h = st.number_input("CTA video height", 50, CANVAS_H, 360)
+    if is_split:
+        st.caption("Box position/size is set by the split-screen panel below.")
+    cta_video_x = st.number_input("CTA video X", 0, CANVAS_W, 360, disabled=is_split)
+    cta_video_y = st.number_input("CTA video Y", 0, CANVAS_H, 1200, disabled=is_split)
+    cta_video_w = st.number_input("CTA video width", 50, CANVAS_W, 360, disabled=is_split)
+    cta_video_h = st.number_input("CTA video height", 50, CANVAS_H, 360, disabled=is_split)
+    if is_split:
+        st.caption(
+            "No fade in split-screen — the panel is visible from the first frame "
+            "and stays to the end."
+        )
     cta_video_fade_start = st.number_input(
-        "CTA video fade-in start (s)", 0.0, 30.0, 0.5, 0.1,
-        help="Per-row override: `CTA_Video_Fade_Start`.",
+        "CTA video fade-in start (s)", 0.0, 30.0, 0.5, 0.1, disabled=is_split,
+        help="Per-row override: `CTA_Video_Fade_Start`. Ignored in split-screen.",
     )
     cta_video_fade_duration = st.number_input(
-        "CTA video fade-in duration (s)", 0.0, 30.0, 0.5, 0.1,
-        help="Per-row override: `CTA_Video_Fade_Duration`.",
+        "CTA video fade-in duration (s)", 0.0, 30.0, 0.5, 0.1, disabled=is_split,
+        help="Per-row override: `CTA_Video_Fade_Duration`. Ignored in split-screen.",
     )
     st.caption(
         "Playback speed per clip position — 1 = normal, 2 = twice as fast, "
@@ -400,8 +473,16 @@ with st.sidebar:
         st.number_input(
             f"Clip {i} speed (×)", 0.25, 4.0, 1.0, 0.05, key=f"cta_speed_{i}",
         )
-        for i in range(1, CTA_VIDEO_SLOTS + 1)
+        for i in range(1, cta_slot_count + 1)
     ]
+    cta_video_fill = st.checkbox(
+        "Keep clips playing to fill the whole video",
+        value=False,
+        help="After the fixed clips above, keep drawing fresh random clips from "
+             "the same pools until the side covers the full length of the main "
+             "video — so it never freezes on a last frame. Off = play once, then "
+             "hold the last frame. Split-screen mode turns this on automatically.",
+    )
 
     st.subheader("Layer order (z-index)")
     st.caption(
@@ -441,7 +522,88 @@ with st.sidebar:
              "shadow · neon = glow. Override per text with `Headline_Style` etc.",
     )
 
+    st.subheader("Subliminal text (experimental)")
+    subliminal_target = st.selectbox(
+        "Apply to",
+        options=["none", "Headline", "Subheading", "Footer"],
+        index=0,
+        format_func=lambda t: "Off" if t == "none" else t,
+        help="Which single text gets the effect: no single frame shows the whole "
+             "text, but it cycles fast enough to read as whole in motion. Only "
+             "the chosen text is affected — override per text with a "
+             "`<Role>_Subliminal` cell (yes/no).",
+    )
+    subliminal_enabled = subliminal_target != "none"
+    if subliminal_enabled:
+        subliminal_mode = st.radio(
+            "Effect style",
+            options=["hide", "show"],
+            format_func=lambda m: {"hide": "Hide a slice (recommended)",
+                                   "show": "Show only a slice"}[m],
+            help="Hide a slice = every frame shows the whole text minus ~1/K of "
+                 "the words, so it stays bright and solid. Show only a slice = "
+                 "every frame shows ONLY ~1/K of the words; each word is lit just "
+                 "1/K of the time, so it time-averages to about 1/K brightness "
+                 "and looks faint. Raising fps shortens the cycle but does not "
+                 "change that brightness ratio.",
+        )
+        subliminal_k = st.slider(
+            "Frames per cycle (K)", 2, 8, 3,
+            help="The number of distinct frames before the effect repeats "
+                 "(K/fps seconds). Higher K = a longer, less obviously repeating "
+                 "cycle. 3 is a good default.",
+        )
+        # Pattern + amount apply to the hide style only (show is always the even
+        # 1/K comb).
+        if subliminal_mode == "hide":
+            subliminal_pattern = st.radio(
+                "Hidden characters",
+                options=["random", "ordered"],
+                format_func=lambda p: {"random": "Random each cycle",
+                                       "ordered": "Fixed pattern"}[p],
+                help="Random = a different, evenly-spread set is hidden each "
+                     "frame (seeded, so the preview still matches) and never "
+                     "repeats the same comb. Fixed = the same characters blank "
+                     "out in the same frames every cycle.",
+            )
+            subliminal_hide_pct = st.slider(
+                "Hidden per frame (%)", 15, 70, 33,
+                disabled=subliminal_pattern != "random",
+                help="Random pattern only. ~33% (≈100/K) keeps every character "
+                     "hidden exactly once per cycle and stays bright. Higher "
+                     "hides more per frame, so the text looks fainter. The fixed "
+                     "pattern always hides ~1/K.",
+            )
+        else:
+            subliminal_pattern = "ordered"
+            subliminal_hide_pct = 33
+        subliminal_granularity = st.radio(
+            "Split by", ["word", "char"], horizontal=True,
+            help="Word = omit whole words (more readable). Char = omit letters "
+                 "(auto-used when there aren't enough words for K).",
+        )
+        subliminal_all_intra = st.checkbox(
+            "Preserve frame-by-frame (larger files)",
+            value=True,
+            help="Encode every frame independently so a frame-scrub of THIS file "
+                 "never shows the whole text. Turning this off shrinks files but "
+                 "lets the codec blur frames together.",
+        )
+    else:
+        subliminal_mode = "hide"
+        subliminal_pattern = "random"
+        subliminal_hide_pct = 33
+        subliminal_k = 3
+        subliminal_granularity = "word"
+        subliminal_all_intra = True
+
     st.subheader("Output")
+    fps = st.select_slider(
+        "Frame rate (fps)", options=list(FPS_CHOICES), value=FPS_CHOICES[0],
+        help="60 halves the subliminal cycle length (K/fps seconds), so the "
+             "effect blends more smoothly — at the cost of roughly double the "
+             "frames to encode. Both survive upload to every major platform.",
+    )
     crf = st.slider("Quality (CRF — lower = better/bigger)", 16, 28, 18)
     preset = st.select_slider(
         "Encoder speed",
@@ -460,6 +622,9 @@ with st.sidebar:
     )
 
 config = RenderConfig(
+    layout_mode=layout_mode, swap_sides=bool(swap_sides),
+    split_panel_h=int(split_panel_h), crop_to_panels=bool(crop_to_panels),
+    bg_color=bg_color,
     video_x=int(video_x), video_y=int(video_y),
     video_w=int(video_w), video_h=int(video_h),
     cta_x=int(cta_x), cta_y=int(cta_y),
@@ -470,10 +635,18 @@ config = RenderConfig(
     cta_video_fade_start=float(cta_video_fade_start),
     cta_video_fade_duration=float(cta_video_fade_duration),
     cta_video_speeds=[float(s) for s in cta_video_speeds],
+    cta_video_fill=bool(cta_video_fill),
     video_z=int(video_z), cta_video_z=int(cta_video_z),
     cta_image_z=int(cta_image_z), text_z=int(text_z),
     default_font=default_font, default_style=default_style,
-    crf=int(crf), preset=preset,
+    subliminal_target=subliminal_target,
+    subliminal_mode=subliminal_mode,
+    subliminal_pattern=subliminal_pattern,
+    subliminal_hide_pct=int(subliminal_hide_pct),
+    subliminal_k=int(subliminal_k),
+    subliminal_granularity=subliminal_granularity,
+    subliminal_all_intra=bool(subliminal_all_intra),
+    fps=int(fps), crf=int(crf), preset=preset,
     randomize_video_pos=randomize_video,
 )
 
@@ -484,7 +657,11 @@ with col1:
     excel_file = st.file_uploader("Excel file (.xlsx)", type=["xlsx"])
     video_file = st.file_uploader("Promo video (MP4) — used in every output", type=["mp4"])
 with col2:
-    zip_file = st.file_uploader("Background images (ZIP)", type=["zip"])
+    zip_file = st.file_uploader(
+        "Background images (ZIP, optional)", type=["zip"],
+        help="Without a ZIP, videos render on the solid background color set in "
+             "the sidebar (Layout section).",
+    )
     cta_file = st.file_uploader("CTA image (PNG, optional)", type=["png"])
 
 # ---- Excel validation & preview table
@@ -535,11 +712,12 @@ if excel_file is not None:
             with st.expander("Preview spreadsheet data"):
                 st.dataframe(df, hide_index=True, width="stretch")
 
-ready = df is not None and video_file is not None and zip_file is not None
+ready = df is not None and video_file is not None
 if not ready:
     st.info(
-        "Upload the Excel sheet, a promo video, and background images to enable "
-        "preview and generation. The CTA image is optional."
+        "Upload the Excel sheet and a promo video to enable preview and "
+        "generation. The background ZIP and CTA image are optional — without "
+        "backgrounds, videos render on the sidebar's background color."
     )
 
 # ---- actions
