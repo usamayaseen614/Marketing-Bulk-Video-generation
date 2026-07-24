@@ -757,7 +757,8 @@ if preview_clicked and ready:
                 # Same deterministic background assignment as the real batch,
                 # so the preview shows the row's actual background.
                 df_preview, _ = generator.assign_backgrounds(df)
-                payload = generator.build_editor_payload(df_preview.iloc[int(preview_row) - 1])
+                payload = generator.build_editor_payload(
+                    df_preview.iloc[int(preview_row) - 1], int(preview_row))
                 st.session_state["preview_payload"] = payload
                 st.session_state["preview_nonce"] = uuid.uuid4().hex
                 st.session_state["preview_row"] = int(preview_row)

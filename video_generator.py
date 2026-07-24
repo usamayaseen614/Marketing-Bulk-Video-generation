@@ -592,10 +592,17 @@ class RowSpec:
     # by _resolve_positions.
     cta_clip_names: Optional[list] = None
     cta_video_clips: Optional[list] = None
+    # The sheet's row number (1-based), mixed into placement_seed so two rows
+    # with identical text still get distinct random picks — CTA-video clips,
+    # colors, sizes, auto-placement. Without it, a templated sheet where every
+    # row shares the same text (common in split-screen, which has no background
+    # to vary the seed) renders N identical videos. None = unknown, which keeps
+    # the historical content-only seed (used by ad-hoc callers/tests).
+    seed_salt: Optional[int] = None
     resolved: bool = False
 
     @classmethod
-    def from_row(cls, row: pd.Series) -> "RowSpec":
+    def from_row(cls, row: pd.Series, row_number: Optional[int] = None) -> "RowSpec":
         warnings: list[str] = []
 
         def text_spec(prefix: str) -> TextSpec:
@@ -645,6 +652,7 @@ class RowSpec:
             cta_clip_speeds=[_parse_opt_float(row.get(col), warnings, col)
                              for col in CTA_SPEED_COLUMNS],
             cta_clip_names=[_clean_str(row.get(col)) or None for col in CTA_CLIP_COLUMNS],
+            seed_salt=row_number,
             warnings=warnings,
         )
 
@@ -659,7 +667,13 @@ class RowSpec:
         intrinsic row content goes in; sizes/colors may themselves be drawn
         from this seed.)"""
         key = "|".join([self.bg_image] + [t.text for t in self.text_elements])
-        return zlib.crc32(key.encode("utf-8"))
+        seed = zlib.crc32(key.encode("utf-8"))
+        # Fold in the row's position so identical-content rows still diverge.
+        # Chained through crc32 (deterministic), and only when a row number is
+        # known — an unsalted spec keeps the exact historical content-only seed.
+        if self.seed_salt is not None:
+            seed = zlib.crc32(f"|#{int(self.seed_salt)}".encode("utf-8"), seed)
+        return seed
 
 
 @dataclass
@@ -1924,7 +1938,7 @@ class VideoGenerator:
     def render_row(self, row_number: int, row: pd.Series) -> RowResult:
         """Render one Excel row to an MP4. Never raises — failures are captured
         in the returned RowResult so one bad row can't abort the batch."""
-        spec = RowSpec.from_row(row)
+        spec = RowSpec.from_row(row, row_number)
         base_png = self.work_dir / f"row_{row_number:04d}_base.png"
         overlay_png = self.work_dir / f"row_{row_number:04d}_overlay.png"
         # The CTA image is optional — no PNG (and no FFmpeg input) without one.
@@ -2060,10 +2074,11 @@ class VideoGenerator:
         up edge to edge in the box."""
         return ImageOps.fit(self._first_video_frame(path), (box_w, box_h), Image.LANCZOS)
 
-    def render_preview(self, row: pd.Series) -> Image.Image:
+    def render_preview(self, row: pd.Series, row_number: Optional[int] = None) -> Image.Image:
         """Static composite of one row — same layout math as the real render,
-        with the video represented by its first frame."""
-        spec = RowSpec.from_row(row)
+        with the video represented by its first frame. Pass the row's 1-based
+        sheet number so the preview's random picks match render_row's."""
+        spec = RowSpec.from_row(row, row_number)
         base = self.build_base_image(spec).convert("RGBA")
         overlay = self.build_overlay_image(spec)  # resolves positions first
 
@@ -2074,7 +2089,7 @@ class VideoGenerator:
 
         return Image.alpha_composite(base, overlay).convert("RGB")
 
-    def build_editor_payload(self, row: pd.Series) -> dict:
+    def build_editor_payload(self, row: pd.Series, row_number: Optional[int] = None) -> dict:
         """Everything the interactive preview editor needs, with each layer
         shipped separately so the browser can move/recolor elements without a
         server round-trip: the background, the promo video's first frame scaled
@@ -2086,8 +2101,10 @@ class VideoGenerator:
         so the editor can draw and recolor it live in CSS.
 
         Texts carry their CENTER point (the Excel convention for *_X/*_Y);
-        the video and CTA boxes carry their top-left corner."""
-        spec = RowSpec.from_row(row)
+        the video and CTA boxes carry their top-left corner. Pass the row's
+        1-based sheet number so the preview's random picks (CTA clips, colors,
+        …) match what render_row produces for that row."""
+        spec = RowSpec.from_row(row, row_number)
         self._resolve_positions(spec)
 
         frame = self._fit_frame(spec.video_w, spec.video_h)
