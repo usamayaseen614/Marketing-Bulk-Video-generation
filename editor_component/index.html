@@ -39,6 +39,9 @@
   tr.changed td { color: #ffd166; font-weight: 600; }
   input[type=color] { width: 26px; height: 18px; border: none; background: none;
                       padding: 0; margin-left: 6px; cursor: pointer; vertical-align: middle; }
+  input[type=range] { width: 80px; margin-left: 6px; vertical-align: middle;
+                      accent-color: #2563eb; cursor: pointer; }
+  input[type=range]:disabled { opacity: .4; cursor: default; }
   .miniBtn { margin-left: 4px; background: #3b3f4a; color: #fff;
              border: 1px solid rgba(255,255,255,.2); border-radius: 4px;
              font-size: 11px; padding: 1px 6px; cursor: pointer; vertical-align: middle; }
@@ -59,7 +62,9 @@
     <h3>Excel values</h3>
     <div class="hint">Drag elements to move them, drag the corner handle to resize
       (texts resize their font size), recolor texts with the swatches, and give any
-      text a background box with the bg swatch (“none” removes it). Font and artistic
+      text a background box with the bg swatch (“none” removes it). The opacity
+      sliders make a text — or just its box — translucent, so the video shows
+      through. Font and artistic
       style come from the sidebar / Excel and are shown for reference. A dotted line
       appears when an element is centered on the canvas. Changed values are
       highlighted — click “Save to Excel” to apply them to your sheet in one go.</div>
@@ -403,6 +408,11 @@
     //     box, the baked decoration (outline/shadow/neon), the recolorable
     //     glyph mask. ---
     DATA.texts.forEach(t => {
+      // Opacity is CSS-only here (the mask and the baked decoration are both
+      // rendered fully opaque), so the slider is live without a re-render.
+      // Older payloads without the fields read as fully opaque.
+      const OP = t.opacity == null ? 100 : t.opacity;
+      const BOP = t.bg_opacity == null ? 100 : t.bg_opacity;
       const el = document.createElement('div');
       el.className = 'el textEl';
       const bgBox = document.createElement('div');
@@ -437,6 +447,7 @@
       stage.appendChild(el);
       const item = {
         x: t.cx, y: t.cy, s: 1, color: t.color, bg: t.bg || null,
+        opacity: OP, bgOpacity: BOP,
         curW() { return t.w * this.s; },
         curH() { return t.h * this.s; },
         fontSize() { return Math.round(t.size * this.s); },
@@ -463,6 +474,15 @@
           if (this.bg) { bgBox.style.display = 'block'; bgBox.style.backgroundColor = this.bg; }
           else { bgBox.style.display = 'none'; }
           if (this.bgPicker && this.bg) this.bgPicker.value = this.bg;
+          // The box opacity only means something once there IS a box.
+          if (this.bgOpSlider) this.bgOpSlider.disabled = !this.bg;
+        },
+        applyOpacity() {
+          // Glyph mask and baked decoration fade together (the render fades the
+          // fill, the outline ring, the glow and the drop shadow alike).
+          ink.style.opacity = this.opacity / 100;
+          deco.style.opacity = this.opacity / 100;
+          bgBox.style.opacity = this.bgOpacity / 100;
         },
         startResize(e) {
           const r = el.getBoundingClientRect();
@@ -480,25 +500,36 @@
         reset() {
           this.x = t.cx; this.y = t.cy; this.s = 1; this.color = t.color;
           this.bg = t.bg || null;
+          this.opacity = OP; this.bgOpacity = BOP;
           ink.style.backgroundColor = t.color;
           if (this.picker) this.picker.value = t.color;
+          if (this.opSlider) this.opSlider.value = OP;
+          if (this.bgOpSlider) this.bgOpSlider.value = BOP;
           this.applyBg();
+          this.applyOpacity();
           this.place();
         },
         setColor(hex) { this.color = hex.toUpperCase(); ink.style.backgroundColor = this.color; },
         setBg(hex) { this.bg = hex ? hex.toUpperCase() : null; this.applyBg(); },
+        setOpacity(v) { this.opacity = Number(v); this.applyOpacity(); },
+        setBgOpacity(v) { this.bgOpacity = Number(v); this.applyOpacity(); },
         cols() {
+          // Opacities carry the '%' so the Excel cell is unambiguous: the engine
+          // reads a bare 0..1 as a fraction, which would turn "1" into 100%.
           return [
             [t.role + '_X', t.cx, Math.round(this.x)],
             [t.role + '_Y', t.cy, Math.round(this.y)],
             [t.role + '_Size', t.size, this.fontSize()],
             [t.role + '_Color', t.color, this.color],
+            [t.role + '_Opacity', OP + '%', this.opacity + '%'],
             [t.role + '_BgColor', t.bg || '', this.bg || ''],
+            [t.role + '_BgOpacity', BOP + '%', this.bgOpacity + '%'],
             [t.role + '_Font', t.font || '', t.font || ''],
             [t.role + '_Style', t.style || 'classic', t.style || 'classic'],
           ];
         },
       };
+      item.applyOpacity();
       item.place();
       makeDraggable(el, item);
       addHandle(el, item);
@@ -530,6 +561,21 @@
           off.textContent = 'none';
           off.addEventListener('click', () => { item.setBg(null); refresh(); });
           tdNow.append(picker, off);
+        } else if (col[0].endsWith('_BgOpacity') || col[0].endsWith('_Opacity')) {
+          // Translucency, 0-100%. The box slider stays disabled until the text
+          // actually has a background box.
+          const isBg = col[0].endsWith('_BgOpacity');
+          const slider = document.createElement('input');
+          slider.type = 'range';
+          slider.min = 0; slider.max = 100; slider.step = 1;
+          slider.value = parseInt(col[1], 10);
+          slider.addEventListener('input', () => {
+            if (isBg) item.setBgOpacity(slider.value); else item.setOpacity(slider.value);
+            refresh();
+          });
+          if (isBg) { item.bgOpSlider = slider; slider.disabled = !item.bg; }
+          else { item.opSlider = slider; }
+          tdNow.appendChild(slider);
         } else if (col[0].endsWith('_Color')) {
           const picker = document.createElement('input');
           picker.type = 'color';

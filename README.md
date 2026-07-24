@@ -81,13 +81,15 @@ rows alone determines how many videos are generated:
 | `CTA_Clip_1` … `CTA_Clip_10` | Pin which sample plays in clip position 1…N for this video, by file name (with or without extension). **Blank/absent = a random sample from that position's pool** | `intro_a.mp4` |
 | `Headline` | Headline text (empty = skipped) | `Summer Mega Sale` |
 | `Headline_Size` | Font size in px. **Blank/absent = random** within a sensible range per element (headline 56–88, subheading 34–52, footer 24–36) | `72` |
-| `Headline_Color` | Hex (`#FFD700`), CSS color name (`yellow`, `blue`, `lightyellow`…), or `rgb(...)`. **Blank/absent = random** vivid palette color, never repeated within one video | `gold` |
+| `Headline_Color` | Hex (`#FFD700`), CSS color name (`yellow`, `blue`, `lightyellow`…), `rgb(...)`, or an alpha hex (`#FFFFFF80` = half-transparent white). **Blank/absent = random** vivid palette color, never repeated within one video | `gold` |
+| `Headline_Opacity` | How solid the text is: `0`–`100` (a `%` is allowed), or a `0`–`1` fraction — `65`, `65%` and `0.65` all mean 65% opaque. The outline, glow and shadow fade with it. **Blank/absent = the sidebar's *Text opacity*** | `65%` |
 | `Headline_X` / `Headline_Y` | **Center point** of the text, in canvas pixels | `540` / `160` |
 | `Headline_Font` | Font family — a bundled name like `Impact`, `Heavy`, `Script`, `Marker`, `Elegant`, `Typewriter`, `Retro`, `Urban` (or the full `Impact (Bebas Neue)`), `System default`, or `Custom upload`. **Blank/absent = the sidebar default font** | `Impact` |
 | `Headline_BgColor` | Color of a **highlight box** drawn behind the text (same color formats as `_Color`). **Blank/absent = no box** | `#FF2D55` |
+| `Headline_BgOpacity` | Opacity of that highlight box, same formats as `_Opacity`. A translucent box under solid text is the classic caption look — the box tints the video instead of hiding it. **Blank/absent = the sidebar's *Highlight box opacity*** | `55%` |
 | `Headline_Style` | Artistic treatment: `classic`, `outline`, `shadow`, or `neon`. **Blank/absent = the sidebar default style** | `outline` |
 | `Headline_Subliminal` / `Subheading_Subliminal` / `Footer_Subliminal` | Turn the **experimental subliminal / persistence-of-vision effect** on or off for that one text (`yes`/`no`), overriding the sidebar's *Apply to* choice for this row. **Blank/absent = on only if the sidebar targets that role.** See *Subliminal text* below | `yes` |
-| `Subheading`, `Subheading_*` | Same scheme (`_Size`, `_Color`, `_X`, `_Y`, `_Font`, `_BgColor`, `_Style`, `_Subliminal`) | |
+| `Subheading`, `Subheading_*` | Same scheme (`_Size`, `_Color`, `_Opacity`, `_X`, `_Y`, `_Font`, `_BgColor`, `_BgOpacity`, `_Style`, `_Subliminal`) | |
 | `Footer`, `Footer_*` | Same scheme. The footer is always laid out on **3 balanced lines** (fewer if it has fewer words) | |
 
 Notes:
@@ -128,6 +130,13 @@ Notes:
 - **Background box & artistic styles**: any text can sit on a colored highlight box
   (`*_BgColor`) and use a `*_Style` of `outline` (contrasting border), `shadow` (drop
   shadow), or `neon` (glow) — combine them freely. `classic` is plain text.
+- **Translucent text & boxes**: set `*_Opacity` / `*_BgOpacity` (or the two sidebar
+  sliders, or an alpha color like `#FFFFFF80`) to let the video show through. The text
+  and its box are independent, so the two staple looks both work: a translucent tint box
+  under solid text, and ghosted watermark-style lettering over the footage. An alpha color
+  cell and an opacity cell multiply, so `#FFFFFF80` at `50%` lands on 25%. Opacity applies
+  to everything the text draws — fill, outline ring, glow and drop shadow fade together —
+  and translucent text **veils** whatever is under it rather than cutting a hole in it.
 - **CTA videos (optional)**: upload one or more clips in the sidebar to layer them alongside
   the CTA image in a single shared box (`CTA_Video_*`). They play **back-to-back as one clip
   in a shuffled order** — re-shuffled for every output video (so video 1 might run clips
@@ -208,6 +217,7 @@ Notes:
 | CTA videos + box + fade + per-clip speed | Optional clips layered with the CTA image; they play back-to-back in a shuffled order in one shared box (`CTA_Video_*`), with a shared fade-in and a separate speed per clip slot (overridable per row via `CTA_Video_Speed_<n>`, or `CTA_Video_Speed` for the whole row). Leave the upload empty to skip the whole element |
 | Default font | The font used when a text's `*_Font` cell is blank — a bundled family, the system font, or your uploaded font |
 | Default artistic style | The style used when a text's `*_Style` cell is blank — `classic`, `outline`, `shadow`, or `neon` |
+| Text opacity / Highlight box opacity | Batch defaults for how solid the texts and their `*_BgColor` boxes are (0–100%). Below 100 the video shows through. Overridable per text via `*_Opacity` / `*_BgOpacity`, and per-text sliders in the preview editor |
 | Quality (CRF) | 16 = near-lossless, 28 = small files. 18 is great for social media |
 | Encoder speed | x264 preset; `medium` balances speed and file size |
 | Parallel renders | Concurrent FFmpeg processes — raise on strong multi-core machines |
@@ -222,10 +232,11 @@ Notes:
    **Drag** the video box, the CTA image, the CTA video box, or any text to reposition it
    (a dotted line shows when an element is centered on the canvas, and it gently snaps
    there), **resize** anything with its corner handle (texts resize their font size around
-   their center), **recolor** texts with the color swatches, and give any text a
-   **background box** with the bg swatch (“none” removes it). Texts render with their actual
+   their center), **recolor** texts with the color swatches, give any text a
+   **background box** with the bg swatch (“none” removes it), and fade a text or its box
+   with the **opacity sliders**. Texts render with their actual
    font and artistic style; the side panel live-updates the matching Excel values (`Video_X`,
-   `Headline_Size`, `Headline_Color`, `Headline_BgColor`, …) and highlights what changed. Click **💾 Save to Excel** to apply the changes to that
+   `Headline_Size`, `Headline_Color`, `Headline_Opacity`, `Headline_BgColor`, …) and highlights what changed. Click **💾 Save to Excel** to apply the changes to that
    row in one go — they're used by subsequent previews and generation, and
    **⬇️ Download updated Excel** gives you the sheet with the edits written in
    (formatting preserved) so your file stays the source of truth. A copy button is

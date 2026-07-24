@@ -111,6 +111,9 @@ def main() -> None:
             "Headline": "Summer Mega Sale", "Headline_Size": 72,
             "Headline_Color": "#FFFFFF", "Headline_X": 540, "Headline_Y": 160,
             "Headline_Font": "Impact (Bebas Neue)", "Headline_BgColor": "#FF2D55",
+            # Translucent highlight box under solid text — the caption look:
+            # the box tints the video instead of hiding it.
+            "Headline_BgOpacity": "55%",
             "Headline_Style": "outline",
             "Subheading": "Up to 50% off everything", "Subheading_Size": 44,
             "Subheading_Color": "#FFD700", "Subheading_X": 540, "Subheading_Y": 245,
@@ -144,6 +147,8 @@ def main() -> None:
             "Headline_Font": "Script (Pacifico)", "Headline_Style": "neon",
             "Subheading": "Fresh styles every week", "Subheading_Size": 40,
             "Subheading_Color": "lightyellow", "Subheading_X": 540, "Subheading_Y": 270,
+            # Ghosted text: 60% opaque, so the background reads through it.
+            "Subheading_Opacity": "60%",
             "Footer": "www.example.com", "Footer_Size": 30,
             "Footer_Color": "#EEEEEE", "Footer_X": 540, "Footer_Y": 1860,
         },
@@ -188,7 +193,8 @@ def main() -> None:
     auto = df.drop(columns=["BG_Image"] + [
         c for c in df.columns
         if c.startswith(("Video_", "CTA_"))
-        or c.endswith(("_X", "_Y", "_Size", "_Color", "_Font", "_BgColor", "_Style"))
+        or c.endswith(("_X", "_Y", "_Size", "_Color", "_Font", "_BgColor", "_Style",
+                       "_Opacity", "_BgOpacity"))
     ])
     auto.to_excel(OUT / "data_auto.xlsx", index=False)
 

@@ -27,7 +27,7 @@ import shutil
 import subprocess
 import threading
 import zlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional
 
@@ -98,12 +98,15 @@ OPTIONAL_COLUMNS = [
     "CTA_Video_Fade_Start", "CTA_Video_Fade_Duration", "CTA_Video_Speed",
     *CTA_SPEED_COLUMNS,
     *CTA_CLIP_COLUMNS,
-    "Headline", "Headline_Size", "Headline_Color", "Headline_X", "Headline_Y",
-    "Headline_Font", "Headline_BgColor", "Headline_Style", "Headline_Subliminal",
-    "Subheading", "Subheading_Size", "Subheading_Color", "Subheading_X", "Subheading_Y",
-    "Subheading_Font", "Subheading_BgColor", "Subheading_Style", "Subheading_Subliminal",
-    "Footer", "Footer_Size", "Footer_Color", "Footer_X", "Footer_Y",
-    "Footer_Font", "Footer_BgColor", "Footer_Style", "Footer_Subliminal",
+    "Headline", "Headline_Size", "Headline_Color", "Headline_Opacity",
+    "Headline_X", "Headline_Y", "Headline_Font",
+    "Headline_BgColor", "Headline_BgOpacity", "Headline_Style", "Headline_Subliminal",
+    "Subheading", "Subheading_Size", "Subheading_Color", "Subheading_Opacity",
+    "Subheading_X", "Subheading_Y", "Subheading_Font",
+    "Subheading_BgColor", "Subheading_BgOpacity", "Subheading_Style", "Subheading_Subliminal",
+    "Footer", "Footer_Size", "Footer_Color", "Footer_Opacity",
+    "Footer_X", "Footer_Y", "Footer_Font",
+    "Footer_BgColor", "Footer_BgOpacity", "Footer_Style", "Footer_Subliminal",
 ]
 ALL_COLUMNS = REQUIRED_COLUMNS + OPTIONAL_COLUMNS
 
@@ -355,6 +358,47 @@ def _parse_color(value, warnings: list[str], label: str,
     return rgb if len(rgb) == 4 else (*rgb, 255)
 
 
+def _parse_opacity(value, warnings: list[str], label: str) -> Optional[float]:
+    """Translucency for a text or its highlight box, as a 0..1 factor.
+
+    Accepts a percentage (`65`, `65%`) or a fraction (`0.65`) — all three mean
+    65% opaque. A bare number in 0..1 reads as a fraction, so write `1%` (not
+    `1`) for near-invisible. Blank => None (inherit the batch default);
+    unparseable => warn + None. Out-of-range values are clamped."""
+    raw = _clean_str(value)
+    if not raw:
+        return None
+    as_pct = raw.endswith("%")
+    try:
+        num = float(raw.rstrip("%").strip())
+    except ValueError:
+        warnings.append(
+            f"{label}: '{raw}' is not a number (use 0-100, or 0-1), "
+            "using the default opacity")
+        return None
+    if not as_pct and 0.0 <= num <= 1.0:
+        num *= 100.0          # 0.65 -> 65%
+    if not 0.0 <= num <= 100.0:
+        warnings.append(f"{label}: {raw} is outside 0-100, clamped")
+        num = max(0.0, min(num, 100.0))
+    return num / 100.0
+
+
+def _apply_opacity(color: Optional[tuple], factor: Optional[float]) -> Optional[tuple]:
+    """Scale a parsed RGBA color's alpha by `factor` (0..1). The color may
+    already carry alpha (an '#RRGGBBAA' cell), so this MULTIPLIES rather than
+    replaces — both routes to translucency compose."""
+    if color is None or factor is None:
+        return color
+    r, g, b = color[:3]
+    base = color[3] if len(color) == 4 else 255
+    return (r, g, b, max(0, min(255, int(round(base * factor)))))
+
+
+def _alpha_of(color: Optional[tuple]) -> int:
+    return 255 if not color or len(color) < 4 else int(color[3])
+
+
 # --------------------------------------------------------------------------- dataclasses
 
 @dataclass
@@ -433,6 +477,12 @@ class RenderConfig:
     # blank. default_font is a FONT_LIBRARY key, FONT_SYSTEM, or FONT_CUSTOM.
     default_font: str = FONT_SYSTEM
     default_style: str = "classic"
+    # Default translucency for every text and every highlight box, as a 0..1
+    # factor (1.0 = fully opaque). A row's <Role>_Opacity / <Role>_BgOpacity
+    # cell overrides it per element, and both MULTIPLY any alpha already in the
+    # color cell (an '#RRGGBBAA' value).
+    text_opacity: float = 1.0
+    text_bg_opacity: float = 1.0
     # Experimental subliminal / persistence-of-vision text effect (see TextSpec).
     # subliminal_target names the ONE text role the effect applies to by default
     # ("none" = off, else "Headline" / "Subheading" / "Footer") — it is a CTA
@@ -484,6 +534,11 @@ class TextSpec:
     font: Optional[str] = None       # font choice name; None = config.default_font
     bg_color: Optional[tuple] = None # highlight box behind the text; None = no box
     style: Optional[str] = None      # classic|outline|shadow|neon; None = default_style
+    # Translucency, 0..1 (None = config.text_opacity / text_bg_opacity). Folded
+    # into color/bg_color's alpha during resolution — after that the alpha
+    # channel is the single source of truth for both the render and the editor.
+    opacity: Optional[float] = None
+    bg_opacity: Optional[float] = None
     # Experimental "subliminal" / persistence-of-vision effect: the text is split
     # across frames so no single frame shows all of it, cycling fast enough to
     # read as whole in motion. `subliminal` is the requested flag (None = inherit
@@ -554,6 +609,10 @@ class RowSpec:
                 font=_clean_str(row.get(f"{prefix}_Font")) or None,
                 bg_color=_parse_color(row.get(f"{prefix}_BgColor"), warnings,
                                       f"{prefix}_BgColor", fallback_desc="no background"),
+                opacity=_parse_opacity(row.get(f"{prefix}_Opacity"), warnings,
+                                       f"{prefix}_Opacity"),
+                bg_opacity=_parse_opacity(row.get(f"{prefix}_BgOpacity"), warnings,
+                                          f"{prefix}_BgOpacity"),
                 style=(_clean_str(row.get(f"{prefix}_Style")).lower() or None),
                 subliminal=_parse_opt_bool(row.get(f"{prefix}_Subliminal"), warnings,
                                            f"{prefix}_Subliminal"),
@@ -799,10 +858,13 @@ class VideoGenerator:
         return self._get_font(path, variation, element.size)
 
     @staticmethod
-    def _contrast(color: tuple) -> tuple:
-        """Black on light text, white on dark text — used for outline strokes."""
+    def _contrast(color: tuple, alpha: Optional[int] = None) -> tuple:
+        """Black on light text, white on dark text — used for outline strokes.
+        The ring inherits the text's own alpha (unless overridden) so a
+        translucent text doesn't get a solid outline around it."""
         r, g, b = color[:3]
-        return (0, 0, 0, 255) if (0.299 * r + 0.587 * g + 0.114 * b) > 140 else (255, 255, 255, 255)
+        a = _alpha_of(color) if alpha is None else max(0, min(255, int(alpha)))
+        return (0, 0, 0, a) if (0.299 * r + 0.587 * g + 0.114 * b) > 140 else (255, 255, 255, a)
 
     @staticmethod
     def _style_metrics(element: TextSpec) -> tuple[int, int, int, int, int, int]:
@@ -1058,6 +1120,16 @@ class VideoGenerator:
             if element.color is None:
                 pick = color_deck.pop(rng.randrange(len(color_deck)))
                 element.color = (*ImageColor.getrgb(pick), 255)
+            # Bake translucency into the alpha channel once, here: the cell wins
+            # over the batch default, and both multiply any alpha the color cell
+            # already carried. _resolve_positions runs once per spec (the
+            # `resolved` guard), so this never compounds across calls.
+            element.color = _apply_opacity(
+                element.color,
+                element.opacity if element.opacity is not None else cfg.text_opacity)
+            element.bg_color = _apply_opacity(
+                element.bg_color,
+                element.bg_opacity if element.bg_opacity is not None else cfg.text_bg_opacity)
             # Wrap once size is final: footer to 3 lines, others to fit canvas.
             self._wrap_text(element)
 
@@ -1298,33 +1370,44 @@ class VideoGenerator:
                             editor's recolorable mask)
 
         Shadow/glow use temporary layers the same size as `target`, so this
-        works equally on a full canvas (overlay) or a small tile (editor)."""
+        works equally on a full canvas (overlay) or a small tile (editor).
+
+        Translucent elements (alpha < 255, from an *_Opacity cell or an
+        '#RRGGBBAA' color) are painted on their own scratch layer and
+        alpha-composited: ImageDraw writes ink straight into the pixel without
+        blending, which would otherwise punch a see-through hole through the
+        highlight box / glow underneath instead of veiling it."""
         font = self._font_for(element)
         style = element.style or "classic"
         stroke, sh_off, sh_blur, glow, _bg_pad, _pad = self._style_metrics(element)
         draw = ImageDraw.Draw(target)
         common = dict(font=font, anchor="mm", align="center")
+        text_alpha = _alpha_of(element.color)
 
         if what == "full" and element.bg_color:
             l, t, r, b = draw.multiline_textbbox((ax, ay), element.text,
                                                  stroke_width=stroke, **common)
             pad = max(6, round(element.size * 0.30))
             radius = round((b - t + 2 * pad) * 0.30)
-            draw.rounded_rectangle((l - pad, t - pad, r + pad, b + pad),
-                                   radius=radius, fill=element.bg_color)
+            box = Image.new("RGBA", target.size, (0, 0, 0, 0))
+            ImageDraw.Draw(box).rounded_rectangle((l - pad, t - pad, r + pad, b + pad),
+                                                  radius=radius, fill=element.bg_color)
+            target.alpha_composite(box)
 
         if what in ("full", "decoration"):
             if sh_off:
                 sh = Image.new("RGBA", target.size, (0, 0, 0, 0))
-                ImageDraw.Draw(sh).multiline_text((ax + sh_off, ay + sh_off), element.text,
-                                                  fill=(0, 0, 0, 170), **common)
+                ImageDraw.Draw(sh).multiline_text(
+                    (ax + sh_off, ay + sh_off), element.text,
+                    # A faint text casts a faint shadow.
+                    fill=(0, 0, 0, round(170 * text_alpha / 255)), **common)
                 if sh_blur:
                     sh = sh.filter(ImageFilter.GaussianBlur(sh_blur))
                 target.alpha_composite(sh)
             if glow:
                 gl = Image.new("RGBA", target.size, (0, 0, 0, 0))
                 ImageDraw.Draw(gl).multiline_text((ax, ay), element.text,
-                                                  fill=(*element.color[:3], 255), **common)
+                                                  fill=(*element.color[:3], text_alpha), **common)
                 gl = gl.filter(ImageFilter.GaussianBlur(glow))
                 target.alpha_composite(gl)
                 target.alpha_composite(gl)  # double up for a brighter halo
@@ -1337,12 +1420,22 @@ class VideoGenerator:
 
         if what in ("full", "ink"):
             fillc = fill if fill is not None else element.color
+            # See the docstring: translucent glyphs go through a scratch layer so
+            # they blend with the box/glow below instead of replacing it. The
+            # outline ring is drawn in the same pass and inherits the same alpha,
+            # so ring and body veil the background by the same amount.
+            translucent = _alpha_of(fillc) < 255
+            layer = Image.new("RGBA", target.size, (0, 0, 0, 0)) if translucent else target
+            pen = ImageDraw.Draw(layer) if translucent else draw
             if what == "full" and stroke:
-                draw.multiline_text((ax, ay), element.text, fill=fillc,
-                                    stroke_width=stroke, stroke_fill=self._contrast(element.color),
-                                    **common)
+                pen.multiline_text((ax, ay), element.text, fill=fillc,
+                                   stroke_width=stroke,
+                                   stroke_fill=self._contrast(element.color, _alpha_of(fillc)),
+                                   **common)
             else:
-                draw.multiline_text((ax, ay), element.text, fill=fillc, **common)
+                pen.multiline_text((ax, ay), element.text, fill=fillc, **common)
+            if translucent:
+                target.alpha_composite(layer)
 
     def build_overlay_image(self, spec: RowSpec, include_cta: bool = True) -> Image.Image:
         """Text layer: transparent canvas with the three styled texts — plus the
@@ -2015,8 +2108,13 @@ class VideoGenerator:
 
             ink = Image.new("RGBA", (iw, ih), (0, 0, 0, 0))
             self._paint_text(ink, ax, ay, element, "ink", fill=(255, 255, 255, 255))
+            # Bake the decoration at FULL alpha and let the editor apply the
+            # element's translucency in CSS — otherwise dragging the opacity
+            # slider would fade the glyphs but not their outline/glow/shadow.
             deco = Image.new("RGBA", (iw, ih), (0, 0, 0, 0))
-            self._paint_text(deco, ax, ay, element, "decoration")
+            self._paint_text(deco, ax, ay,
+                             replace(element, color=(*element.color[:3], 255)),
+                             "decoration")
 
             # Background highlight box geometry (canvas px), matching _paint_text's
             # 'full' box, so the editor draws/recolors it live in CSS.
@@ -2027,10 +2125,15 @@ class VideoGenerator:
                 "role": element.role,
                 "cx": element.x, "cy": element.y, "w": iw, "h": ih,
                 "size": element.size,
+                # Color and opacity travel separately: the editor's <input
+                # type=color> only speaks 6-digit hex, and they map to two
+                # different Excel columns (*_Color and *_Opacity).
                 "color": "#%02X%02X%02X" % element.color[:3],
+                "opacity": round(_alpha_of(element.color) / 255 * 100),
                 "font": element.font,
                 "style": element.style,
                 "bg": ("#%02X%02X%02X" % element.bg_color[:3]) if element.bg_color else None,
+                "bg_opacity": round(_alpha_of(element.bg_color) / 255 * 100),
                 "bg_w": bg_w, "bg_h": bg_h, "bg_radius": round(bg_h * 0.30),
                 "mask": _img_to_data_uri(ink),
                 "deco": _img_to_data_uri(deco),

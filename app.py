@@ -508,8 +508,9 @@ with st.sidebar:
 
     st.subheader("Text style")
     st.caption(
-        "Defaults for every text — per-row Excel columns `*_Font` and `*_Style` "
-        "override them, and `*_BgColor` adds a highlight box behind any text."
+        "Defaults for every text — per-row Excel columns `*_Font`, `*_Style`, "
+        "`*_Opacity` and `*_BgOpacity` override them, and `*_BgColor` adds a "
+        "highlight box behind any text."
     )
     default_font = st.selectbox(
         "Default font", FONT_CHOICES, index=0,
@@ -520,6 +521,18 @@ with st.sidebar:
         "Default artistic style", TEXT_STYLES, index=0,
         help="classic = plain · outline = contrasting border · shadow = drop "
              "shadow · neon = glow. Override per text with `Headline_Style` etc.",
+    )
+    text_opacity_pct = st.slider(
+        "Text opacity (%)", 0, 100, 100,
+        help="How solid every text is. Below 100 the video and background show "
+             "through the letters (the outline, glow and shadow fade with them). "
+             "Override per text with `Headline_Opacity` etc.",
+    )
+    text_bg_opacity_pct = st.slider(
+        "Highlight box opacity (%)", 0, 100, 100,
+        help="Same, for the `*_BgColor` box behind a text — a translucent box "
+             "with solid text on top is the classic caption look. Override per "
+             "text with `Headline_BgOpacity` etc.",
     )
 
     st.subheader("Subliminal text (experimental)")
@@ -639,6 +652,8 @@ config = RenderConfig(
     video_z=int(video_z), cta_video_z=int(cta_video_z),
     cta_image_z=int(cta_image_z), text_z=int(text_z),
     default_font=default_font, default_style=default_style,
+    text_opacity=text_opacity_pct / 100.0,
+    text_bg_opacity=text_bg_opacity_pct / 100.0,
     subliminal_target=subliminal_target,
     subliminal_mode=subliminal_mode,
     subliminal_pattern=subliminal_pattern,
