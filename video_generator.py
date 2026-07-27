@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import math
 import random
 import re
 import shutil
@@ -55,6 +56,40 @@ FPS_CHOICES = (30, 60)
 # word/char granularity or the hide percentage chosen elsewhere.
 SUBLIMINAL_TAIL_CHARS = 4
 SUBLIMINAL_TAIL_MAX_SHOWN = 2
+
+# Hand-authored subliminal schedules for specific known texts. When a subliminal
+# text matches a key (lowercased, whitespace collapsed, curly quotes
+# straightened), this schedule REPLACES the generic machinery entirely — the
+# K / pattern / style settings and the last-4-chars rule don't apply. Semantics:
+#   * body_frames:    frame j SHOWS ONLY the pieces of body_frames[j % len]
+#   * overlay_frames: an independent rule running on top (like the tail rule) —
+#                     frame j ALSO shows overlay_frames[j % len]
+# Pieces are (start, end) index ranges over the text's NON-SPACE characters in
+# reading order (end exclusive). Cycle length = lcm(len(body), len(overlay)),
+# so no frame ever shows the whole text and every character surfaces each cycle.
+CUSTOM_SUBLIMINAL_SCHEDULES = {
+    # search "Plushie: Your Childhood Friend" in App Store
+    # non-space chars: search(0-5) "(6) plushie(7-13) :(14) your(15-18)
+    # childhood(19-27) friend(28-33) "(34) in(35-36) app(37-39) store(40-44)
+    'search "plushie: your childhood friend" in app store': {
+        "body_frames": [
+            [(0, 6), (35, 37)],    # search + in
+            [(6, 15)],             # "Plushie:  (the colon shows with Plushie)
+            [(15, 35)],            # Your Childhood + Friend"
+        ],
+        "overlay_frames": [
+            [(37, 38), (40, 42)],  # A + St    ("App Store" is never whole:
+            [(38, 40), (42, 45)],  # pp + ore   its halves alternate every frame)
+        ],
+    },
+}
+
+
+def _norm_sub_text(text: str) -> str:
+    """Normalize a text for CUSTOM_SUBLIMINAL_SCHEDULES lookup."""
+    t = (text.replace("“", '"').replace("”", '"')
+             .replace("‘", "'").replace("’", "'"))
+    return " ".join(t.split()).lower()
 
 # The CTA is invisible until CTA_FADE_START seconds, then fades in (alpha
 # only) and is fully visible at CTA_FADE_START + CTA_FADE_DURATION. These are
@@ -484,15 +519,15 @@ class RenderConfig:
     text_opacity: float = 1.0
     text_bg_opacity: float = 1.0
     # Experimental subliminal / persistence-of-vision text effect (see TextSpec).
-    # subliminal_target names the ONE text role the effect applies to by default
-    # ("none" = off, else "Headline" / "Subheading" / "Footer") — it is a CTA
-    # treatment, so it deliberately never applies to every text at once. A row's
-    # <Role>_Subliminal cell still overrides this per text. K is the number of
-    # frames per cycle (each frame omits ~1/K of the tokens), phase shifts the
+    # subliminal_targets names the text roles the effect applies to by default
+    # (up to two of "Headline" / "Subheading" / "Footer"; empty = off) — it is a
+    # CTA treatment, so it deliberately never applies to every text at once. A
+    # row's <Role>_Subliminal cell still overrides this per text. K is the number
+    # of frames per cycle (each frame omits ~1/K of the tokens), phase shifts the
     # cycle, granularity splits by "word" or "char". all_intra forces every output
     # frame to be independently coded so the "no whole frame" property survives a
     # frame-by-frame scrub of OUR file — at a big file-size cost.
-    subliminal_target: str = "none"
+    subliminal_targets: list = field(default_factory=list)
     # How each frame is built from the token groups:
     #   "hide" — show the whole text MINUS one rotating group (~1/K hidden).
     #            Each token is lit (K-1)/K of the time, so it stays bright and
@@ -548,6 +583,8 @@ class TextSpec:
     subliminal: Optional[bool] = None
     sub_k: int = 0
     sub_rects: Optional[list] = None
+    # A matched CUSTOM_SUBLIMINAL_SCHEDULES entry (None = generic machinery).
+    sub_custom: Optional[dict] = None
 
 
 @dataclass
@@ -1234,15 +1271,40 @@ class VideoGenerator:
         the element (subliminal / sub_k / sub_rects) so the overlay build, the
         partial render, and the editor payload all agree."""
         cfg = self.config
-        target = (cfg.subliminal_target or "none").strip().lower()
+        targets = {str(t).strip().lower() for t in (cfg.subliminal_targets or [])}
         for element in spec.text_elements:
-            default_on = target == element.role.lower()
+            default_on = element.role.lower() in targets
             want = default_on if element.subliminal is None else element.subliminal
             element.subliminal = False
             element.sub_k = 0
             element.sub_rects = None
+            element.sub_custom = None
             if not want or not element.text:
                 continue
+            # Hand-authored schedule for this exact text? It replaces the generic
+            # machinery (and the last-4 rule) entirely.
+            custom = CUSTOM_SUBLIMINAL_SCHEDULES.get(_norm_sub_text(element.text))
+            if custom is not None:
+                rects = self._token_rects(element, element.x, element.y, "char")
+                need = max(e for frame in (custom["body_frames"]
+                                           + custom["overlay_frames"])
+                           for _, e in frame)
+                if len(rects) >= need:
+                    nb = len(custom["body_frames"])
+                    no = len(custom["overlay_frames"])
+                    if element.bg_color:
+                        spec.warnings.append(
+                            f"{element.role}: highlight box is ignored for "
+                            "subliminal text")
+                    element.subliminal = True
+                    element.sub_k = nb * no // math.gcd(nb, no)
+                    element.sub_rects = rects
+                    element.sub_custom = custom
+                    spec.warnings.append(
+                        f"{element.role}: custom subliminal schedule active for "
+                        "this text — the K / pattern / style settings and the "
+                        "last-4-characters rule don't apply")
+                    continue
             k_req = max(2, int(cfg.subliminal_k))
             gran = (cfg.subliminal_granularity or "word").lower()
             rects = self._token_rects(element, element.x, element.y, gran)
@@ -1567,6 +1629,8 @@ class VideoGenerator:
         In every case no single frame carries the whole text and the union across
         the K frames is the whole text. Kept pixels are identical across frames
         because each derives from ONE correctly rendered raster."""
+        if element.sub_custom:
+            return self._custom_subliminal_partials(element)
         k = element.sub_k
         rects = element.sub_rects or []
         n = len(rects)
@@ -1684,6 +1748,40 @@ class VideoGenerator:
                     tdraw.rectangle(tail_erase_box(rect), fill=(0, 0, 0, 0))
                 for ti in tail_shown(j):
                     box = tail_paste_box(ti)
+                    if box[2] > box[0] and box[3] > box[1]:
+                        glyph = full.crop(box)
+                        img.paste(glyph, (box[0], box[1]), glyph)
+            partials.append(img)
+        return partials
+
+    def _custom_subliminal_partials(self, element: TextSpec) -> list:
+        """Frames for a hand-authored CUSTOM_SUBLIMINAL_SCHEDULES entry. Show-
+        style: each frame starts empty and paints ONLY the scheduled pieces —
+        body piece-set j % len(body) plus overlay piece-set j % len(overlay)
+        (the overlay runs independently on top, like the last-4 rule it
+        replaces). Every character is pasted from one correctly rendered raster
+        via its own tight alpha-masked box, so contiguous pieces reassemble
+        seamlessly and hidden neighbours can't bleed in."""
+        sched = element.sub_custom
+        rects = element.sub_rects or []
+        body = sched["body_frames"]
+        over = sched["overlay_frames"]
+        saved_bg = element.bg_color
+        element.bg_color = None
+        try:
+            full = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
+            self._paint_text(full, element.x, element.y, element, "full")
+        finally:
+            element.bg_color = saved_bg
+        partials = []
+        for j in range(element.sub_k):
+            shown: set[int] = set()
+            for a, b in body[j % len(body)] + over[j % len(over)]:
+                shown.update(range(a, b))
+            img = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
+            for t_idx, rect in rects:
+                if t_idx in shown:
+                    box = (int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3]))
                     if box[2] > box[0] and box[3] > box[1]:
                         glyph = full.crop(box)
                         img.paste(glyph, (box[0], box[1]), glyph)

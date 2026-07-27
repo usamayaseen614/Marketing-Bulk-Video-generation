@@ -536,17 +536,17 @@ with st.sidebar:
     )
 
     st.subheader("Subliminal text (experimental)")
-    subliminal_target = st.selectbox(
+    subliminal_targets = st.multiselect(
         "Apply to",
-        options=["none", "Headline", "Subheading", "Footer"],
-        index=0,
-        format_func=lambda t: "Off" if t == "none" else t,
-        help="Which single text gets the effect: no single frame shows the whole "
-             "text, but it cycles fast enough to read as whole in motion. Only "
-             "the chosen text is affected — override per text with a "
+        options=["Headline", "Subheading", "Footer"],
+        default=[],
+        max_selections=2,
+        help="Which texts get the effect (up to two at a time; empty = off): no "
+             "single frame shows the whole text, but it cycles fast enough to "
+             "read as whole in motion. Override per text with a "
              "`<Role>_Subliminal` cell (yes/no).",
     )
-    subliminal_enabled = subliminal_target != "none"
+    subliminal_enabled = bool(subliminal_targets)
     if subliminal_enabled:
         subliminal_mode = st.radio(
             "Effect style",
@@ -654,7 +654,7 @@ config = RenderConfig(
     default_font=default_font, default_style=default_style,
     text_opacity=text_opacity_pct / 100.0,
     text_bg_opacity=text_bg_opacity_pct / 100.0,
-    subliminal_target=subliminal_target,
+    subliminal_targets=list(subliminal_targets),
     subliminal_mode=subliminal_mode,
     subliminal_pattern=subliminal_pattern,
     subliminal_hide_pct=int(subliminal_hide_pct),
@@ -713,7 +713,7 @@ if excel_file is not None:
             if st.session_state.get("excel_file_key") != file_key:
                 st.session_state["excel_file_key"] = file_key
                 for stale in ("row_edits", "preview_payload", "preview_nonce",
-                              "preview_row", "preview_baseline_edits"):
+                              "preview_row", "preview_baseline_edits", "row_render"):
                     st.session_state.pop(stale, None)
             row_edits = st.session_state.get("row_edits") or {}
             if row_edits:
@@ -737,12 +737,18 @@ if not ready:
 
 # ---- actions
 st.subheader("2. Generate")
-col_row, col_preview, col_generate = st.columns([1, 2, 2], vertical_alignment="bottom")
+col_row, col_preview, col_render, col_generate = st.columns(
+    [1, 1.5, 1.5, 1.8], vertical_alignment="bottom")
 preview_row = col_row.number_input(
     "Row to preview", 1, len(df) if df is not None else 1, 1, disabled=not ready,
     help="Excel data row number (1 = the first row below the header).",
 )
 preview_clicked = col_preview.button("👁️ Preview Row", disabled=not ready, width="stretch")
+render_row_clicked = col_render.button(
+    "🎬 Render Row", disabled=not ready, width="stretch",
+    help="Render this one row to a real MP4 — with your saved edits — and play "
+         "it here. Slower than the static preview, but it's the actual video.",
+)
 generate_clicked = col_generate.button(
     "🚀 Generate All Videos", disabled=not ready, type="primary", width="stretch"
 )
@@ -772,6 +778,61 @@ if preview_clicked and ready:
                 logger.exception("Preview failed")
                 st.session_state.pop("preview_payload", None)
                 st.error(f"Preview failed: {exc}")
+
+if render_row_clicked and ready:
+    st.session_state.pop("row_render", None)
+    with st.spinner(
+        f"Rendering row {preview_row} for real… (a full render — slower than "
+        "the static preview)"
+    ):
+        with tempfile.TemporaryDirectory(prefix="bvg_rowrender_") as tmp:
+            try:
+                ws = build_workspace(Path(tmp), video_file, zip_file, cta_file,
+                                     font_file, cta_video_slot_files)
+                generator = make_generator(ws, config, Path(tmp) / "out")
+                # Same deterministic background assignment as the real batch, so
+                # this row renders with its actual background. df already carries
+                # the saved editor edits (apply_saved_edits above).
+                df_render, bg_warnings = generator.assign_backgrounds(df)
+                for message in bg_warnings:
+                    st.warning(message)
+                res = generator.render_row(
+                    int(preview_row), df_render.iloc[int(preview_row) - 1])
+                if res.ok:
+                    # Read the bytes before the TemporaryDirectory vanishes.
+                    st.session_state["row_render"] = {
+                        "row": int(preview_row),
+                        "name": res.filename,
+                        "bytes": (Path(tmp) / "out" / res.filename).read_bytes(),
+                        "warnings": list(res.warnings),
+                    }
+                else:
+                    st.error(f"Row {preview_row} render failed: {res.error}")
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Row render failed")
+                st.error(f"Row render failed: {exc}")
+
+row_render = st.session_state.get("row_render")
+if row_render and not generate_clicked:
+    # A 9:16 video at full content width is enormous — keep the player in a
+    # narrow column with the caption/warnings/buttons beside it.
+    col_vid, col_side = st.columns([2, 3], vertical_alignment="top")
+    with col_vid:
+        st.video(row_render["bytes"])
+    with col_side:
+        st.caption(
+            f"Rendered video of row {row_render['row']} — exactly what the "
+            "batch would produce for this row, including your saved edits."
+        )
+        for message in row_render.get("warnings") or []:
+            st.warning(f"Row {row_render['row']}: {message}")
+        st.download_button(
+            "⬇️ Download this video", data=row_render["bytes"],
+            file_name=row_render["name"], mime="video/mp4",
+        )
+        if st.button("✖ Close row video"):
+            st.session_state.pop("row_render", None)
+            st.rerun()
 
 if "preview_payload" in st.session_state and not generate_clicked:
     st.caption(

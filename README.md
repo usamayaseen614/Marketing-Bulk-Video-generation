@@ -208,7 +208,7 @@ Notes:
 | No background — output only the panels | Split-screen only: crop the output to exactly the two panels (1080 × panel height). No background at all; texts/CTA overlay the videos |
 | Number of clip slots | How many CTA-video clip positions play in fixed order (1–10). Each is a pool; one sample is picked per output video |
 | Keep clips playing to fill the whole video | After the fixed slots, keep drawing fresh random clips until the side covers the full promo length (never freezes). Split-screen turns this on automatically |
-| Subliminal text (experimental) | *Apply to* picks the **single** text (Headline / Subheading / Footer, default Off) that gets split across frames so no single frame shows all of it — never all texts at once; override per text via `<Role>_Subliminal`. *Effect style* = **Hide a slice** (bright, recommended) or **Show only a slice** (~1/K brightness, faint). For Hide: *Hidden characters* = **Random each cycle** (balanced, non-repeating; default) or **Fixed pattern**, and *Hidden per frame (%)* sets how much is hidden (≈33% stays bright and hides each character exactly once per cycle; higher is fainter). Tunable K (frames/cycle), word/char granularity, and *Preserve frame-by-frame* (all-intra, larger files). See the caveats above |
+| Subliminal text (experimental) | *Apply to* picks **up to two** texts (Headline / Subheading / Footer, default off) that get split across frames so no single frame shows all of them — never all three at once; override per text via `<Role>_Subliminal`. *Effect style* = **Hide a slice** (bright, recommended) or **Show only a slice** (~1/K brightness, faint). For Hide: *Hidden characters* = **Random each cycle** (balanced, non-repeating; default) or **Fixed pattern**, and *Hidden per frame (%)* sets how much is hidden (≈33% stays bright and hides each character exactly once per cycle; higher is fainter). Tunable K (frames/cycle), word/char granularity, and *Preserve frame-by-frame* (all-intra, larger files). Certain known texts carry a **hand-authored schedule** (see `CUSTOM_SUBLIMINAL_SCHEDULES` in `video_generator.py`) that replaces all of these settings and the last-4 rule. See the caveats above |
 | Frame rate (fps) | 30 or 60. 60 doubles the frames to encode but halves the subliminal cycle (K/fps s), so the effect blends more smoothly. Both upload fine to every major platform |
 | Randomize position per video | Each video gets its own random spot per row (avoids the CTA and explicitly positioned texts; auto-placed texts then avoid the video). Seeded per row, so previews and re-runs are reproducible. Ignored in split-screen mode |
 | Video X/Y/W/H | Default box the promo video is fitted into (aspect ratio preserved, centered). X/Y are hidden when randomize is on. A row's `Video_X`/`Video_Y`/`Video_Width`/`Video_Height` cells override these per video |
@@ -243,10 +243,15 @@ Notes:
    still there if you prefer pasting values by hand. (Text resizing scales the preview
    proportionally; a long text may re-wrap slightly in the final render at the new
    size.)
-3. Click **🚀 Generate All Videos** — a progress bar shows live success/failure counts.
-4. Failed rows are listed with their error (e.g., a background missing from the ZIP);
+3. Click **🎬 Render Row** to render that one row to a real MP4 — with your saved edits —
+   and play it right in the app (with a download button). Slower than the static preview,
+   but it's exactly what the batch will produce for that row, including motion-only
+   behavior the static preview can't show (side-clip sequencing, fades, the subliminal
+   effect).
+4. Click **🚀 Generate All Videos** — a progress bar shows live success/failure counts.
+5. Failed rows are listed with their error (e.g., a background missing from the ZIP);
    one bad row never stops the batch.
-5. Download the ZIP — it contains every rendered MP4 plus `render_log.txt`.
+6. Download the ZIP — it contains every rendered MP4 plus `render_log.txt`.
 
 Temporary working files are cleaned automatically after every run. Rendered output is kept
 in your system temp folder (path shown under the download button) until the next run.
