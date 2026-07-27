@@ -6,6 +6,7 @@ Run with:  streamlit run app.py
 
 import io
 import logging
+import os
 import shutil
 import tempfile
 import time
@@ -624,9 +625,15 @@ with st.sidebar:
         value="medium",
         help="Faster presets render quicker but produce slightly larger files.",
     )
+    # One render only keeps ~8-10 threads busy, so many-core machines need
+    # several concurrent renders to saturate. Cap at min(16, cores) — enough for
+    # a 32-core VM without letting a laptop launch 16 FFmpegs.
+    max_workers = min(16, max(4, os.cpu_count() or 4))
     workers = st.slider(
-        "Parallel renders", 1, 4, 2,
-        help="Concurrent FFmpeg processes. 2 is a good default on office machines.",
+        "Parallel renders", 1, max_workers, min(2, max_workers),
+        help="Concurrent FFmpeg processes. 2 is a good default on office "
+             "machines; on a many-core VM push this to ~1 per 3 cores "
+             "(e.g. 10 on 32 cores) to keep the CPU fully busy.",
     )
     font_file = st.file_uploader(
         "Custom font (TTF/OTF, optional)", type=["ttf", "otf"],

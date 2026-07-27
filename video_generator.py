@@ -957,6 +957,13 @@ class VideoGenerator:
     def _wrap_text(self, element: TextSpec) -> None:
         """Re-flow an element's text so its rendered block fits on the canvas.
 
+        Manual line breaks come first: a real line break inside the cell
+        (Alt+Enter in Excel) or a '|' marker forces a break exactly there, for
+        any of the three texts (the footer's automatic balancing is skipped).
+        A manual line that is still too wide for the canvas keeps the automatic
+        width-driven wrapping on top.
+
+        Without any manual break, the automatic rules apply unchanged:
         - Footer: always balanced onto 3 lines (fewer if it has fewer words).
         - Headline/Subheading: kept on one line when it fits; greedily wrapped
           onto more lines when it would run past the canvas edges.
@@ -964,7 +971,10 @@ class VideoGenerator:
           the font size is stepped down until it fits.
         Runs before measurement/placement so the auto-placer reserves space
         for the full wrapped block."""
-        words = element.text.split()
+        segments = [s for s in
+                    (seg.strip() for seg in element.text.replace("|", "\n").split("\n"))
+                    if s]
+        words = [w for seg in segments for w in seg.split()]
         if not words:
             return
         max_w = CANVAS_W - 2 * PLACEMENT_MARGIN
@@ -974,7 +984,17 @@ class VideoGenerator:
             element.size -= 2
             font = self._font_for(element)
 
-        if element.role == "Footer":
+        if len(segments) > 1:
+            # Manual breaks: honor them verbatim; only a segment that would run
+            # off the canvas is wrapped further.
+            lines = []
+            for seg in segments:
+                seg_words = seg.split()
+                if font.getlength(" ".join(seg_words)) <= max_w:
+                    lines.append(" ".join(seg_words))
+                else:
+                    lines.extend(_greedy_wrap(seg_words, max_w, font.getlength))
+        elif element.role == "Footer":
             lines = _balanced_lines(words, min(3, len(words)), font.getlength)
             # Balanced thirds can still overflow on extreme text; fall back to
             # width-driven wrapping in that case.
