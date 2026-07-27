@@ -145,7 +145,7 @@ def build_workspace(tmp: Path, video_file, zip_file, cta_file, font_file,
 
 def make_generator(ws: Workspace, config: RenderConfig, output_dir: Path) -> VideoGenerator:
     config.font_path = str(ws.font_path) if ws.font_path else None
-    return VideoGenerator(
+    generator = VideoGenerator(
         config=config,
         bg_dir=ws.bg_dir,
         video_path=ws.video_path,
@@ -154,6 +154,11 @@ def make_generator(ws: Workspace, config: RenderConfig, output_dir: Path) -> Vid
         output_dir=output_dir,
         cta_video_slots=ws.cta_video_slots,
     )
+    # Bad uploads caught at construction (e.g. an audio-only "video" clip that
+    # would crash FFmpeg mid-render) — show them wherever a generator is built.
+    for message in generator.input_warnings:
+        st.warning(message)
+    return generator
 
 
 def apply_saved_edits(df: pd.DataFrame, edits: dict[int, dict]) -> pd.DataFrame:

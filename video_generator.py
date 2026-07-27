@@ -240,6 +240,39 @@ def find_ffmpeg() -> str:
     return imageio_ffmpeg.get_ffmpeg_exe()
 
 
+# Whether a media file actually contains a video stream, cached by
+# (filename, size) so re-uploads of the same files across generator instances
+# (every Preview/Render click rebuilds the workspace) are only probed once.
+# An MP4 with no video track (audio-only, or a corrupt video stream) would
+# otherwise make FFmpeg fail mid-render with the cryptic "Stream specifier ':v'
+# ... matches no streams" error.
+_VIDEO_STREAM_CACHE: dict[tuple, bool] = {}
+_VIDEO_STREAM_LOCK = threading.Lock()
+_VIDEO_STREAM_RE = re.compile(r"Stream #\d+:\d+.*?: Video", re.IGNORECASE)
+
+
+def _has_video_stream(ffmpeg: str, path: Path) -> bool:
+    try:
+        key = (path.name.lower(), path.stat().st_size)
+    except OSError:
+        return False
+    with _VIDEO_STREAM_LOCK:
+        if key in _VIDEO_STREAM_CACHE:
+            return _VIDEO_STREAM_CACHE[key]
+    ok = False
+    try:
+        # ffmpeg -i with no output exits non-zero by design; the stream listing
+        # is on stderr regardless (same trick as _probe_duration).
+        proc = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)],
+                              capture_output=True, text=True, timeout=60)
+        ok = _VIDEO_STREAM_RE.search(proc.stderr or "") is not None
+    except (subprocess.TimeoutExpired, OSError):
+        ok = False
+    with _VIDEO_STREAM_LOCK:
+        _VIDEO_STREAM_CACHE[key] = ok
+    return ok
+
+
 def find_default_font() -> Optional[str]:
     for candidate in FONT_CANDIDATES:
         if Path(candidate).is_file():
@@ -754,6 +787,31 @@ class VideoGenerator:
 
         self.ffmpeg = find_ffmpeg()
         logger.info("Using FFmpeg binary: %s", self.ffmpeg)
+
+        # Guard against inputs that would make FFmpeg die mid-render with the
+        # cryptic "Stream specifier ':v' ... matches no streams" error: the main
+        # video must have a video track, and side clips without one (audio-only
+        # or corrupt uploads) are skipped with a warning naming the file. The
+        # warnings are surfaced by the app after construction.
+        self.input_warnings: list[str] = []
+        if not _has_video_stream(self.ffmpeg, self.video_path):
+            raise ValueError(
+                "The promo video has no video stream — it looks audio-only or "
+                "corrupt. Re-export it as a normal MP4 video.")
+        checked_slots: list[list[Path]] = []
+        for i, slot in enumerate(self.cta_video_slots, start=1):
+            good = []
+            for p in slot:
+                if _has_video_stream(self.ffmpeg, p):
+                    good.append(p)
+                else:
+                    self.input_warnings.append(
+                        f"Clip slot {i}: '{p.name}' has no video stream "
+                        "(audio-only or corrupt) — skipped. Rows would otherwise "
+                        "fail with an FFmpeg 'matches no streams' error.")
+            checked_slots.append(good)
+        self.cta_video_slots = checked_slots
+        self._has_cta_video = any(self.cta_video_slots)
 
         self._bg_index, self._bg_names = self._build_bg_index(Path(bg_dir))
         # Fonts are cached by (file path, named variation, size). The uploaded
