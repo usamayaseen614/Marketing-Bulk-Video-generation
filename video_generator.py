@@ -1370,10 +1370,6 @@ class VideoGenerator:
                 if len(rects) >= need:
                     nb = len(custom["body_frames"])
                     no = len(custom["overlay_frames"])
-                    if element.bg_color:
-                        spec.warnings.append(
-                            f"{element.role}: highlight box is ignored for "
-                            "subliminal text")
                     element.subliminal = True
                     element.sub_k = nb * no // math.gcd(nb, no)
                     element.sub_rects = rects
@@ -1396,9 +1392,6 @@ class VideoGenerator:
                 spec.warnings.append(
                     f"{element.role}: too short to split subliminally — shown normally")
                 continue
-            if element.bg_color:
-                spec.warnings.append(
-                    f"{element.role}: highlight box is ignored for subliminal text")
             element.subliminal = True
             # Ordered and show mode partition tokens into groups, so there can be
             # at most one group per token (K capped at the token count). Random
@@ -1522,6 +1515,9 @@ class VideoGenerator:
                             CSS, so it is intentionally excluded here)
           what='ink'        the fill glyphs only, in `fill` (white for the
                             editor's recolorable mask)
+          what='bgbox'      the background highlight box only, no glyphs — the
+                            always-on layer behind a subliminal text, whose
+                            glyphs cycle in separate per-frame layers
 
         Shadow/glow use temporary layers the same size as `target`, so this
         works equally on a full canvas (overlay) or a small tile (editor).
@@ -1538,7 +1534,7 @@ class VideoGenerator:
         common = dict(font=font, anchor="mm", align="center")
         text_alpha = _alpha_of(element.color)
 
-        if what == "full" and element.bg_color:
+        if what in ("full", "bgbox") and element.bg_color:
             l, t, r, b = draw.multiline_textbbox((ax, ay), element.text,
                                                  stroke_width=stroke, **common)
             pad = max(6, round(element.size * 0.30))
@@ -1603,14 +1599,23 @@ class VideoGenerator:
         self._resolve_positions(spec)
         canvas = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
         for element in spec.text_elements:
-            # Subliminal texts are NOT baked here — they ship as their own K
-            # cycled FFmpeg inputs (see build_subliminal_layers). In a static
-            # preview composite this means the effect isn't shown (it can't be —
-            # it's motion-only); the editor payload renders them separately.
-            if not element.text or element.subliminal:
+            if not element.text:
                 continue
             layer = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
-            self._paint_text(layer, element.x, element.y, element, "full")
+            if element.subliminal:
+                # A subliminal text's GLYPHS are not baked here — they ship as
+                # their own K cycled FFmpeg inputs (build_subliminal_layers), so
+                # a static composite can't show the effect (it's motion-only).
+                # Its highlight box, though, must stay put: it belongs to this
+                # always-on layer, painted UNDER the cycling glyphs (the layer
+                # sort puts the subliminal partials just above this one). Baking
+                # the box into the partials instead would notch a hole in it
+                # every time a character inside it is hidden.
+                if not element.bg_color:
+                    continue
+                self._paint_text(layer, element.x, element.y, element, "bgbox")
+            else:
+                self._paint_text(layer, element.x, element.y, element, "full")
             canvas = Image.alpha_composite(canvas, layer)
         if include_cta:
             if self._has_cta_video:
@@ -1731,8 +1736,10 @@ class VideoGenerator:
         else:  # ordered hide, or show — the fixed comb
             frame_sets = [{i for i in range(n) if i % k == j} for j in range(k)]
 
-        # Render the styled text once. Suppress the highlight box — carving
-        # tokens out of it would notch it (bg_color is ignored for these).
+        # Render the styled text once, WITHOUT its highlight box: carving tokens
+        # out of a raster containing the box would notch a hole in it every
+        # frame. The box is painted once into the always-on static overlay
+        # instead (build_overlay_image), directly beneath these cycling glyphs.
         saved_bg = element.bg_color
         element.bg_color = None
         try:

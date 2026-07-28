@@ -192,6 +192,9 @@ Notes:
   so they never appear in the video at all.) Raise K if you want to hide more per frame.
   Rendering at **60 fps** (Output → Frame rate) halves the cycle to K/60 s, which blends
   noticeably more smoothly.
+  A **highlight box** (`*_BgColor`) works normally with the effect: the box is painted once as
+  an always-on layer and the cycling glyphs ride on top of it, so it stays solid and unnotched
+  while the letters flicker (only the *letters* are ever hidden, never the box).
   A **hardcoded** rule always applies to whichever text has the effect: the **last 4
   characters** follow their own schedule, independent of the body — they alternate every frame,
   the **1st & 4th together, then the 2nd & 3rd**, so no more than 2 of them are ever visible at
