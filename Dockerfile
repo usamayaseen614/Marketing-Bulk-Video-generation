@@ -19,10 +19,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Rendering engine + UI
-COPY video_generator.py app.py preview_editor.py ./
-# Automation layer
-COPY config.py workspace.py results.py ui_common.py ./
+# Every top-level module, as a glob rather than a hand-maintained list.
+# Listing them individually is how batching.py got left out of the image: it
+# imported fine locally and every render on the VM died with
+# "No module named 'batching'". .dockerignore is what excludes the ones that
+# should not ship.
+COPY *.py ./
 COPY jobs/ jobs/
 COPY integrations/ integrations/
 COPY captions/ captions/
@@ -35,6 +37,22 @@ COPY supervisord.conf /etc/supervisor/conf.d/app.conf
 # Streamlit's static serving requires ./static to exist at startup; large
 # result ZIPs are streamed from here (see ui_common.offer_zip_download).
 RUN mkdir -p static
+
+# Fail the BUILD if anything the worker needs is missing from the image.
+#
+# Without this, a module left out of the COPY above only shows up when a real
+# job runs — after a batch has been submitted, on the VM, minutes or hours
+# later. Importing every non-UI module here turns that into an immediate build
+# failure. app.py and pages/ are excluded because importing them executes
+# Streamlit page code.
+RUN python -c "\
+import importlib, sys; \
+mods = ['config','workspace','results','batching','video_generator','preview_editor', \
+        'jobs.store','jobs.worker','jobs.runners.render','jobs.runners.scrape', \
+        'jobs.runners.captions','integrations.drive','integrations.mailer', \
+        'captions.naming','captions.pool','captions.assign','scrapers.tiktok']; \
+[importlib.import_module(m) for m in mods]; \
+print('import check OK:', len(mods), 'modules')"
 
 # Job records, staged uploads and rendered videos live here. This MUST be a
 # mounted volume in production — anything on the container filesystem is lost

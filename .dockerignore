@@ -15,3 +15,10 @@ _jobs/
 .env
 *-key.json
 service-account*.json
+
+# Scratch files matched by the *.py glob in the Dockerfile
+_tmp_*.py
+container_smoke_test.py
+tests/
+tools/
+deploy/
