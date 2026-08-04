@@ -133,6 +133,76 @@ def show_captions(job: dict, sheet: Path, label: str) -> None:
             )
 
 
+def pool_workbook(captions: list[str], hashtags: list[str]) -> bytes:
+    """The pool as one .xlsx with a sheet each. Two lists of different lengths
+    do not belong in one table."""
+    import io
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        pd.DataFrame({"Caption": captions}).to_excel(
+            writer, sheet_name="Captions", index=False)
+        pd.DataFrame({"Hashtags": hashtags}).to_excel(
+            writer, sheet_name="Hashtag sets", index=False)
+    return buf.getvalue()
+
+
+def show_caption_pool(job: dict) -> None:
+    """Everything a caption-pool job produced.
+
+    The pool lives in the database rather than a file, so without this the job
+    finished with nothing to look at — no way to read what was generated, judge
+    whether the theme worked, or take the text elsewhere."""
+    result = job.get("result") or {}
+    pool_id = result.get("pool_id")
+    pool = store.get_pool(pool_id) if pool_id else None
+    if not pool:
+        st.caption("This pool is no longer in the database.")
+        return
+
+    captions, hashtags = pool["captions"], pool["hashtags"]
+    active = " · **active**" if pool.get("active") else " (superseded by a newer pool)"
+    st.markdown(
+        f"**{len(captions):,} captions × {len(hashtags):,} hashtag sets = "
+        f"{pool['combinations']:,} unique pairs**{active}"
+    )
+    st.caption(f"Theme: {pool.get('theme')} · model: {pool.get('model')} · "
+               f"{pool.get('cursor', 0):,} pairs used so far")
+
+    tab_c, tab_h = st.tabs([f"Captions ({len(captions):,})",
+                            f"Hashtag sets ({len(hashtags):,})"])
+    with tab_c:
+        st.dataframe(pd.DataFrame({"Caption": captions}),
+                     hide_index=False, width="stretch", height=320)
+    with tab_h:
+        st.dataframe(pd.DataFrame({"Hashtags": hashtags}),
+                     hide_index=False, width="stretch", height=320)
+
+    slug = f"pool_{job['id']}"
+    name = (pool.get("theme") or "caption-pool")[:40].strip().replace("/", "-")
+    col_x, col_c, col_h = st.columns(3)
+    with col_x:
+        st.download_button(
+            "⬇️ Excel (both)",
+            data=pool_workbook(captions, hashtags),
+            file_name=f"{name}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"x_{slug}",
+        )
+    with col_c:
+        st.download_button(
+            "⬇️ Captions CSV",
+            data=pd.DataFrame({"Caption": captions}).to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"{name}-captions.csv", mime="text/csv", key=f"c_{slug}",
+        )
+    with col_h:
+        st.download_button(
+            "⬇️ Hashtags CSV",
+            data=pd.DataFrame({"Hashtags": hashtags}).to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"{name}-hashtags.csv", mime="text/csv", key=f"h_{slug}",
+        )
+
+
 def render_job(job: dict, expanded: bool = False) -> None:
     icon = _STATUS_ICON.get(job["status"], "•")
     label = job.get("label") or job["id"]
@@ -144,12 +214,18 @@ def render_job(job: dict, expanded: bool = False) -> None:
         header += f" ({job['stage']})"
 
     with st.expander(header, expanded=expanded):
+        counts = store.item_counts(job["id"])
         meta = st.columns(4)
         meta[0].metric("Submitted", fmt_time(job["created_at"]))
         meta[1].metric("Duration", fmt_duration(job))
-        counts = store.item_counts(job["id"])
-        meta[2].metric("Videos", counts["total"] or "—")
-        meta[3].metric("Failed", counts["render_failed"] or 0)
+        if job["kind"] == store.KIND_CAPTIONS:
+            # A pool job has no per-video items, so "Videos —" told you nothing.
+            res = job.get("result") or {}
+            meta[2].metric("Captions", f"{res.get('captions', 0):,}")
+            meta[3].metric("Combinations", f"{res.get('combinations', 0):,}")
+        else:
+            meta[2].metric("Videos", counts["total"] or "—")
+            meta[3].metric("Failed", counts["render_failed"] or 0)
 
         if job["status"] in ACTIVE:
             render_progress(job)
@@ -201,7 +277,11 @@ def render_job(job: dict, expanded: bool = False) -> None:
                 f"{settings.JOB_RETENTION_DAYS} days)."
             )
 
-        # ---- captions, readable on the page rather than hidden in a file
+        # ---- a caption-pool job's whole output lives in the database
+        if job["kind"] == store.KIND_CAPTIONS and job["status"] == store.STATUS_SUCCEEDED:
+            show_caption_pool(job)
+
+        # ---- captions/metadata, readable on the page rather than hidden in a file
         sheet = result.get("sheet_path")
         if sheet and Path(sheet).is_file():
             show_captions(job, Path(sheet), label)

@@ -552,6 +552,20 @@ def save_pool(theme: str, captions: list[str], hashtags: list[str],
     return pool_id
 
 
+def get_pool(pool_id: str) -> Optional[dict]:
+    """One pool by id — what a finished caption job needs to show its output."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM caption_pools WHERE id=?", (pool_id,)).fetchone()
+    if not row:
+        return None
+    pool = dict(row)
+    pool["captions"] = json.loads(pool.pop("captions_json"))
+    pool["hashtags"] = json.loads(pool.pop("hashtags_json"))
+    pool["combinations"] = len(pool["captions"]) * len(pool["hashtags"])
+    return pool
+
+
 def active_pool() -> Optional[dict]:
     with _conn() as conn:
         row = conn.execute(
