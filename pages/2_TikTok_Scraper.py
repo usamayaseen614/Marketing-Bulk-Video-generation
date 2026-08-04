@@ -83,6 +83,11 @@ trim_duration = col_dur.number_input(
     "Length (s)", 1.0, 60.0, settings.SCRAPE_TRIM_DURATION, 0.5)
 st.caption(f"→ keeping {trim_start:g}s to {trim_start + trim_duration:g}s of each clip.")
 
+drive_folder = st.text_input(
+    "Google Drive folder link (optional)", value="",
+    placeholder="https://drive.google.com/drive/folders/…",
+    help="Send this scrape somewhere specific. Blank uses the server default.",
+)
 notify_email = st.text_input(
     "Notify email (optional)", value=", ".join(settings.MAIL_TO),
     placeholder="you@yourcompany.com",
@@ -117,6 +122,7 @@ if st.button("🚀 Start scrape", type="primary", disabled=not account.strip()):
             "trim_start": float(trim_start),
             "trim_duration": float(trim_duration),
             "skip_known": bool(skip_known),
+            "drive_folder": drive_folder.strip(),
         },
         label=f"scrape-{handle}",
         notify_email=notify_email.strip(),

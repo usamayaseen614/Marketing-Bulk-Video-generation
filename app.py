@@ -664,6 +664,31 @@ caption_mode = st.radio(
     horizontal=True,
 )
 caption_params: dict = {}
+
+hashtag_source = st.radio(
+    "Hashtags",
+    options=["pool", "excel", "none"],
+    format_func=lambda m: {
+        "pool": "From the caption pool",
+        "excel": "From an Excel file I upload",
+        "none": "None — filenames are the caption only",
+    }[m],
+    horizontal=True,
+    help="Hashtags are optional. Without them the short filename is just the "
+         "caption, still capped at 100 characters.",
+)
+caption_params["hashtag_source"] = hashtag_source
+hashtag_file = None
+if hashtag_source == "excel":
+    hashtag_file = st.file_uploader(
+        "Hashtag sets (.xlsx) — one set per row in the first column",
+        type=["xlsx"],
+        help="e.g. a column of rows like '#asmr #satisfying #fyp'. They are "
+             "cycled across the batch, so the spread is even.",
+    )
+    if hashtag_file is None:
+        st.caption("No file yet — the caption pool's hashtags will be used until one is uploaded.")
+
 if caption_mode == "generate":
     caption_params["generate_pool"] = True
     caption_params["force_new_pool"] = True
@@ -724,6 +749,20 @@ batch_label = col_label.text_input(
     help="Shown on the Jobs page and in the notification email. Defaults to the "
          "Excel file name.",
 )
+drive_folder = st.text_input(
+    "Google Drive folder link (optional)", value="", disabled=not ready,
+    placeholder="https://drive.google.com/drive/folders/…",
+    help="Paste a folder link to send THIS batch somewhere specific. Leave "
+         "blank to use the server's configured destination. It must sit inside "
+         "a Shared Drive — a service account cannot write to a personal My Drive.",
+)
+if drive_folder.strip():
+    from integrations import drive as _drv
+    _did = _drv.extract_id(drive_folder)
+    st.caption(f"→ uploading this batch to `{_did}`"
+               + ("" if _drv.looks_like_shared_drive(_did)
+                  else " (a folder — fine if it lives in a Shared Drive)"))
+
 notify_email = col_mail.text_input(
     "Notify email (optional)", value=", ".join(settings.MAIL_TO), disabled=not ready,
     placeholder="you@yourcompany.com",
@@ -886,6 +925,9 @@ if generate_clicked and ready:
         # The sheet is written with any preview-editor edits baked in, so the
         # worker renders exactly what this page was showing. updated_excel_bytes
         # preserves the original workbook's formatting.
+        if hashtag_file is not None:
+            (assets / "hashtags.xlsx").write_bytes(hashtag_file.getvalue())
+
         (assets / "input.xlsx").write_bytes(
             updated_excel_bytes(excel_file.getvalue(),
                                 st.session_state.get("row_edits") or {})
@@ -902,6 +944,7 @@ if generate_clicked and ready:
                 "make_zip": True,
                 "excel_name": excel_file.name,
                 "clip_source": clip_source,
+                "drive_folder": drive_folder.strip(),
                 **clip_params,
                 **caption_params,
             },

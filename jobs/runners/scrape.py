@@ -37,7 +37,8 @@ def _sleep_politely() -> None:
 
 def _metadata_frame(clips: dict[str, tiktok.ClipInfo],
                     plan: list[tiktok.PlannedClip],
-                    items_by_id: dict[str, dict]) -> pd.DataFrame:
+                    items_by_id: dict[str, dict],
+                    owner_of: Optional[dict] = None) -> pd.DataFrame:
     """One row per clip.
 
     This exists so curating 500 clips is a matter of sorting by views and
@@ -46,7 +47,9 @@ def _metadata_frame(clips: dict[str, tiktok.ClipInfo],
     for entry in plan:
         where = ("dump" if entry.batch == 0
                  else f"batch_{entry.batch:02d}/slot_{entry.slot}")
-        placement.setdefault(entry.video_id, []).append(where)
+        # entry.video_id is a segment filename; roll it up to its source clip.
+        owner = (owner_of or {}).get(entry.video_id, entry.video_id)
+        placement.setdefault(owner, []).append(where)
 
     rows = []
     for video_id, clip in clips.items():
@@ -64,6 +67,7 @@ def _metadata_frame(clips: dict[str, tiktok.ClipInfo],
             "Title": clip.title,
             "URL": clip.url,
             "File": item.get("name") or "",
+            "Segments": len((item.get("meta") or {}).get("segments") or []) or 1,
             "Placement": ", ".join(placement.get(video_id, [])),
             "Status": item.get("render_status") or "pending",
             "Error": item.get("render_error") or "",
@@ -77,7 +81,7 @@ def _metadata_frame(clips: dict[str, tiktok.ClipInfo],
 
 
 def _package_clips(job_id: str, plan: list[tiktok.PlannedClip],
-                   items_by_id: dict, clips_dir: Path,
+                   clips_dir: Path,
                    sheet_path: Path, mode: str) -> Optional[Path]:
     """ZIP the clips in their batch/slot layout.
 
@@ -92,10 +96,8 @@ def _package_clips(job_id: str, plan: list[tiktok.PlannedClip],
     written = 0
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
         for entry in plan:
-            item = items_by_id.get(entry.video_id) or {}
-            name = item.get("name")
-            if not name:
-                continue
+            # entry.video_id is a segment FILENAME here.
+            name = entry.video_id
             src = clips_dir / name
             if not src.is_file():
                 continue
@@ -208,19 +210,24 @@ def run(job: dict) -> dict:
                 continue
             seen_hashes.add(digest)
 
-            out_name = f"{clip.video_id}.mp4"
-            trimmed_path = tiktok.trim_clip(
-                raw, clips_dir / out_name, trim_start, trim_duration, ffmpeg)
+            # One download can yield several clips: a 40s video with a 10s
+            # window becomes four, instead of throwing 30 seconds away.
+            segments = tiktok.split_clip(
+                raw, clips_dir, clip.video_id, trim_start, trim_duration, ffmpeg)
             raw.unlink(missing_ok=True)
-            trimmed += 1
+            trimmed += len(segments)
 
             store.update_item(
-                job_id, item["idx"], name=out_name,
+                job_id, item["idx"], name=segments[0].name,
                 render_status=store.ITEM_DONE, render_error=None,
                 meta={**(item.get("meta") or {}),
                       "content_hash": digest,
-                      "trimmed_duration": tiktok.probe_duration(trimmed_path, ffmpeg)},
+                      "segments": [p.name for p in segments],
+                      "trimmed_duration": tiktok.probe_duration(segments[0], ffmpeg)},
             )
+            if len(segments) > 1:
+                logger.info("Job %s: %s -> %d segments",
+                            job_id, clip.video_id, len(segments))
         except Exception as exc:  # noqa: BLE001 — photo posts land here, by design
             skipped += 1
             message = str(exc)
@@ -246,23 +253,33 @@ def run(job: dict) -> dict:
         job_id=job_id,
     )
 
-    good_ids = [(i.get("meta") or {}).get("video_id") for i in good]
+    # Every produced segment is its own clip. Planning over source video ids
+    # would place only the first segment and silently strand the rest.
+    segment_files: list[str] = []
+    owner_of: dict[str, str] = {}
+    for i in good:
+        meta = i.get("meta") or {}
+        vid = meta.get("video_id")
+        for name in (meta.get("segments") or ([i["name"]] if i.get("name") else [])):
+            segment_files.append(name)
+            owner_of[name] = vid
 
     # ---- 4. plan the layout
     if mode == "dump":
-        plan = tiktok.plan_dump(good_ids)
+        plan = tiktok.plan_dump(segment_files)
     else:
-        plan = tiktok.plan_batches(good_ids, n_batches)
+        plan = tiktok.plan_batches(segment_files, n_batches)
 
     # ---- 5. metadata sheet
     store.set_stage(job_id, "building metadata")
     sheet_path = store.job_dir(job_id) / "metadata.xlsx"
-    frame = _metadata_frame({c.video_id: c for c in fresh}, plan, items_by_id)
+    frame = _metadata_frame({c.video_id: c for c in fresh}, plan,
+                            items_by_id, owner_of)
     frame.to_excel(sheet_path, index=False, engine="openpyxl")
 
     # ---- 6. package, so the clips are reachable even without Drive
     store.set_stage(job_id, "packaging")
-    zip_path = _package_clips(job_id, plan, items_by_id, clips_dir, sheet_path, mode)
+    zip_path = _package_clips(job_id, plan, clips_dir, sheet_path, mode)
 
     # ---- 7. upload
     drive_result = ({} if params.get("upload") is False else
@@ -300,11 +317,15 @@ def _upload(job: dict, account: str, mode: str, plan: list[tiktok.PlannedClip],
     uploaders expect — the user drags 5 folders in instead of hand-sorting 50
     loose files."""
     job_id = job["id"]
-    if not config.drive_configured():
+    destination = (job.get("params") or {}).get("drive_folder") or ""
+    if not config.drive_configured(destination):
         logger.info("Job %s: Drive not configured — clips stay on the VM", job_id)
         return {}
 
     from integrations import drive
+
+    # A job may carry its own destination; blank falls back to the env default.
+    drive.set_target(destination)
 
     try:
         root_id = drive.ensure_path(["scrapes", account])
@@ -338,10 +359,8 @@ def _upload(job: dict, account: str, mode: str, plan: list[tiktok.PlannedClip],
 
         queue = []
         for entry in entries:
-            item = items_by_id.get(entry.video_id) or {}
-            name = item.get("name")
-            if not name:
-                continue
+            # entry.video_id is a segment FILENAME here.
+            name = entry.video_id
             src = clips_dir / name
             if src.is_file():
                 # Position prefix keeps slot folders in play order, and makes

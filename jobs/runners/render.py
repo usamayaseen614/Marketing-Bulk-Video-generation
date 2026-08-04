@@ -81,8 +81,44 @@ def _load_dataframe(assets: Path) -> pd.DataFrame:
 
 # --------------------------------------------------------------------------- captions
 
+def _hashtag_override(job_id: str, params: dict) -> Optional[list[str]]:
+    """Hashtag sets from somewhere other than the caption pool.
+
+    Three sources: the pool (default), an uploaded Excel whose first column is
+    one hashtag set per row, or none at all. With none, a filename is just its
+    caption — the naming code already treats the hashtag as optional, so the
+    "exactly one #" rule simply becomes "at most one"."""
+    source = params.get("hashtag_source", "pool")
+    if source == "none":
+        return []
+    if source != "excel":
+        return None                      # None means "use the pool's own"
+
+    sheet = store.assets_dir(job_id) / "hashtags.xlsx"
+    if not sheet.is_file():
+        logger.warning("Job %s: hashtag Excel missing — falling back to the pool",
+                       job_id)
+        return None
+    try:
+        frame = pd.read_excel(sheet, engine="openpyxl")
+    except Exception:  # noqa: BLE001
+        logger.warning("Job %s: could not read %s", job_id, sheet, exc_info=True)
+        return None
+
+    from captions import naming
+
+    values: list[str] = []
+    for raw in frame.iloc[:, 0].tolist():
+        clean = " ".join(naming.parse_hashtags(raw))
+        if clean:
+            values.append(clean)
+    logger.info("Job %s: %d hashtag set(s) from the uploaded sheet",
+                job_id, len(values))
+    return values or []
+
+
 def _assign_names(job_id: str, slots: list[Slot], n_rows: int,
-                  df: pd.DataFrame) -> dict:
+                  df: pd.DataFrame, params: Optional[dict] = None) -> dict:
     """Give every (batch, row) its own caption, hashtags and two filenames.
 
     A caption identifies one *video*, not one sheet row — ten batches of the
@@ -124,9 +160,12 @@ def _assign_names(job_id: str, slots: list[Slot], n_rows: int,
         for slot, pair in zip(need_pool, store.take_combinations(pool["id"], len(need_pool))):
             drawn[slot] = pair
 
+    # Hashtags may come from somewhere other than the pool entirely.
+    override = _hashtag_override(job_id, params or {})
+
     rows = []
     used_sheet = used_pool = used_headline = 0
-    for slot in needed:
+    for n, slot in enumerate(needed):
         caption = from_sheet[slot]
         if caption:
             hashtags = _cell(slot.row, "Hashtags")
@@ -138,6 +177,9 @@ def _assign_names(job_id: str, slots: list[Slot], n_rows: int,
             # No pool: fall back to the pre-caption naming source.
             caption, hashtags = _cell(slot.row, "Headline"), ""
             used_headline += 1
+        if override is not None and not from_sheet[slot]:
+            # Cycled rather than random so the spread is even and reproducible.
+            hashtags = override[n % len(override)] if override else ""
         rows.append((slot, caption, hashtags))
 
     # De-duplicate names across the WHOLE render, not per batch — two batches
@@ -161,6 +203,7 @@ def _assign_names(job_id: str, slots: list[Slot], n_rows: int,
         "from_headline": used_headline,
         "pool_id": pool["id"] if pool else None,
         "theme": pool.get("theme") if pool else None,
+        "hashtag_source": (params or {}).get("hashtag_source", "pool"),
         "reason": None if pool else
                   "No caption pool — names fall back to the sheet's Headline.",
     }
@@ -190,9 +233,15 @@ def _render_batches(job: dict, df: pd.DataFrame, ws, n_batches: int,
     done = 0
     last_beat = 0.0
 
+    # Every video gets its own promo, spread evenly inside each batch — so a
+    # batch is a mix of all of them rather than 1,000 variations of one.
+    all_slots = batching.plan_render(n_batches, n_rows)
+    promo_for = batching.assign_promos(all_slots, len(ws.video_paths) or 1,
+                                       seed=f"promo-{job_id}")
+
     for batch in sorted(by_batch):
         items = by_batch[batch]
-        promo = ws.promo_for_batch(batch - 1)
+        store.set_stage(job_id, f"rendering batch {batch}/{n_batches}")
 
         # variant_salt is what makes this pass differ from the others: the same
         # row picks different sample clips in each batch.
@@ -200,86 +249,128 @@ def _render_batches(job: dict, df: pd.DataFrame, ws, n_batches: int,
         cfg.variant_salt = batch
         cfg.font_path = str(ws.font_path) if ws.font_path else None
 
-        generator = VideoGenerator(
-            config=cfg,
-            bg_dir=ws.bg_dir,
-            video_path=promo,
-            cta_path=ws.cta_path,
-            work_dir=ws.work_dir / f"b{batch:02d}",
-            output_dir=store.videos_dir(job_id) / batching.source_folder_name(batch),
-            cta_video_slots=ws.cta_video_slots,
-        )
-        for message in generator.input_warnings:
-            if message not in batch_warnings:
-                batch_warnings.append(message)
+        # Grouped by promo so one generator is built per promo rather than per
+        # row — constructing one probes the video with FFmpeg, which is far too
+        # expensive to repeat thousands of times.
+        by_promo: dict[int, list[dict]] = {}
+        for item in items:
+            _b, row_no = batching.split_index(item["idx"], n_rows)
+            by_promo.setdefault(
+                promo_for.get(Slot(batch=batch, row=row_no), 0), []).append(item)
 
-        df_run, bg_warnings = generator.assign_backgrounds(df)
-        for message in bg_warnings:
-            if message not in batch_warnings:
-                batch_warnings.append(message)
+        for promo_idx in sorted(by_promo):
+            group = by_promo[promo_idx]
+            promo = ws.promo_for_batch(promo_idx)
 
-        logger.info("Job %s: batch %d/%d — %d row(s) using promo %s",
-                    job_id, batch, n_batches, len(items), promo.name)
-        store.set_stage(job_id, f"rendering batch {batch}/{n_batches}")
+            generator = VideoGenerator(
+                config=cfg,
+                bg_dir=ws.bg_dir,
+                video_path=promo,
+                cta_path=ws.cta_path,
+                work_dir=ws.work_dir / f"b{batch:02d}_p{promo_idx:02d}",
+                output_dir=store.videos_dir(job_id) / batching.source_folder_name(batch),
+                cta_video_slots=ws.cta_video_slots,
+            )
+            for message in generator.input_warnings:
+                if message not in batch_warnings:
+                    batch_warnings.append(message)
 
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {}
-            for item in items:
-                _b, row_no = batching.split_index(item["idx"], n_rows)
-                row = df_run.iloc[row_no - 1]
-                name = (item.get("meta") or {}).get("short_name") or None
-                futures[pool.submit(generator.render_row, row_no, row, name)] = item
+            df_run, bg_warnings = generator.assign_backgrounds(df)
+            for message in bg_warnings:
+                if message not in batch_warnings:
+                    batch_warnings.append(message)
 
-            for future in as_completed(futures):
-                item = futures[future]
-                try:
-                    res = future.result()
-                except Exception as exc:  # noqa: BLE001
-                    logger.exception("Job %s item %s raised", job_id, item["idx"])
-                    store.update_item(job_id, item["idx"],
-                                      render_status=store.ITEM_FAILED,
-                                      render_error=str(exc), render_attempts=1)
-                else:
-                    store.update_item(
-                        job_id, item["idx"],
-                        name=res.filename or "",
-                        render_status=store.ITEM_DONE if res.ok else store.ITEM_FAILED,
-                        render_error=res.error,
-                        render_attempts=1,
-                        warnings=list(res.warnings or []),
-                        **({} if res.ok else {"upload_status": store.ITEM_SKIPPED}),
-                    )
-                done += 1
-                now = time.time()
-                if now - last_beat > _HEARTBEAT_EVERY:
-                    last_beat = now
-                    store.heartbeat(
-                        job_id,
-                        stage=f"rendering batch {batch}/{n_batches} "
-                              f"({done}/{total_pending})")
+            logger.info("Job %s: batch %d/%d — %d row(s) on promo %s",
+                        job_id, batch, n_batches, len(group), promo.name)
+
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {}
+                for item in group:
+                    _b, row_no = batching.split_index(item["idx"], n_rows)
+                    row = df_run.iloc[row_no - 1]
+                    name = (item.get("meta") or {}).get("short_name") or None
+                    futures[pool.submit(generator.render_row, row_no, row, name)] = item
+
+                for future in as_completed(futures):
+                    item = futures[future]
+                    meta = dict(item.get("meta") or {})
+                    meta["promo"] = promo.name
+                    try:
+                        res = future.result()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.exception("Job %s item %s raised", job_id, item["idx"])
+                        store.update_item(job_id, item["idx"],
+                                          render_status=store.ITEM_FAILED,
+                                          render_error=str(exc), render_attempts=1,
+                                          meta=meta)
+                    else:
+                        store.update_item(
+                            job_id, item["idx"],
+                            name=res.filename or "",
+                            render_status=store.ITEM_DONE if res.ok else store.ITEM_FAILED,
+                            render_error=res.error,
+                            render_attempts=1,
+                            warnings=list(res.warnings or []),
+                            meta=meta,
+                            **({} if res.ok else {"upload_status": store.ITEM_SKIPPED}),
+                        )
+                    done += 1
+                    now = time.time()
+                    if now - last_beat > _HEARTBEAT_EVERY:
+                        last_beat = now
+                        store.heartbeat(
+                            job_id,
+                            stage=f"rendering batch {batch}/{n_batches} "
+                                  f"({done}/{total_pending})")
 
     return batch_warnings
 
 
 # --------------------------------------------------------------------------- upload
 
+def _prefixed(name: str, prefix: str) -> str:
+    """Tag a filename for its platform, keeping the length cap intact.
+
+    The 100-character rule is a hard limit on the whole filename, so the prefix
+    has to come out of that budget rather than push past it."""
+    from captions import naming
+
+    stem = name[:-4] if name.lower().endswith(".mp4") else name
+    cap = naming.MAX_SHORT if prefix == "yt" else naming.MAX_LONG
+    room = cap - len(".mp4") - len(prefix) - 1
+    return f"{prefix} {stem[:room].rstrip()}.mp4"
+
+
 def _upload(job: dict, n_rows: int, n_folders: int, placement: dict) -> dict:
     """Upload each video twice — short name uploaded, long name server-copied."""
     job_id = job["id"]
-    if not config.drive_configured():
+    params = job.get("params") or {}
+    destination = params.get("drive_folder") or ""
+    if not config.drive_configured(destination):
         logger.info("Job %s: Drive not configured — videos stay on the VM", job_id)
         return {}
 
     from integrations import drive
 
+    # A job may carry its own destination, since the VM's .env cannot be edited
+    # per batch. Blank falls back to the configured default.
+    drive.set_target(destination)
+
     try:
         label = job.get("label") or job_id
         root = drive.ensure_path(["renders", time.strftime("%Y-%m-%d"), label])
         link = drive.folder_link(root)
-        folder_ids = {
-            f: drive.ensure_path([batching.folder_name(f)], parent_id=root)
-            for f in range(1, n_folders + 1)
-        }
+        # Two folders per batch: the short single-hashtag name under yt/, the
+        # long all-hashtags name under tk/. Keeping both in one folder meant
+        # every video appeared twice in the same listing, which made picking
+        # what to post needlessly confusing.
+        folder_ids = {}
+        for f in range(1, n_folders + 1):
+            batch_root = drive.ensure_path([batching.folder_name(f)], parent_id=root)
+            folder_ids[f] = {
+                "yt": drive.ensure_path(["yt"], parent_id=batch_root),
+                "tk": drive.ensure_path(["tk"], parent_id=batch_root),
+            }
     except Exception as exc:  # noqa: BLE001
         logger.exception("Job %s: could not prepare Drive folders", job_id)
         return {"drive_error": str(exc)}
@@ -312,14 +403,14 @@ def _upload(job: dict, n_rows: int, n_folders: int, placement: dict) -> dict:
             return False
 
         folder = placement.get(Slot(batch=batch, row=row_no), 1)
-        parent = folder_ids.get(folder) or root
-        short = meta.get("short_name") or src.name
-        long_name = meta.get("long_name") or short
+        targets = folder_ids.get(folder) or {"yt": root, "tk": root}
+        short = _prefixed(meta.get("short_name") or src.name, "yt")
+        long_name = _prefixed(meta.get("long_name") or short, "tk")
 
         try:
             file_id = meta.get("drive_file_id")
             if not file_id:
-                uploaded = drive.upload_file(src, parent, short)
+                uploaded = drive.upload_file(src, targets["yt"], short)
                 file_id = uploaded["id"]
                 # Recorded BEFORE the copy: if the copy fails or the process
                 # dies between the two calls, the resume knows the bytes are
@@ -330,7 +421,7 @@ def _upload(job: dict, n_rows: int, n_folders: int, placement: dict) -> dict:
                 store.update_item(job_id, item["idx"], drive_file_id=file_id,
                                   meta=meta)
 
-            copied = drive.copy_file(file_id, long_name, parent)
+            copied = drive.copy_file(file_id, long_name, targets["tk"])
             meta["copy_file_id"] = copied.get("id")
             store.update_item(
                 job_id, item["idx"], upload_status=store.ITEM_DONE,
@@ -407,8 +498,11 @@ def _write_manifests(job_id: str, n_rows: int, n_folders: int,
             "Sheet_Row": row_no,
             "Caption": meta.get("caption", ""),
             "Hashtags": meta.get("hashtags", ""),
+            "YT_Filename": _prefixed(meta.get("short_name", item.get("name", "")), "yt"),
+            "TK_Filename": _prefixed(meta.get("long_name", ""), "tk"),
             "Short_Filename": meta.get("short_name", item.get("name", "")),
             "Long_Filename": meta.get("long_name", ""),
+            "Promo": meta.get("promo", ""),
             "Drive_Uploaded": item.get("upload_status") == store.ITEM_DONE,
         })
 
@@ -456,7 +550,7 @@ def run(job: dict) -> dict:
         for s in slots
     ])
 
-    caption_info = _assign_names(job_id, slots, n_rows, df)
+    caption_info = _assign_names(job_id, slots, n_rows, df, params)
     logger.info("Job %s: %d rows x %d batches = %d videos; names assigned: %s",
                 job_id, n_rows, n_batches, len(slots), caption_info.get("applied"))
 

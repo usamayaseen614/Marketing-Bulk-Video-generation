@@ -83,6 +83,33 @@ def mix_into_folders(slots: Iterable[Slot], n_folders: int,
     return placement
 
 
+def assign_promos(slots: list[Slot], n_promos: int,
+                  seed: str = "promo") -> dict[Slot, int]:
+    """Which promo video (0-based) each video uses.
+
+    Assigned per *video*, not per batch. Giving a whole batch one promo made
+    batch 1 entirely promo 1 — so a folder of 1,000 videos was 1,000 variations
+    of the same promo, and the promo only varied between folders. Spreading
+    them means every batch carries the full set.
+
+    Dealt round-robin over a shuffled order *within each batch*, so each batch
+    gets an even share of every promo rather than a random clump. Seeded, so a
+    resumed job gives each video the same promo it had before — otherwise a
+    re-render would silently produce a different video."""
+    n_promos = max(1, int(n_promos))
+    by_batch: dict[int, list[Slot]] = {}
+    for slot in slots:
+        by_batch.setdefault(slot.batch, []).append(slot)
+
+    out: dict[Slot, int] = {}
+    for batch in sorted(by_batch):
+        group = sorted(by_batch[batch], key=lambda s: s.row)
+        random.Random(f"{seed}-{batch}-{len(group)}").shuffle(group)
+        for position, slot in enumerate(group):
+            out[slot] = position % n_promos
+    return out
+
+
 def select_clips(clips: list[dict], slots: int, per_slot: int,
                  strategy: str = "top_views",
                  picked_ids: Optional[Iterable[str]] = None,

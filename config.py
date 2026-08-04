@@ -149,8 +149,12 @@ DRIVE_UPLOAD_ATTEMPTS = _int("BVG_DRIVE_UPLOAD_ATTEMPTS", 3)
 DRIVE_CHUNK_BYTES = _int("BVG_DRIVE_CHUNK_BYTES", 8 * 1024 * 1024)
 
 
-def drive_configured() -> bool:
-    return bool(DRIVE_SHARED_DRIVE_ID)
+def drive_configured(override: str = "") -> bool:
+    """True when there is somewhere to upload to.
+
+    `override` is a job's own folder link, which beats the env default —
+    the VM's .env cannot be edited per batch."""
+    return bool((override or "").strip() or DRIVE_SHARED_DRIVE_ID)
 
 
 # --------------------------------------------------------------------------- gemini

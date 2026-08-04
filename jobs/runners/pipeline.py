@@ -80,10 +80,15 @@ def _gather_clips(job: dict, params: dict) -> list[dict]:
         return []
 
     # Metadata lives on the scrape job's items; match it to the files on disk.
+    # Map EVERY segment filename to its source clip, so segments 2..n inherit
+    # the view count they were cut from — otherwise they would all rank 0 and
+    # the top-N rule would never choose them.
     by_name: dict[str, dict] = {}
     for item in store.list_items(source_job, stage=store.STAGE_SCRAPE):
-        if item.get("name"):
-            by_name[item["name"]] = item
+        meta = item.get("meta") or {}
+        names = meta.get("segments") or ([item["name"]] if item.get("name") else [])
+        for name in names:
+            by_name[name] = item
 
     # View counts come from the scrape's metadata sheet, which is what the
     # top-N rule sorts on.

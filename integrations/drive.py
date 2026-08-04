@@ -132,6 +132,22 @@ def looks_like_shared_drive(drive_id: str) -> bool:
     return str(drive_id or "").startswith("0A")
 
 
+def set_target(value: Optional[str]) -> None:
+    """Override the destination for this thread, from a job's own settings.
+
+    Editing `.env` on the VM to change where a batch lands is impractical, so a
+    job may carry its own folder link. Thread-local rather than a parameter
+    threaded through every function, and cleared with set_target(None)."""
+    _local.override = (value or "").strip() or None
+    # A changed destination invalidates the cached resolution.
+    _local.target = None
+
+
+def _configured_target() -> str:
+    """The destination for this call: the job's own link, else the env default."""
+    return getattr(_local, "override", None) or config.DRIVE_SHARED_DRIVE_ID
+
+
 def resolve_target() -> tuple[str, str]:
     """Work out (shared_drive_id, parent_folder_id) from what was configured.
 
@@ -140,7 +156,7 @@ def resolve_target() -> tuple[str, str]:
     resolved to the Shared Drive that encloses it. A folder with no enclosing
     Shared Drive lives in someone's My Drive, which a service account cannot
     write to, so that is reported here rather than at upload time."""
-    configured = extract_id(config.DRIVE_SHARED_DRIVE_ID)
+    configured = extract_id(_configured_target())
     if not configured:
         raise DriveError(
             "No Drive destination configured. Set BVG_DRIVE_SHARED_DRIVE_ID — "

@@ -206,6 +206,57 @@ def find_ffmpeg() -> str:
     return _find()
 
 
+def split_clip(src: Path, dest_dir: Path, stem: str, start: float,
+               duration: float, ffmpeg: Optional[str] = None,
+               min_fraction: float = 0.5) -> list[Path]:
+    """Cut a clip into consecutive segments, not just its opening window.
+
+    A 40-second video with a 10-second window becomes four usable clips
+    (1-11, 11-21, 21-31, 31-41) instead of one, so a scrape yields roughly four
+    times the material for the same download and the same rate-limit budget.
+
+    The first segment still starts at `start`, which is what skips the creator's
+    intro branding. A trailing remnant shorter than `min_fraction` of the target
+    is dropped — two-second scraps are not worth a slot.
+
+    Returns the segments in order; the caller names and hashes each one."""
+    ffmpeg = ffmpeg or find_ffmpeg()
+    src = Path(src)
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    total = probe_duration(src, ffmpeg)
+    if total is None:
+        # Unknown length: fall back to a single window rather than guessing.
+        out = dest_dir / f"{stem}.mp4"
+        trim_clip(src, out, start, duration, ffmpeg)
+        return [out]
+
+    begin = start if total > start else 0.0
+    segments: list[Path] = []
+    index = 0
+    cursor = begin
+    while cursor < total:
+        remaining = total - cursor
+        if remaining < duration * min_fraction and segments:
+            break            # trailing scrap, and we already have something
+        index += 1
+        out = dest_dir / (f"{stem}.mp4" if index == 1 else f"{stem}_{index}.mp4")
+        try:
+            trim_clip(src, out, cursor, min(duration, remaining), ffmpeg)
+            segments.append(out)
+        except ScrapeError:
+            # One bad segment must not lose the ones that worked.
+            logger.warning("Segment %d of %s failed", index, src.name, exc_info=True)
+            out.unlink(missing_ok=True)
+            if not segments:
+                raise
+            break
+        cursor += duration
+
+    return segments
+
+
 def trim_clip(src: Path, dest: Path, start: float, duration: float,
               ffmpeg: Optional[str] = None) -> Path:
     """Cut a clip to `duration` seconds starting at `start`, re-encoding.
