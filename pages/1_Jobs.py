@@ -123,18 +123,14 @@ def show_captions(job: dict, sheet: Path, label: str) -> None:
             )
         with col_c:
             # CSV opens anywhere and pastes cleanly into a sheet — handy when
-            # the Excel is going somewhere that can't open .xlsx.
-            csv_key = f"csv_{job['id']}"
-            if not st.session_state.get(f"want_{csv_key}"):
-                if st.button("⬇️ CSV", key=f"ask_{csv_key}"):
-                    st.session_state[f"want_{csv_key}"] = True
-                    st.rerun()
-            else:
-                st.download_button(
-                    "⬇️ CSV",
-                    data=frame[cols].to_csv(index=False).encode("utf-8-sig"),
-                    file_name=f"{label}.csv", mime="text/csv", key=csv_key,
-                )
+            # the Excel is going somewhere that can't open .xlsx. utf-8-sig so
+            # Excel on Windows shows accented characters correctly.
+            st.download_button(
+                "⬇️ CSV",
+                data=frame[cols].to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"{label}.csv", mime="text/csv",
+                key=f"csv_{job['id']}",
+            )
 
 
 def render_job(job: dict, expanded: bool = False) -> None:

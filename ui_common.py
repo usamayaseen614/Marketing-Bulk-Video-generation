@@ -43,34 +43,65 @@ def ensure_static_dir() -> None:
         STATIC_DOWNLOADS.mkdir(parents=True, exist_ok=True)
 
 
+# Files at or below this download in one click, with their bytes cached.
+# Above it, the download is gated behind an explicit click instead — see
+# offer_file_download.
+INLINE_DOWNLOAD_LIMIT = 25 * 1024 * 1024
+
+
+def _human_size(n: int) -> str:
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.0f} KB"
+    return f"{n / 1024 / 1024:.1f} MB"
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def _cached_bytes(path: str, mtime: float, size: int) -> bytes:
+    """Read a file once and keep it.
+
+    st.download_button needs its payload at render time, and the Jobs page
+    reruns on a 5-second timer — so without this, every finished job's file was
+    re-read on every rerun. Keyed on mtime and size so a rebuilt file is picked
+    up rather than served stale."""
+    return Path(path).read_bytes()
+
+
 def offer_file_download(path: Path, slug: str, label: str,
                         mime: str = "application/octet-stream",
                         file_name: str | None = None) -> None:
-    """A two-step download: a plain button first, the real control after.
+    """Download control for a job artifact.
 
-    st.download_button needs its payload at render time, so rendering one for
-    every finished job means reading every one of those files on every script
-    run — and the Jobs page reruns on a 5-second timer. Besides the waste, the
-    browser treats the re-created widget as a fresh download and re-prompts,
-    which looks like the page downloading things by itself.
-
-    Gating it behind a click means nothing is read until you actually ask."""
+    Small files (manifests, caption sheets) download on ONE click, with their
+    bytes cached so repeated reruns cost nothing. Only genuinely large files
+    are gated behind a confirm step, because reading a multi-GB ZIP into memory
+    is worth an extra click and a few kilobytes is not."""
     path = Path(path)
     if not path.is_file():
         return
-    size_mb = path.stat().st_size / 1024 / 1024
-    state_key = f"want_dl_{slug}"
+    stat = path.stat()
+    size_label = _human_size(stat.st_size)
 
+    if stat.st_size <= INLINE_DOWNLOAD_LIMIT:
+        st.download_button(
+            f"{label} ({size_label})",
+            data=_cached_bytes(str(path), stat.st_mtime, stat.st_size),
+            file_name=file_name or path.name, mime=mime,
+            key=f"dl_{slug}",
+        )
+        return
+
+    state_key = f"want_dl_{slug}"
     if not st.session_state.get(state_key):
-        if st.button(f"{label} ({size_mb:.1f} MB)", key=f"ask_{slug}"):
+        if st.button(f"{label} ({size_label})", key=f"ask_{slug}"):
             st.session_state[state_key] = True
             st.rerun()
         return
-
     st.download_button(
         label, data=path.read_bytes(),
         file_name=file_name or path.name, mime=mime,
-        key=f"dl_{slug}",
+        key=f"dlbig_{slug}",
     )
 
 
