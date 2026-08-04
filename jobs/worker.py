@@ -79,6 +79,9 @@ def _get_runner(kind: str) -> Callable[[dict], dict]:
     if kind == store.KIND_CAPTIONS:
         from jobs.runners import captions
         return captions.run
+    if kind == store.KIND_PIPELINE:
+        from jobs.runners import pipeline
+        return pipeline.run
     raise ValueError(f"No runner registered for job kind {kind!r}")
 
 

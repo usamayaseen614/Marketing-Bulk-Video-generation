@@ -42,6 +42,8 @@ import config
 KIND_RENDER = "render"
 KIND_SCRAPE = "scrape"
 KIND_CAPTIONS = "captions"
+# One submit that chains scrape -> clip choice -> captions -> render -> upload.
+KIND_PIPELINE = "pipeline"
 
 # ---- job statuses
 STATUS_QUEUED = "queued"
@@ -57,6 +59,11 @@ ITEM_PENDING = "pending"
 ITEM_DONE = "done"
 ITEM_FAILED = "failed"
 ITEM_SKIPPED = "skipped"
+
+# Which stage of a job an item belongs to. A pipeline job holds both, and
+# their idx ranges are independent.
+STAGE_RENDER = "render"
+STAGE_SCRAPE = "scrape"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -93,6 +100,7 @@ CREATE TABLE IF NOT EXISTS job_items (
     drive_link      TEXT,
     warnings_json   TEXT NOT NULL DEFAULT '[]',
     meta_json       TEXT NOT NULL DEFAULT '{}',
+    stage           TEXT NOT NULL DEFAULT 'render',
     updated_at      REAL NOT NULL,
     PRIMARY KEY (job_id, idx),
     FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
@@ -160,11 +168,27 @@ def _conn() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+# Columns added after the first release. CREATE TABLE IF NOT EXISTS silently
+# does nothing on an existing table, so a new column has to be ALTERed in or
+# every deployed database breaks on upgrade.
+_MIGRATIONS = [
+    # A pipeline job holds both scraped clips and rendered videos in job_items,
+    # and their idx ranges would otherwise collide.
+    ("job_items", "stage", "TEXT NOT NULL DEFAULT 'render'"),
+]
+
+
 def init_db() -> None:
-    """Create the schema. Idempotent — both the app and the worker call this
-    at startup so neither depends on the other having run first."""
+    """Create the schema and apply any column migrations. Idempotent — both the
+    app and the worker call this at startup so neither depends on the other
+    having run first."""
     with _conn() as conn:
         conn.executescript(_SCHEMA)
+        for table, column, spec in _MIGRATIONS:
+            existing = {row["name"] for row in
+                        conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {spec}")
 
 
 def _job_from_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -220,10 +244,11 @@ def create_job(
             )
             if items:
                 conn.executemany(
-                    "INSERT INTO job_items (job_id, idx, name, meta_json, updated_at) "
-                    "VALUES (?,?,?,?,?)",
+                    "INSERT INTO job_items (job_id, idx, name, meta_json, stage, updated_at) "
+                    "VALUES (?,?,?,?,?,?)",
                     [(job_id, int(it["idx"]), str(it.get("name") or ""),
-                      json.dumps(it.get("meta") or {}), now) for it in items],
+                      json.dumps(it.get("meta") or {}),
+                      str(it.get("stage") or STAGE_RENDER), now) for it in items],
                 )
             conn.execute("COMMIT")
         except Exception:
@@ -378,42 +403,50 @@ def add_items(job_id: str, items: Iterable[dict]) -> None:
     clips there are once it has enumerated the profile."""
     now = time.time()
     rows = [(job_id, int(it["idx"]), str(it.get("name") or ""),
-             json.dumps(it.get("meta") or {}), now) for it in items]
+             json.dumps(it.get("meta") or {}),
+             str(it.get("stage") or STAGE_RENDER), now) for it in items]
     if not rows:
         return
     with _conn() as conn:
         conn.executemany(
-            "INSERT OR IGNORE INTO job_items (job_id, idx, name, meta_json, updated_at) "
-            "VALUES (?,?,?,?,?)", rows)
+            "INSERT OR IGNORE INTO job_items (job_id, idx, name, meta_json, stage, updated_at) "
+            "VALUES (?,?,?,?,?,?)", rows)
 
 
-def list_items(job_id: str) -> list[dict]:
+def list_items(job_id: str, stage: Optional[str] = STAGE_RENDER) -> list[dict]:
+    """Items for one stage. Pass stage=None for every item in the job."""
     with _conn() as conn:
-        rows = conn.execute(
-            "SELECT * FROM job_items WHERE job_id=? ORDER BY idx", (job_id,)).fetchall()
+        if stage is None:
+            rows = conn.execute(
+                "SELECT * FROM job_items WHERE job_id=? ORDER BY idx", (job_id,)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM job_items WHERE job_id=? AND stage=? ORDER BY idx",
+                (job_id, stage)).fetchall()
     return [_item_from_row(r) for r in rows]
 
 
-def pending_render_items(job_id: str) -> list[dict]:
+def pending_render_items(job_id: str, stage: str = STAGE_RENDER) -> list[dict]:
     """Items still needing a render. Excludes ones that already failed — a row
     that failed for a deterministic reason would only fail again."""
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM job_items WHERE job_id=? AND render_status=? ORDER BY idx",
-            (job_id, ITEM_PENDING)).fetchall()
+            "SELECT * FROM job_items WHERE job_id=? AND stage=? AND render_status=? "
+            "ORDER BY idx", (job_id, stage, ITEM_PENDING)).fetchall()
     return [_item_from_row(r) for r in rows]
 
 
-def pending_upload_items(job_id: str, max_attempts: Optional[int] = None) -> list[dict]:
+def pending_upload_items(job_id: str, max_attempts: Optional[int] = None,
+                         stage: str = STAGE_RENDER) -> list[dict]:
     """Rendered items not yet in Drive. Unlike renders, failed uploads ARE
     retried — the usual cause is a transient network error."""
     cap = config.DRIVE_UPLOAD_ATTEMPTS if max_attempts is None else max_attempts
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM job_items WHERE job_id=? AND render_status=? "
+            "SELECT * FROM job_items WHERE job_id=? AND stage=? AND render_status=? "
             "AND (upload_status=? OR (upload_status=? AND upload_attempts < ?)) "
             "ORDER BY idx",
-            (job_id, ITEM_DONE, ITEM_PENDING, ITEM_FAILED, cap)).fetchall()
+            (job_id, stage, ITEM_DONE, ITEM_PENDING, ITEM_FAILED, cap)).fetchall()
     return [_item_from_row(r) for r in rows]
 
 
@@ -446,7 +479,7 @@ def bump_item_attempts(job_id: str, idx: int, column: str) -> None:
             "WHERE job_id=? AND idx=?", (time.time(), job_id, int(idx)))
 
 
-def item_counts(job_id: str) -> dict[str, int]:
+def item_counts(job_id: str, stage: str = STAGE_RENDER) -> dict[str, int]:
     """Progress summary for the UI and the notification email."""
     with _conn() as conn:
         row = conn.execute(
@@ -456,7 +489,7 @@ def item_counts(job_id: str) -> dict[str, int]:
             " SUM(render_status='pending')AS render_pending,"
             " SUM(upload_status='done')   AS uploaded,"
             " SUM(upload_status='failed') AS upload_failed"
-            " FROM job_items WHERE job_id=?", (job_id,)).fetchone()
+            " FROM job_items WHERE job_id=? AND stage=?", (job_id, stage)).fetchone()
     return {key: int(row[key] or 0) for key in row.keys()}
 
 

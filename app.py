@@ -563,6 +563,127 @@ generate_clicked = col_generate.button(
     "🚀 Generate All Videos", disabled=not ready, type="primary", width="stretch"
 )
 
+# ---- clip source: the whole point of the unified flow
+st.subheader("2. CTA clips")
+
+
+def _scrapes_with_clips() -> list[dict]:
+    """Finished scrapes whose clips are still on this machine.
+
+    These are already on the box that will render them — using them directly
+    replaces downloading a ZIP, unzipping it, and uploading the same bytes back
+    through the browser."""
+    out = []
+    for j in store.list_jobs(limit=40, kinds=[store.KIND_SCRAPE],
+                             statuses=[store.STATUS_SUCCEEDED]):
+        clips = store.job_dir(j["id"]) / "clips"
+        n = len(list(clips.glob("*.mp4"))) if clips.is_dir() else 0
+        if n:
+            out.append({**j, "n_clips": n})
+    return out
+
+
+available = _scrapes_with_clips()
+clip_source = st.radio(
+    "Where do the clips come from?",
+    options=["upload", "scrape_job", "scrape_now"],
+    format_func=lambda m: {
+        "upload": "Upload files in the sidebar (as before)",
+        "scrape_job": f"Use a previous scrape already on this machine "
+                      f"({len(available)} available)",
+        "scrape_now": "Scrape a TikTok account now, as part of this run",
+    }[m],
+    horizontal=False,
+)
+
+clip_params: dict = {}
+if clip_source == "scrape_job":
+    if not available:
+        st.warning(
+            "No finished scrape has clips on this machine. Run one from the "
+            "TikTok Scraper page, or pick another option. (Job folders are "
+            f"kept for {settings.JOB_RETENTION_DAYS} days.)"
+        )
+    else:
+        pick = st.selectbox(
+            "Which scrape", options=[j["id"] for j in available],
+            format_func=lambda i: next(
+                f"{j['label']} — {j['n_clips']} clips" for j in available if j["id"] == i),
+        )
+        clip_params["clips_from_job"] = pick
+
+elif clip_source == "scrape_now":
+    clip_params["account"] = st.text_input(
+        "TikTok account URL or @handle",
+        placeholder="https://www.tiktok.com/@someaccount",
+    )
+    col_l, col_s, col_d = st.columns(3)
+    clip_params["scrape_limit"] = col_l.number_input(
+        "Max videos to scan", 10, 5000, 200, 10,
+        help="Enumeration runs at roughly 0.26s per post, then downloads are "
+             "rate-limited to about one per 1-2s.")
+    clip_params["trim_start"] = col_s.number_input(
+        "Trim start (s)", 0.0, 60.0, settings.SCRAPE_TRIM_START, 0.5)
+    clip_params["trim_duration"] = col_d.number_input(
+        "Trim length (s)", 1.0, 60.0, settings.SCRAPE_TRIM_DURATION, 0.5)
+
+if clip_source in ("scrape_job", "scrape_now"):
+    st.caption(
+        "The sidebar clip uploaders are ignored in this mode — clips are taken "
+        "from the scrape instead."
+    )
+    col_st, col_ps = st.columns(2)
+    clip_params["clip_strategy"] = col_st.selectbox(
+        "Which clips to use",
+        options=["top_views", "all"],
+        format_func=lambda s: {"top_views": "Best by view count (recommended)",
+                               "all": "All of them"}[s],
+        help="Curation as a rule rather than a chore: the highest-performing "
+             "clips fill the slots, and the run needs no attention. Clips are "
+             "then shuffled into slots, so no slot systematically gets the "
+             "best ones and no clip is used twice.",
+    )
+    clip_params["clips_per_slot"] = col_ps.number_input(
+        "Clips per slot", 1, 50, 10, 1)
+    clip_params["slots"] = int(cta_slot_count)
+
+# ---- captions
+st.subheader("3. Captions")
+_pool = store.active_pool()
+if _pool:
+    st.caption(f"Active pool: **{_pool['combinations']:,} unique pairs** left to "
+               f"draw from · theme *{_pool.get('theme')}*")
+caption_mode = st.radio(
+    "Captions",
+    options=["existing", "generate"],
+    format_func=lambda m: {
+        "existing": ("Use the active caption pool" if _pool
+                     else "No pool — name files from the sheet's Headline"),
+        "generate": "Generate a fresh pool first (Gemini)",
+    }[m],
+    horizontal=True,
+)
+caption_params: dict = {}
+if caption_mode == "generate":
+    caption_params["generate_pool"] = True
+    caption_params["force_new_pool"] = True
+    caption_params["caption_theme"] = st.text_input(
+        "Caption theme", value=settings.CAPTION_THEME,
+        placeholder="e.g. satisfying ASMR clips promoting a skincare brand",
+        help="The single biggest lever on caption quality — be specific about "
+             "the product and the audience.",
+    )
+    col_cc, col_hh = st.columns(2)
+    caption_params["caption_count"] = col_cc.number_input(
+        "Captions", 50, 5000, 500, 50)
+    caption_params["hashtag_count"] = col_hh.number_input(
+        "Hashtag sets", 25, 2000, 100, 25)
+    if not settings.gemini_configured():
+        st.warning("Vertex AI isn't configured — this stage will be skipped and "
+                   "files will fall back to Headline names.")
+
+st.subheader("4. Generate")
+
 # One sheet becomes `batches x rows` videos: the same rows rendered once per
 # batch, each pass with a different promo video and different clip picks.
 col_b, col_f = st.columns(2)
@@ -758,7 +879,9 @@ if generate_clicked and ready:
 
         # All promo videos are staged; the runner picks one per batch.
         stage_uploads(assets, promo_files, zip_file, cta_file, font_file,
-                      cta_video_slot_files)
+                      # Clips come from the scrape in chained mode; the pipeline
+                      # materialises them into the same cta_slot_N folders.
+                      None if clip_source != "upload" else cta_video_slot_files)
 
         # The sheet is written with any preview-editor edits baked in, so the
         # worker renders exactly what this page was showing. updated_excel_bytes
@@ -768,8 +891,9 @@ if generate_clicked and ready:
                                 st.session_state.get("row_edits") or {})
         )
 
+        chained = clip_source != "upload" or caption_mode == "generate"
         store.create_job(
-            kind=store.KIND_RENDER,
+            kind=store.KIND_PIPELINE if chained else store.KIND_RENDER,
             params={
                 "render_config": asdict(config),
                 "workers": int(workers),
@@ -777,6 +901,9 @@ if generate_clicked and ready:
                 "folders": int(n_folders),
                 "make_zip": True,
                 "excel_name": excel_file.name,
+                "clip_source": clip_source,
+                **clip_params,
+                **caption_params,
             },
             label=batch_label or Path(excel_file.name).stem,
             notify_email=notify_email.strip(),

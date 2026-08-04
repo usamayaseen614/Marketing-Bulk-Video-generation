@@ -168,7 +168,8 @@ def run(job: dict) -> dict:
 
     clip_by_id = {c.video_id: c for c in fresh}
     store.add_items(job_id, [
-        {"idx": i, "name": "", "meta": {"video_id": c.video_id, "url": c.url}}
+        {"idx": i, "name": "", "stage": store.STAGE_SCRAPE,
+         "meta": {"video_id": c.video_id, "url": c.url}}
         for i, c in enumerate(fresh, start=1)
     ])
     idx_by_id = {c.video_id: i for i, c in enumerate(fresh, start=1)}
@@ -179,7 +180,7 @@ def run(job: dict) -> dict:
     seen_hashes = store.known_content_hashes(account) if skip_known else set()
 
     downloaded = trimmed = skipped = 0
-    pending = store.pending_render_items(job_id)
+    pending = store.pending_render_items(job_id, stage=store.STAGE_SCRAPE)
     logger.info("Job %s: %d clip(s) to fetch (%d already done)",
                 job_id, len(pending), len(fresh) - len(pending))
 
@@ -233,7 +234,7 @@ def run(job: dict) -> dict:
         _sleep_politely()
 
     # ---- 3. remember what we have, so next month only pulls what's new
-    items = store.list_items(job_id)
+    items = store.list_items(job_id, stage=store.STAGE_SCRAPE)
     items_by_id = {(i.get("meta") or {}).get("video_id"): i for i in items}
     good = [i for i in items if i["render_status"] == store.ITEM_DONE]
     store.remember_clips(
@@ -264,7 +265,9 @@ def run(job: dict) -> dict:
     zip_path = _package_clips(job_id, plan, items_by_id, clips_dir, sheet_path, mode)
 
     # ---- 7. upload
-    drive_result = _upload(job, account, mode, plan, items_by_id, clips_dir, sheet_path)
+    drive_result = ({} if params.get("upload") is False else
+                    _upload(job, account, mode, plan, items_by_id,
+                            clips_dir, sheet_path))
 
     elapsed = time.time() - started
     batches_built = len({p.batch for p in plan if p.batch}) if mode != "dump" else 0

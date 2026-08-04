@@ -234,7 +234,7 @@ def send_job_notification(job: dict, status: str, result: Optional[dict],
     kind = job.get("kind")
 
     if status == store.STATUS_SUCCEEDED:
-        if kind == store.KIND_RENDER:
+        if kind in (store.KIND_RENDER, store.KIND_PIPELINE):
             failed = result.get("failed") or 0
             subject = (f"Videos ready: {result.get('rendered', 0)} of "
                        f"{result.get('total', 0)} — {label}")
@@ -249,7 +249,7 @@ def send_job_notification(job: dict, status: str, result: Optional[dict],
         subject = f"FAILED: {label}"
 
     if status == store.STATUS_SUCCEEDED:
-        if kind == store.KIND_RENDER:
+        if kind in (store.KIND_RENDER, store.KIND_PIPELINE):
             body = _render_body(job, status, result)
         elif kind == store.KIND_CAPTIONS:
             body = _captions_body(job, status, result)

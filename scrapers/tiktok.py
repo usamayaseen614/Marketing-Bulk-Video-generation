@@ -306,12 +306,19 @@ def plan_batches(video_ids: list[str], n_batches: int,
     pass_no = 0
 
     def refill() -> None:
-        """Start a fresh pass over the pool, reshuffled on every wrap so batch
-        21 isn't a copy of batch 1."""
+        """Start a fresh pass over the pool, shuffled every time.
+
+        Shuffling the FIRST pass too is the point. Clips arrive newest-first
+        (and are sorted by view count for curation), so dealing them
+        positionally gave slot 1 the strongest clips and slot 5 the weakest,
+        every single batch. Shuffling first makes the slot a clip lands in
+        genuinely random; dealing without replacement keeps any clip from
+        appearing twice and keeps the slots evenly filled.
+
+        Seeded by pass number, so a resumed job re-derives the same layout."""
         nonlocal deck, pass_no
         chunk = list(pool)
-        if pass_no > 0:
-            random.Random(f"wrap-{pass_no}-{len(pool)}").shuffle(chunk)
+        random.Random(f"deal-{pass_no}-{len(pool)}").shuffle(chunk)
         pass_no += 1
         deck = chunk
 

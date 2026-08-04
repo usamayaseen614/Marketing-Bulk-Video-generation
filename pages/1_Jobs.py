@@ -64,8 +64,14 @@ def worker_is_alive() -> bool:
     return (time.time() - newest) < settings.JOB_STALE_SECONDS
 
 
+def stage_for(job: dict) -> str:
+    """Scrape items live in their own stage; everything else renders."""
+    return (store.STAGE_SCRAPE if job["kind"] == store.KIND_SCRAPE
+            else store.STAGE_RENDER)
+
+
 def render_progress(job: dict) -> None:
-    counts = store.item_counts(job["id"])
+    counts = store.item_counts(job["id"], stage=stage_for(job))
     total = counts["total"]
     if not total:
         return
@@ -97,7 +103,7 @@ def show_captions(job: dict, sheet: Path, label: str) -> None:
         st.caption(f"Couldn't read {sheet.name}: {exc}")
         return
 
-    is_render = job["kind"] == store.KIND_RENDER
+    is_render = job["kind"] in (store.KIND_RENDER, store.KIND_PIPELINE)
     title = "📝 Captions & filenames" if is_render else "📋 Clip metadata"
 
     with st.expander(f"{title} ({len(frame)} rows)"):
@@ -208,13 +214,14 @@ def render_job(job: dict, expanded: bool = False) -> None:
     label = job.get("label") or job["id"]
     kind = {store.KIND_RENDER: "Render",
             store.KIND_SCRAPE: "Scrape",
-            store.KIND_CAPTIONS: "Caption pool"}.get(job["kind"], job["kind"])
+            store.KIND_CAPTIONS: "Caption pool",
+            store.KIND_PIPELINE: "Full run"}.get(job["kind"], job["kind"])
     header = f"{icon} {label} — {kind} · {job['status']}"
     if job["status"] == store.STATUS_RUNNING and job.get("stage"):
         header += f" ({job['stage']})"
 
     with st.expander(header, expanded=expanded):
-        counts = store.item_counts(job["id"])
+        counts = store.item_counts(job["id"], stage=stage_for(job))
         meta = st.columns(4)
         meta[0].metric("Submitted", fmt_time(job["created_at"]))
         meta[1].metric("Duration", fmt_duration(job))
@@ -287,7 +294,7 @@ def render_job(job: dict, expanded: bool = False) -> None:
             show_captions(job, Path(sheet), label)
 
         # ---- per-row detail
-        items = store.list_items(job["id"])
+        items = store.list_items(job["id"], stage=stage_for(job))
         failed = [i for i in items if i["render_status"] == store.ITEM_FAILED]
         if failed:
             with st.expander(f"Failed rows ({len(failed)})", expanded=False):
