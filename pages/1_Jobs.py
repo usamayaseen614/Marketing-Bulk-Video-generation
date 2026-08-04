@@ -78,10 +78,71 @@ def render_progress(job: dict) -> None:
     )
 
 
+@st.cache_data(show_spinner=False)
+def _read_sheet(path: str, mtime: float):
+    """Cached on (path, mtime) so a finished job's sheet is read once, not on
+    every 5-second rerun of this page."""
+    return pd.read_excel(path, engine="openpyxl")
+
+
+def show_captions(job: dict, sheet: Path, label: str) -> None:
+    """Captions on screen, not just inside a download.
+
+    The captions ARE the deliverable for posting — you read one, paste it, and
+    upload the matching file. Making that require downloading a spreadsheet
+    called "batch sheet" hid the most useful thing the job produced."""
+    try:
+        frame = _read_sheet(str(sheet), sheet.stat().st_mtime)
+    except Exception as exc:  # noqa: BLE001
+        st.caption(f"Couldn't read {sheet.name}: {exc}")
+        return
+
+    is_render = job["kind"] == store.KIND_RENDER
+    title = "📝 Captions & filenames" if is_render else "📋 Clip metadata"
+
+    with st.expander(f"{title} ({len(frame)} rows)"):
+        # Lead with what you actually post; the rest is still there to scroll.
+        preferred = ["Caption", "Hashtags", "Short_Filename", "Long_Filename",
+                     "Folder", "Source_Batch", "Sheet_Row"]
+        cols = [c for c in preferred if c in frame.columns]
+        cols += [c for c in frame.columns if c not in cols]
+
+        if is_render and "Caption" in frame.columns:
+            st.caption(
+                "The **short filename** is what to upload; its caption is the "
+                "text to paste. Click a cell to select it, or take the CSV."
+            )
+        st.dataframe(frame[cols], hide_index=True, width="stretch", height=320)
+
+        col_x, col_c = st.columns(2)
+        with col_x:
+            ui_common.offer_file_download(
+                sheet, f"sheet_{job['id']}", "⬇️ Excel",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                file_name=f"{label}.xlsx",
+            )
+        with col_c:
+            # CSV opens anywhere and pastes cleanly into a sheet — handy when
+            # the Excel is going somewhere that can't open .xlsx.
+            csv_key = f"csv_{job['id']}"
+            if not st.session_state.get(f"want_{csv_key}"):
+                if st.button("⬇️ CSV", key=f"ask_{csv_key}"):
+                    st.session_state[f"want_{csv_key}"] = True
+                    st.rerun()
+            else:
+                st.download_button(
+                    "⬇️ CSV",
+                    data=frame[cols].to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"{label}.csv", mime="text/csv", key=csv_key,
+                )
+
+
 def render_job(job: dict, expanded: bool = False) -> None:
     icon = _STATUS_ICON.get(job["status"], "•")
     label = job.get("label") or job["id"]
-    kind = "Render" if job["kind"] == store.KIND_RENDER else "Scrape"
+    kind = {store.KIND_RENDER: "Render",
+            store.KIND_SCRAPE: "Scrape",
+            store.KIND_CAPTIONS: "Caption pool"}.get(job["kind"], job["kind"])
     header = f"{icon} {label} — {kind} · {job['status']}"
     if job["status"] == store.STATUS_RUNNING and job.get("stage"):
         header += f" ({job['stage']})"
@@ -144,15 +205,10 @@ def render_job(job: dict, expanded: bool = False) -> None:
                 f"{settings.JOB_RETENTION_DAYS} days)."
             )
 
+        # ---- captions, readable on the page rather than hidden in a file
         sheet = result.get("sheet_path")
         if sheet and Path(sheet).is_file():
-            st.download_button(
-                "⬇️ Batch spreadsheet",
-                data=Path(sheet).read_bytes(),
-                file_name=f"{label}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key=f"sheet_{job['id']}",
-            )
+            show_captions(job, Path(sheet), label)
 
         # ---- per-row detail
         items = store.list_items(job["id"])

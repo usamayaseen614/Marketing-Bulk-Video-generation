@@ -43,6 +43,37 @@ def ensure_static_dir() -> None:
         STATIC_DOWNLOADS.mkdir(parents=True, exist_ok=True)
 
 
+def offer_file_download(path: Path, slug: str, label: str,
+                        mime: str = "application/octet-stream",
+                        file_name: str | None = None) -> None:
+    """A two-step download: a plain button first, the real control after.
+
+    st.download_button needs its payload at render time, so rendering one for
+    every finished job means reading every one of those files on every script
+    run — and the Jobs page reruns on a 5-second timer. Besides the waste, the
+    browser treats the re-created widget as a fresh download and re-prompts,
+    which looks like the page downloading things by itself.
+
+    Gating it behind a click means nothing is read until you actually ask."""
+    path = Path(path)
+    if not path.is_file():
+        return
+    size_mb = path.stat().st_size / 1024 / 1024
+    state_key = f"want_dl_{slug}"
+
+    if not st.session_state.get(state_key):
+        if st.button(f"{label} ({size_mb:.1f} MB)", key=f"ask_{slug}"):
+            st.session_state[state_key] = True
+            st.rerun()
+        return
+
+    st.download_button(
+        label, data=path.read_bytes(),
+        file_name=file_name or path.name, mime=mime,
+        key=f"dl_{slug}",
+    )
+
+
 def offer_zip_download(zip_path: Path, slug: str, label: str = "⬇️ Download all videos (ZIP)") -> None:
     """Download control for a finished batch.
 
@@ -56,14 +87,22 @@ def offer_zip_download(zip_path: Path, slug: str, label: str = "⬇️ Download 
     size_mb = size / 1024 / 1024
 
     if size <= MAX_DOWNLOAD_BYTES:
-        st.caption(f"ZIP size: {size_mb:.1f} MB")
+        # Gated, so a ZIP is never read (or re-offered to the browser) until
+        # it is actually wanted — see offer_file_download.
+        state_key = f"want_zip_{slug}"
+        if not st.session_state.get(state_key):
+            if st.button(f"{label} ({size_mb:.1f} MB)", key=f"askzip_{slug}",
+                         type="primary"):
+                st.session_state[state_key] = True
+                st.rerun()
+            return
         st.download_button(
             label,
-            data=zip_path.open("rb"),
-            file_name="marketing_videos.zip",
+            data=zip_path.read_bytes(),
+            file_name=zip_path.name,
             mime="application/zip",
             type="primary",
-            key=f"dl_{slug}",
+            key=f"dlzip_{slug}",
         )
         return
 
