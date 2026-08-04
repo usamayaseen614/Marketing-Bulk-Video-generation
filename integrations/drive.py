@@ -414,27 +414,64 @@ def check_access() -> tuple[bool, str]:
             f"Contributor access instead of Content Manager.\n\nRaw error: {exc}"
         )
 
-    # Writing is the real test; copying is what every upload will also do.
-    try:
-        import io as _io
+    # Upload and copy are what the app actually does, and they are tested
+    # separately so a failure names the operation instead of guessing. Deleting
+    # is only cleanup — the app never deletes anything — so it must NOT be able
+    # to fail the check. Reporting "uploading failed" when it was the tidy-up
+    # that failed sends you looking in exactly the wrong place.
+    import io as _io
 
-        from googleapiclient.http import MediaIoBaseUpload
+    from googleapiclient.http import MediaIoBaseUpload
+
+    try:
         probe = service().files().create(
             body={"name": "_write_test.txt", "parents": [target]},
             media_body=MediaIoBaseUpload(_io.BytesIO(b"ok"), mimetype="text/plain"),
             fields="id", supportsAllDrives=True).execute()
+    except Exception as exc:  # noqa: BLE001
+        message = str(exc)
+        hint = ""
+        if "quota" in message.lower():
+            hint = ("\n\nA storage-quota error here means the destination is a "
+                    "personal My Drive, not a Shared Drive — a service account "
+                    "has no storage of its own.")
+        elif "403" in message:
+            hint = ("\n\nAdd the service account to the Shared Drive's members "
+                    "as a Content Manager (Contributor cannot upload).")
+        return False, (
+            f"Folders can be created in “{info.get('name')}”, but UPLOADING a "
+            f"file failed.{hint}\n\nRaw error: {exc}")
+
+    try:
         copy = copy_file(probe["id"], "_copy_test.txt", target)
-        for file_id in (probe["id"], copy["id"]):
-            service().files().delete(fileId=file_id, supportsAllDrives=True).execute()
     except Exception as exc:  # noqa: BLE001
         return False, (
-            f"Folders can be created in “{info.get('name')}”, but uploading a "
-            "file failed. If this mentions a storage quota, the destination is "
-            "a personal My Drive rather than a Shared Drive.\n\n"
-            f"Raw error: {exc}"
-        )
+            f"Upload works in “{info.get('name')}”, but the server-side COPY "
+            "failed. Every video is published twice using files.copy, so this "
+            "one matters.\n\n"
+            f"Raw error: {exc}")
+
+    # Best effort. A failure here leaves two tiny test files behind and is
+    # worth mentioning, but it is not a reason to call the setup broken.
+    leftovers = []
+    for name, file_id in (("_write_test.txt", probe["id"]),
+                          ("_copy_test.txt", copy.get("id"))):
+        if not file_id:
+            continue
+        try:
+            service().files().delete(fileId=file_id, supportsAllDrives=True).execute()
+        except Exception:  # noqa: BLE001
+            leftovers.append(name)
+
+    note = ""
+    if leftovers:
+        note = (f"\n\n(Couldn't delete the test file(s) {', '.join(leftovers)} — "
+                "harmless, and the app never deletes anything. Tidy them up by "
+                "hand if you like. It usually means the service account is a "
+                "Contributor rather than a Content Manager on the Shared Drive, "
+                "which is enough for everything this app does.)")
 
     return True, (
         f"Connected to Shared Drive “{info.get('name')}”, writing into {where}. "
-        f"Upload and server-side copy both verified. {folder_link(target)}"
+        f"Upload and server-side copy both verified. {folder_link(target)}{note}"
     )
