@@ -1,5 +1,98 @@
 # Deploying to Google Cloud
 
+> ## ⚠️ Read this first — the container-VM path is dead
+>
+> `gcloud compute instances create-with-container` was deprecated in July 2025,
+> and its container startup agent (**konlet**) was **shut down on 2026-07-31**.
+> Google: *"any workflows that rely on the container startup agent or the
+> `gce-container-declaration` instance metadata no longer work."*
+>
+> The failure is **silent**: the VM boots, reports RUNNING, bills at full rate,
+> and never starts the container. Verify deployments with `docker ps` over SSH,
+> never with instance status.
+>
+> **Use [section 0](#0-fresh-deployment-debian--docker-compose) below.** Any
+> section here that mentions `create-with-container` or `update-container`
+> describes the old path and is kept only for VMs created before that date.
+
+## 0. Fresh deployment: Debian + Docker Compose
+
+This replaces sections 1 and 2. It needs no Artifact Registry and no Cloud
+Build — the image is built on the VM from the repo.
+
+**Scopes must be set at creation.** They cannot be changed on a running VM, and
+`cloud-platform` does **not** include Drive (Drive is a Workspace API, outside
+that umbrella). There is no gcloud alias for it either, so the full URI is
+required. Passing `--scopes` *replaces* the default set, which is why
+`cloud-platform` is listed too — without it you silently lose Cloud Logging and
+Monitoring.
+
+```bash
+gcloud compute instances create video-generator   --project=YOUR_PROJECT_ID   --zone=us-central1-a   --machine-type=e2-standard-4   --image-family=debian-13   --image-project=debian-cloud   --boot-disk-size=100GB   --boot-disk-type=pd-balanced   --scopes=https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/drive   --tags=streamlit-8501   --metadata=startup-script='#!/bin/bash
+set -eux
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y ca-certificates curl git
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+tee /etc/apt/sources.list.d/docker.sources >/dev/null <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/debian
+Suites: $(. /etc/os-release && echo "$VERSION_CODENAME")
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+systemctl enable --now docker
+touch /var/log/startup-done
+'
+```
+
+`gcloud` splits `--metadata` on commas, so a single comma in that script would
+truncate it. The script above is deliberately comma-free; if you edit it, use
+`--metadata-from-file=startup-script=startup.sh` instead.
+
+Firewall — restrict to your own IP (`curl -s ifconfig.me`). Streamlit has no
+authentication, so `0.0.0.0/0` puts a Drive-writing, Vertex-billing app in front
+of the internet:
+
+```bash
+gcloud compute firewall-rules create allow-streamlit-8501   --project=YOUR_PROJECT_ID --network=default   --direction=INGRESS --action=ALLOW --rules=tcp:8501   --target-tags=streamlit-8501 --source-ranges=YOUR.IP.HERE/32
+```
+
+```bash
+gcloud services enable drive.googleapis.com aiplatform.googleapis.com --project=YOUR_PROJECT_ID
+```
+
+Then SSH in and start it:
+
+```bash
+gcloud compute ssh video-generator --project=YOUR_PROJECT_ID --zone=us-central1-a
+```
+
+```bash
+while [ ! -f /var/log/startup-done ]; do echo waiting; sleep 10; done
+sudo usermod -aG docker $USER && exec newgrp docker
+git clone -b feat/automation-pipeline https://github.com/YOUR_USER/YOUR_REPO.git app && cd app
+cp .env.example .env && nano .env
+docker compose up -d --build
+docker compose logs -f
+```
+
+**Verify both processes**, because a container where only Streamlit survived
+will accept batches and never run them:
+
+```bash
+docker exec $(docker compose ps -q app) supervisorctl status
+```
+
+Updating later is `git pull && docker compose up -d --build`. Environment
+changes are just an edit to `.env` plus `docker compose up -d` — no need to
+re-specify anything, unlike the old `update-container` flow.
+
 This guide deploys the app on a single Compute Engine VM. That is the right
 shape for this workload: long CPU-bound FFmpeg batches (30–80 min for hundreds
 of videos), large temp files, and a long-lived Streamlit process. Serverless
