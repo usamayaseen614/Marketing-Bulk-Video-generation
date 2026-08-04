@@ -89,9 +89,35 @@ will accept batches and never run them:
 docker exec $(docker compose ps -q app) supervisorctl status
 ```
 
-Updating later is `git pull && docker compose up -d --build`. Environment
-changes are just an edit to `.env` plus `docker compose up -d` — no need to
-re-specify anything, unlike the old `update-container` flow.
+### Finding the external IP
+
+**From the VM**, ask the metadata server — this needs no IAM permissions:
+
+```bash
+curl -s -H "Metadata-Flavor: Google"   http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip; echo
+```
+
+`gcloud compute instances describe` does NOT work from the VM: there you are
+the instance's service account, which has the Drive and cloud-platform scopes
+but not `compute.instances.get`. Run that form in Cloud Shell instead.
+
+If that permission error appears, treat it as a signal: the service account may
+have no IAM roles at all (newer projects disable automatic role grants to
+default service accounts). Scopes only cap what a token *may* do — IAM decides
+what it *can*. Vertex AI would then 403 in a way that reads like an application
+bug, so grant the role explicitly from Cloud Shell:
+
+```bash
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID   --member=serviceAccount:YOUR_COMPUTE_SA_EMAIL   --role=roles/aiplatform.user
+```
+
+Drive needs no IAM role — only the folder shared with that same address.
+
+### Updating
+
+`git pull && docker compose up -d --build`. Environment changes are just an
+edit to `.env` plus `docker compose up -d` — no need to re-specify anything,
+unlike the old `update-container` flow.
 
 This guide deploys the app on a single Compute Engine VM. That is the right
 shape for this workload: long CPU-bound FFmpeg batches (30–80 min for hundreds
