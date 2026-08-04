@@ -7,22 +7,22 @@ Run with:  streamlit run app.py
 import io
 import logging
 import os
-import shutil
 import tempfile
-import time
 import uuid
-import zipfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import asdict
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
-from streamlit import config as st_config
 
+# Aliased: this module already binds `config` to the per-batch RenderConfig.
+import config as settings
+import ui_common
+from jobs import store
 from preview_editor import preview_editor
+from ui_common import get_session_id
+from workspace import MAX_PROMO_VIDEOS, Workspace, build_workspace, stage_uploads
 from video_generator import (
     ALL_COLUMNS,
     CANVAS_H,
@@ -35,7 +35,6 @@ from video_generator import (
     REQUIRED_COLUMNS,
     TEXT_STYLES,
     RenderConfig,
-    RowResult,
     VideoGenerator,
     missing_optional_columns,
     validate_dataframe,
@@ -47,101 +46,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("app")
 
-# Outputs land outside the per-run TemporaryDirectory so the download button
-# keeps working after temp cleanup. Each browser session gets its own subfolder
-# so concurrent users can't clobber each other's batches.
-OUTPUT_ROOT = Path(tempfile.gettempdir()) / "bulk_video_generator"
-
-# When static serving is enabled (production/Docker), oversized ZIPs are
-# published here and streamed from disk by Tornado instead of being buffered
-# in Python memory by st.download_button.
-STATIC_ROOT = Path(__file__).parent / "static"
-STATIC_DOWNLOADS = STATIC_ROOT / "downloads"
-
-# Above this size the ZIP is not loaded into memory for the download button.
-MAX_DOWNLOAD_BYTES = 5 * 1024 * 1024 * 1024
-
-# Output folders from sessions idle longer than this are deleted on the next
-# batch run, so a long-lived server never fills its disk.
-STALE_RUN_HOURS = 24
-
-
 # --------------------------------------------------------------------------- helpers
-
-def get_session_id() -> str:
-    """Stable id for this browser session, used to isolate output folders."""
-    if "session_id" not in st.session_state:
-        st.session_state["session_id"] = uuid.uuid4().hex[:12]
-    return st.session_state["session_id"]
-
-
-def cleanup_stale_dirs(root: Path, max_age_hours: int = STALE_RUN_HOURS) -> None:
-    """Delete other sessions' output folders once they go stale."""
-    if not root.is_dir():
-        return
-    cutoff = time.time() - max_age_hours * 3600
-    for child in root.iterdir():
-        try:
-            if child.is_dir() and child.stat().st_mtime < cutoff:
-                shutil.rmtree(child, ignore_errors=True)
-        except OSError:
-            pass
-
-
-@dataclass
-class Workspace:
-    """Uploaded assets materialized on disk inside a temp directory."""
-    bg_dir: Path
-    video_path: Path
-    cta_path: Optional[Path]
-    font_path: Optional[Path]
-    work_dir: Path
-    cta_video_slots: list = field(default_factory=list)
-
-
-def build_workspace(tmp: Path, video_file, zip_file, cta_file, font_file,
-                    cta_video_slot_files=None) -> Workspace:
-    """Write the in-memory uploads to disk where FFmpeg/PIL can read them."""
-    video_path = tmp / "input.mp4"
-    video_path.write_bytes(video_file.getvalue())
-
-    # The CTA image is optional — leave cta_path None when none was uploaded.
-    cta_path = None
-    if cta_file is not None:
-        cta_path = tmp / "cta.png"
-        cta_path.write_bytes(cta_file.getvalue())
-
-    # Backgrounds are optional — without a ZIP the folder stays empty and rows
-    # render on the configured solid background color.
-    bg_dir = tmp / "backgrounds"
-    bg_dir.mkdir(exist_ok=True)
-    if zip_file is not None:
-        with zipfile.ZipFile(io.BytesIO(zip_file.getvalue())) as zf:
-            zf.extractall(bg_dir)
-
-    font_path = None
-    if font_file is not None:
-        font_path = tmp / f"custom_font{Path(font_file.name).suffix.lower()}"
-        font_path.write_bytes(font_file.getvalue())
-
-    # One sub-folder per CTA slot, keepings each sample's original filename so the
-    # Excel CTA_Clip_<n> cells can pin one by name.
-    cta_video_slots = []
-    for i, files in enumerate(cta_video_slot_files or [], start=1):
-        slot_paths = []
-        if files:
-            slot_dir = tmp / f"cta_slot_{i}"
-            slot_dir.mkdir(parents=True, exist_ok=True)
-            for f in files:
-                p = slot_dir / Path(f.name).name
-                p.write_bytes(f.getvalue())
-                slot_paths.append(p)
-        cta_video_slots.append(slot_paths)
-
-    work_dir = tmp / "work"
-    work_dir.mkdir(exist_ok=True)
-    return Workspace(bg_dir, video_path, cta_path, font_path, work_dir, cta_video_slots)
-
 
 def make_generator(ws: Workspace, config: RenderConfig, output_dir: Path) -> VideoGenerator:
     config.font_path = str(ws.font_path) if ws.font_path else None
@@ -206,125 +111,10 @@ def updated_excel_bytes(excel_bytes: bytes, edits: dict[int, dict]) -> bytes:
     return buf.getvalue()
 
 
-def write_render_log(path: Path, results: list[RowResult]) -> None:
-    ok = sum(r.ok for r in results)
-    lines = [
-        f"Bulk video render log — {time.strftime('%Y-%m-%d %H:%M:%S')}",
-        f"Total rows: {len(results)} | Succeeded: {ok} | Failed: {len(results) - ok}",
-        "-" * 70,
-    ]
-    for r in sorted(results, key=lambda r: r.row_number):
-        status = "OK    " if r.ok else "FAILED"
-        lines.append(f"Row {r.row_number:4d}  {status}  {r.filename or ''}")
-        for w in r.warnings:
-            lines.append(f"           warning: {w}")
-        if r.error:
-            lines.append(f"           error: {r.error}")
-    path.write_text("\n".join(lines), encoding="utf-8")
-
-
-def package_zip(run_dir: Path, results: list[RowResult]) -> Path:
-    """Bundle all successful MP4s + the render log. ZIP_STORED because MP4s
-    are already compressed — recompressing wastes minutes for ~0% gain."""
-    zip_path = run_dir / "marketing_videos.zip"
-    log_path = run_dir / "render_log.txt"
-    write_render_log(log_path, results)
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
-        for r in results:
-            if r.ok and r.output_path and r.output_path.is_file():
-                zf.write(r.output_path, r.filename)
-        zf.write(log_path, "render_log.txt")
-    return zip_path
-
-
-def run_batch(df: pd.DataFrame, generator: VideoGenerator, workers: int) -> list[RowResult]:
-    """Render every row with a live progress bar. FFmpeg does the heavy lifting
-    in subprocesses, so a thread pool is enough for parallelism."""
-    progress = st.progress(0.0, text="Starting renders…")
-    results: list[RowResult] = []
-
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [
-            pool.submit(generator.render_row, idx + 1, row)
-            for idx, (_, row) in enumerate(df.iterrows())
-        ]
-        for future in as_completed(futures):
-            results.append(future.result())
-            done = len(results)
-            ok = sum(r.ok for r in results)
-            progress.progress(
-                done / len(futures),
-                text=f"Rendered {done}/{len(futures)} — {ok} ok, {done - ok} failed",
-            )
-    progress.empty()
-    return sorted(results, key=lambda r: r.row_number)
-
-
-def show_results(results: list[RowResult]) -> None:
-    ok = [r for r in results if r.ok]
-    failed = [r for r in results if not r.ok]
-
-    if not failed:
-        st.success(f"All {len(ok)} videos rendered successfully.")
-    elif ok:
-        st.warning(f"{len(ok)} videos rendered, {len(failed)} failed.")
-    else:
-        st.error(f"All {len(failed)} rows failed.")
-
-    if failed:
-        with st.expander(f"Failed rows ({len(failed)})", expanded=True):
-            st.dataframe(
-                pd.DataFrame(
-                    [{"Row": r.row_number, "Error": r.error} for r in failed]
-                ),
-                hide_index=True,
-                width="stretch",
-            )
-
-    warnings = [(r.row_number, w) for r in results for w in r.warnings]
-    if warnings:
-        with st.expander(f"Warnings ({len(warnings)})"):
-            for row_number, message in warnings:
-                st.text(f"Row {row_number}: {message}")
-
-
-def offer_download(zip_path: Path) -> None:
-    size = zip_path.stat().st_size
-    if size <= MAX_DOWNLOAD_BYTES:
-        st.caption(f"ZIP size: {size / 1024 / 1024:.1f} MB — saved at `{zip_path}`")
-        st.download_button(
-            "⬇️ Download all videos (ZIP)",
-            data=zip_path.open("rb"),
-            file_name="marketing_videos.zip",
-            mime="application/zip",
-            type="primary",
-        )
-        return
-
-    # st.download_button buffers the whole file in memory per click — too risky
-    # for multi-GB batches. With static serving on (the production/Docker
-    # setup), move the ZIP under ./static and let Tornado stream it from disk.
-    if st_config.get_option("server.enableStaticServing"):
-        dest = STATIC_DOWNLOADS / get_session_id() / zip_path.name
-        if zip_path != dest:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(zip_path), dest)
-            st.session_state["result_zip"] = str(dest)
-        st.caption(f"ZIP size: {size / 1024 / 1024:.1f} MB")
-        st.markdown(
-            f"### [⬇️ Download all videos (ZIP)](/app/static/downloads/{get_session_id()}/{dest.name})"
-        )
-    else:
-        st.info(
-            "The ZIP is too large to stream through the browser reliably. "
-            f"Grab it directly from disk:\n\n`{zip_path}`"
-        )
-
-
 # --------------------------------------------------------------------------- UI
 
-if st_config.get_option("server.enableStaticServing"):
-    STATIC_DOWNLOADS.mkdir(parents=True, exist_ok=True)
+ui_common.ensure_static_dir()
+store.init_db()
 
 st.set_page_config(page_title="Bulk Video Generator", page_icon="🎬", layout="wide")
 st.title("🎬 Bulk Marketing Video Generator")
@@ -682,7 +472,15 @@ st.subheader("1. Upload assets")
 col1, col2 = st.columns(2)
 with col1:
     excel_file = st.file_uploader("Excel file (.xlsx)", type=["xlsx"])
-    video_file = st.file_uploader("Promo video (MP4) — used in every output", type=["mp4"])
+    promo_files = st.file_uploader(
+        f"Promo video(s) (MP4) — up to {MAX_PROMO_VIDEOS}", type=["mp4"],
+        accept_multiple_files=True,
+        help="Upload one to use it in every video. Upload several and a "
+             "multi-batch render gives each batch its own promo video, cycling "
+             "if there are fewer promos than batches.",
+    )
+    # Preview and Render Row work off a single promo — the first one.
+    video_file = promo_files[0] if promo_files else None
 with col2:
     zip_file = st.file_uploader(
         "Background images (ZIP, optional)", type=["zip"],
@@ -764,6 +562,58 @@ render_row_clicked = col_render.button(
 generate_clicked = col_generate.button(
     "🚀 Generate All Videos", disabled=not ready, type="primary", width="stretch"
 )
+
+# One sheet becomes `batches x rows` videos: the same rows rendered once per
+# batch, each pass with a different promo video and different clip picks.
+col_b, col_f = st.columns(2)
+n_batches = col_b.number_input(
+    "Batches to render", 1, 20, 1, 1, disabled=not ready,
+    help="The sheet is rendered this many times. Each pass uses the next promo "
+         "video and picks different sample clips, so the batches differ.",
+)
+n_folders = col_f.number_input(
+    "Output folders", 1, 20, int(n_batches), 1, disabled=not ready,
+    help="Finished videos are mixed evenly across this many Drive folders, so "
+         "no folder is just one promo video. Usually the same as the batch count.",
+)
+if ready and df is not None:
+    total_videos = len(df) * int(n_batches)
+    promo_count = len(promo_files or [])
+    note = (f"**{len(df):,} rows x {int(n_batches)} batches = "
+            f"{total_videos:,} videos**, mixed across {int(n_folders)} folders, "
+            f"each uploaded twice ({total_videos * 2:,} Drive files).")
+    if promo_count and int(n_batches) > promo_count:
+        note += (f" Only {promo_count} promo video(s) uploaded, so they cycle "
+                 f"across the {int(n_batches)} batches.")
+    st.caption(note)
+    if total_videos > 3000:
+        st.warning(
+            f"{total_videos:,} videos is a long run — roughly "
+            f"{total_videos * 2 / 3600:.1f}–{total_videos * 3 / 3600:.1f} hours "
+            "of rendering. The VM must stay up for the whole job. It resumes "
+            "if interrupted, but it won't finish until it's back."
+        )
+
+# Generation runs in the background worker, so the batch needs a name to find it
+# by later and an address to report back to.
+col_label, col_mail = st.columns(2)
+batch_label = col_label.text_input(
+    "Batch name (optional)", value="", disabled=not ready,
+    placeholder="e.g. asmr-week32-set1",
+    help="Shown on the Jobs page and in the notification email. Defaults to the "
+         "Excel file name.",
+)
+notify_email = col_mail.text_input(
+    "Notify email (optional)", value=", ".join(settings.MAIL_TO), disabled=not ready,
+    placeholder="you@yourcompany.com",
+    help="Emailed when the batch finishes — on success and on failure. Leave "
+         "blank to use the server default.",
+)
+if not settings.mail_configured():
+    st.caption(
+        "⚠️ Email isn't configured on the server yet, so no notification will be "
+        "sent — the Jobs page still shows live progress."
+    )
 
 if preview_clicked and ready:
     with st.spinner(f"Rendering preview of row {preview_row}…"):
@@ -895,43 +745,67 @@ if row_edits and excel_file is not None and not generate_clicked:
         st.rerun()
 
 if generate_clicked and ready:
-    st.session_state.pop("result_zip", None)
-    session_id = get_session_id()
-    # Reap stale output from idle sessions, then wipe only THIS session's
-    # previous run — concurrent users keep their batches intact.
-    cleanup_stale_dirs(OUTPUT_ROOT)
-    cleanup_stale_dirs(STATIC_DOWNLOADS)
-    session_root = OUTPUT_ROOT / session_id
-    shutil.rmtree(session_root, ignore_errors=True)
-    shutil.rmtree(STATIC_DOWNLOADS / session_id, ignore_errors=True)
-    run_dir = session_root / time.strftime("run_%Y%m%d_%H%M%S")
-    run_dir.mkdir(parents=True, exist_ok=True)
+    # Submitting is a two-step dance: reserve an id, stage the uploads into its
+    # folder, then insert the job row. Doing it the other way round would let
+    # the worker claim a batch whose promo video is still being written.
+    #
+    # Everything below finishes in seconds — the rendering itself happens in the
+    # worker process, so this browser tab can be closed immediately.
+    try:
+        job_id = store.new_job_id()
+        store.make_job_dirs(job_id)
+        assets = store.assets_dir(job_id)
 
-    started = time.time()
-    # The TemporaryDirectory holds uploads + per-row PNGs and is deleted
-    # automatically when the batch finishes (success or failure).
-    with tempfile.TemporaryDirectory(prefix="bvg_run_") as tmp:
-        try:
-            ws = build_workspace(Path(tmp), video_file, zip_file, cta_file,
-                                 font_file, cta_video_slot_files)
-            generator = make_generator(ws, config, run_dir / "videos")
-            df_run, bg_warnings = generator.assign_backgrounds(df)
-            for message in bg_warnings:
-                st.warning(message)
-            results = run_batch(df_run, generator, workers)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Batch failed")
-            st.error(f"Batch failed before rendering could start: {exc}")
-            results = []
+        # All promo videos are staged; the runner picks one per batch.
+        stage_uploads(assets, promo_files, zip_file, cta_file, font_file,
+                      cta_video_slot_files)
 
-    if results:
-        show_results(results)
-        elapsed = time.time() - started
-        st.caption(f"Finished in {elapsed:.0f}s ({elapsed / len(results):.1f}s per video).")
-        if any(r.ok for r in results):
-            st.session_state["result_zip"] = str(package_zip(run_dir, results))
+        # The sheet is written with any preview-editor edits baked in, so the
+        # worker renders exactly what this page was showing. updated_excel_bytes
+        # preserves the original workbook's formatting.
+        (assets / "input.xlsx").write_bytes(
+            updated_excel_bytes(excel_file.getvalue(),
+                                st.session_state.get("row_edits") or {})
+        )
 
-if "result_zip" in st.session_state:
-    zip_path = Path(st.session_state["result_zip"])
-    if zip_path.is_file():
-        offer_download(zip_path)
+        store.create_job(
+            kind=store.KIND_RENDER,
+            params={
+                "render_config": asdict(config),
+                "workers": int(workers),
+                "batches": int(n_batches),
+                "folders": int(n_folders),
+                "make_zip": True,
+                "excel_name": excel_file.name,
+            },
+            label=batch_label or Path(excel_file.name).stem,
+            notify_email=notify_email.strip(),
+            submitted_by=get_session_id(),
+            # Items are registered by the runner, which knows the batch count.
+            job_id=job_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Job submission failed")
+        st.error(f"Could not queue the batch: {exc}")
+    else:
+        logger.info("Queued render job %s (%d rows)", job_id, len(df))
+        st.session_state["last_job_id"] = job_id
+        st.success(
+            f"**Queued — {len(df) * int(n_batches):,} videos** "
+            f"({len(df):,} rows x {int(n_batches)} batches). "
+            "You can close this tab now; "
+            "rendering carries on in the background"
+            + (f" and an email goes to {notify_email.strip()} when it's done."
+               if notify_email.strip() else ".")
+        )
+        st.page_link("pages/1_Jobs.py", label="📋 Track progress on the Jobs page",
+                     icon="➡️")
+
+if st.session_state.get("last_job_id"):
+    job = store.get_job(st.session_state["last_job_id"])
+    if job and job["status"] in (store.STATUS_QUEUED, store.STATUS_RUNNING):
+        st.info(
+            f"Batch `{job['label'] or job['id']}` is {job['status']}"
+            + (f" — {job['stage']}" if job.get("stage") else "")
+            + ". Details are on the Jobs page."
+        )

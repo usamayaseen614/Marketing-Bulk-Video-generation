@@ -292,9 +292,19 @@ def missing_optional_columns(df: pd.DataFrame) -> list[str]:
     return [c for c in OPTIONAL_COLUMNS if c not in present]
 
 
-def safe_filename(row_number: int, headline: str) -> str:
-    """Build '001_Some_Headline.mp4' style names; safe on every filesystem."""
-    name = re.sub(r"[^\w\- ]", "", str(headline or ""), flags=re.UNICODE).strip()
+def safe_filename(row_number: int, label: str) -> str:
+    """Build '001_Some_Caption.mp4' style names; safe on every filesystem.
+
+    `label` is the row's Caption when it has one, falling back to the Headline.
+    Naming from the caption is what removes the old rename step: the file
+    arrives in Drive already carrying the text it will be posted with.
+
+    Non-word characters (emoji, punctuation) are stripped and the text is capped
+    at 60 characters, so the result stays well inside the 255-character limit
+    once the row prefix and extension are added. The numeric prefix keeps the
+    batch in row order and guarantees names are unique within it — Drive would
+    otherwise happily store a dozen identically-named files."""
+    name = re.sub(r"[^\w\- ]", "", str(label or ""), flags=re.UNICODE).strip()
     name = re.sub(r"\s+", "_", name)[:60].strip("_")
     return f"{row_number:03d}_{name}.mp4" if name else f"{row_number:03d}_row.mp4"
 
@@ -538,6 +548,14 @@ class RenderConfig:
     # When True, video_x/video_y are ignored and each row's video box gets a
     # seeded-random position avoiding the CTA and explicitly-placed texts.
     randomize_video_pos: bool = False
+    # Distinguishes repeated renders of the SAME sheet. Every random choice a
+    # row makes — which sample clip fills each CTA slot, auto-placement, random
+    # sizes and colors — is seeded from the row's content and number, so
+    # re-rendering a sheet reproduces it byte for byte. That is what makes the
+    # preview match the render, and it is also why producing ten *different*
+    # batches from one sheet needs a per-batch salt folded into that seed.
+    # 0 (the default) leaves the seed exactly as it has always been.
+    variant_salt: int = 0
     audio_bitrate: str = "192k"
     include_audio: bool = True
     font_path: Optional[str] = None   # the user's uploaded TTF/OTF, if any
@@ -2118,15 +2136,26 @@ class VideoGenerator:
 
     # ------------------------------------------------------------- per-row render
 
-    def render_row(self, row_number: int, row: pd.Series) -> RowResult:
+    def render_row(self, row_number: int, row: pd.Series,
+                   filename: Optional[str] = None) -> RowResult:
         """Render one Excel row to an MP4. Never raises — failures are captured
-        in the returned RowResult so one bad row can't abort the batch."""
+        in the returned RowResult so one bad row can't abort the batch.
+
+        `filename` lets the caller name the output. Naming policy (captions,
+        hashtags, length caps) lives with the caller, not in the render engine.
+        Omit it for the historical Caption-or-Headline name."""
         spec = RowSpec.from_row(row, row_number)
+        # Repeated renders of one sheet must differ; see RenderConfig.variant_salt.
+        # Guarded so the default (0) leaves every existing seed untouched.
+        if self.config.variant_salt:
+            spec.seed_salt = int(row_number) * 1_000_003 + int(self.config.variant_salt)
         base_png = self.work_dir / f"row_{row_number:04d}_base.png"
         overlay_png = self.work_dir / f"row_{row_number:04d}_overlay.png"
         # The CTA image is optional — no PNG (and no FFmpeg input) without one.
         cta_png = self.work_dir / f"row_{row_number:04d}_cta.png" if self._has_cta else None
-        filename = safe_filename(row_number, spec.headline.text)
+        # Name from the row's Caption when there is one, else the Headline.
+        filename = filename or safe_filename(
+            row_number, _clean_str(row.get("Caption")) or spec.headline.text)
         out_path = self.output_dir / filename
         sub_pngs: list[Path] = []
         try:

@@ -9,3 +9,9 @@ README.md
 DEPLOYMENT.md
 Caddyfile
 docker-compose.yml
+
+# Local job storage — never bake a developer's jobs into the image
+_jobs/
+.env
+*-key.json
+service-account*.json

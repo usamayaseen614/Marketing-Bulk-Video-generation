@@ -256,13 +256,70 @@ Notes:
    but it's exactly what the batch will produce for that row, including motion-only
    behavior the static preview can't show (side-clip sequencing, fades, the subliminal
    effect).
-4. Click **🚀 Generate All Videos** — a progress bar shows live success/failure counts.
-5. Failed rows are listed with their error (e.g., a background missing from the ZIP);
-   one bad row never stops the batch.
-6. Download the ZIP — it contains every rendered MP4 plus `render_log.txt`.
+4. Click **🚀 Generate All Videos** — the batch is **queued** and the click returns
+   immediately. **You can close the tab.** Rendering, captioning and uploading happen in
+   a background worker process, so a closed tab, a slept laptop or a dropped connection
+   no longer kills a batch.
+5. Watch it on the **📋 Jobs** page — live progress, per-row failures with their reason
+   (e.g. a background missing from the ZIP), and warnings. One bad row never stops the
+   batch. An email arrives when it finishes, on success *and* on failure.
+6. Collect the output: a **Google Drive** link if Drive is configured (the link never
+   expires), or the ZIP from the Jobs page — every rendered MP4 plus `render_log.txt`
+   and the batch spreadsheet.
 
-Temporary working files are cleaned automatically after every run. Rendered output is kept
-in your system temp folder (path shown under the download button) until the next run.
+If the worker is interrupted mid-batch, the job resumes rather than restarting: a crash
+at video 250 of 300 costs the one video in flight, not the 250 already done.
+
+Uploaded assets are deleted as soon as a job finishes; finished job folders are reaped
+after a configurable retention period (7 days by default).
+
+## The other pages
+
+| Page | What it does |
+|---|---|
+| **📋 Jobs** | Queued / running / finished batches, live progress, per-row errors, downloads |
+| **🎵 TikTok Scraper** | Paste an account, get clips downloaded, trimmed to 10s, and dropped into Drive pre-sorted into `batch_NN/slot_N` folders — plus a `metadata.xlsx` of views, likes, duration and post date so curating 500 clips means sorting by views, not scrubbing thumbnails |
+| **🔧 Setup** | What's configured (email, Drive, Gemini, worker) with a test button for each, and caption-pool generation |
+
+### Batches, mixing, and the two filenames
+
+One sheet becomes **`batches × rows`** videos. Set *Batches to render* and the sheet is
+rendered that many times — each pass uses the **next promo video** (upload up to 10) and
+a different variant salt, so every pass picks different CTA clips. The finished videos
+are then **mixed evenly across the output folders**, so no folder is just one promo
+video, and each folder gets an equal share of every batch.
+
+Every video is published to Drive **twice**, under two names built from its caption:
+
+| | Contents | Limit |
+|---|---|---|
+| **Short** | caption + **exactly one** hashtag | **hard max 100 characters, including `.mp4`** |
+| **Long** | caption + every hashtag | 200 characters |
+
+```
+Your skin will thank you for this one #skincare.mp4
+Your skin will thank you for this one #skincare #asmr #fyp #glowup #selfcare.mp4
+```
+
+Names are **paste-ready**: spaces and `#` are preserved so the filename reads as the
+caption you will actually post. **Emoji are stripped** — from the caption text itself as
+well as the filename (`BVG_FILENAME_KEEP_EMOJI=true` keeps them). There is no numeric
+prefix; collisions get a ` (2)` suffix that stays inside the cap.
+
+The second copy is made with Drive's **server-side `files.copy`**, so the bytes cross the
+network once — at 10,000 videos that's ~80 GB of upload instead of ~160 GB.
+
+Each output folder gets a `batch_NN_manifest.xlsx` listing exactly what landed in it —
+caption, hashtags, and both filenames — plus a combined `render_manifest.xlsx`. After
+mixing, that manifest is the artifact that tells you what to post; the original sheet is
+kept alongside it unchanged.
+
+### Captions
+
+Captions are generic and themed: a pool of ~2,000 captions × ~500 hashtag sets is
+generated occasionally (Setup page) and recombined per video, giving a million unique
+pairs with no model call per video. A caption identifies one *video*, not one sheet row —
+ten batches of the same row are ten separate posts and each draws its own pair.
 
 ## Deployment
 
