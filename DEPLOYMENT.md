@@ -77,7 +77,7 @@ gcloud compute ssh video-generator --project=YOUR_PROJECT_ID --zone=us-central1-
 while [ ! -f /var/log/startup-done ]; do echo waiting; sleep 10; done
 sudo usermod -aG docker $USER && exec newgrp docker
 git clone -b feat/automation-pipeline https://github.com/YOUR_USER/YOUR_REPO.git app && cd app
-cp .env.example .env && nano .env
+cp -n .env.example .env && nano .env
 docker compose up -d --build
 docker compose logs -f
 ```
@@ -115,9 +115,28 @@ Drive needs no IAM role — only the folder shared with that same address.
 
 ### Updating
 
-`git pull && docker compose up -d --build`. Environment changes are just an
-edit to `.env` plus `docker compose up -d` — no need to re-specify anything,
-unlike the old `update-container` flow.
+```bash
+cd ~/app && git pull && docker compose up -d --build
+```
+
+That is the whole update. **Never re-run `cp .env.example .env`** — `.env` is
+gitignored so `git pull` cannot touch it, but copying the template over it
+wipes your configuration and every integration silently reverts to "not
+configured". If the Setup page shows the project as `YOUR_PROJECT_ID`, that is
+exactly what happened. (`cp -n` above refuses to overwrite, which is why it is
+written that way.)
+
+Changing settings alone needs no rebuild:
+
+```bash
+nano .env && docker compose up -d
+```
+
+Confirm the container actually picked them up:
+
+```bash
+docker compose exec app env | grep BVG_
+```
 
 This guide deploys the app on a single Compute Engine VM. That is the right
 shape for this workload: long CPU-bound FFmpeg batches (30–80 min for hundreds
