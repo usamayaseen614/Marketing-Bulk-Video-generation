@@ -199,6 +199,20 @@ CAPTION_POOL_SIZE = _int("BVG_CAPTION_POOL_SIZE", 2000)
 HASHTAG_POOL_SIZE = _int("BVG_HASHTAG_POOL_SIZE", 500)
 CAPTION_THEME = _str("BVG_CAPTION_THEME")
 
+# The most a pool may be asked for in one go — the upper bound on the UI's
+# number inputs, not a default.
+#
+# A pool is a consumable: one caption per video, never reused, so a job of
+# `batches x rows` videos needs that many captions. 1,000 rows across 16 promos
+# is 16,000 videos and therefore 16,000 captions, which the old 5,000 ceiling
+# simply refused. The limit exists to catch a typo'd 500000, so it is set well
+# above any plausible real batch rather than near it.
+CAPTION_POOL_MAX = _int("BVG_CAPTION_POOL_MAX", 50000)
+
+# Hashtags repeat freely — with the caption already unique per video they carry
+# no naming duty — so this rarely needs to be large.
+HASHTAG_POOL_MAX = _int("BVG_HASHTAG_POOL_MAX", 5000)
+
 # A pool is built in chunks of ~100, and the chunks are independent — each is a
 # single-turn request that knows nothing of the others. Running them one after
 # another made a 5,000-caption pool a 30-minute wait for a machine doing

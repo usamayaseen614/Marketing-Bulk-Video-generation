@@ -396,9 +396,13 @@ the rule the filenames depend on: a short filename is the caption plus *one* has
 two videos sharing a caption collide on their name however much their hashtag sets
 differ. The draw therefore walks the caption list rather than the caption × hashtag grid.
 
-So the pool must hold at least **`batches × rows`** captions. If it doesn't, the job stops
-before rendering and says by how much — a batch that cannot name its videos apart is not
-worth the hours of FFmpeg it would cost. Generate a larger pool, or render fewer batches.
+So the pool must hold at least **`batches × rows`** captions — 1,000 rows across 16 promos
+is 16,000 videos and therefore 16,000 captions. The Generate page checks this against the
+batch count you set and warns before you queue anything. If it slips through, the job
+stops before rendering and says by how much — a batch that cannot name its videos apart is
+not worth the hours of FFmpeg it would cost. Generate a larger pool, or render fewer
+batches. The input's ceiling is `BVG_CAPTION_POOL_MAX` (50,000), which exists to catch a
+typo rather than to limit real batches.
 
 **A pool is a consumable, not a cycle.** It is worth exactly as many videos as it holds
 captions, and it never starts over: once its captions are used the next job is refused

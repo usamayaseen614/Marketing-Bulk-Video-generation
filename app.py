@@ -839,23 +839,36 @@ if caption_mode == "generate":
         help="The single biggest lever on caption quality — be specific about "
              "the product and the audience.",
     )
+    # One caption per video, never reused, so this needs to reach
+    # `batches x rows` — checked against the real total in section 5 below,
+    # where the batch count is known.
+    _cap_max = settings.CAPTION_POOL_MAX
     if hashtag_source == "pool":
         col_cc, col_hh = st.columns(2)
         caption_params["caption_count"] = col_cc.number_input(
-            "Captions", 50, 5000, 500, 50)
+            "Captions", 50, _cap_max, 500, 50)
         caption_params["hashtag_count"] = col_hh.number_input(
-            "Hashtag sets", 25, 2000, 100, 25)
+            "Hashtag sets", 25, settings.HASHTAG_POOL_MAX, 100, 25)
     else:
         # Generating hashtag sets that an uploaded sheet would immediately
         # override is money spent on output nobody sees.
         caption_params["caption_count"] = st.number_input(
-            "Captions", 50, 5000, 500, 50)
+            "Captions", 50, _cap_max, 500, 50)
         caption_params["hashtag_count"] = 0
         st.caption(
             "Only captions will be generated — hashtags come from "
             + ("your uploaded file." if hashtag_source == "excel"
                else "nowhere, by choice.")
         )
+    # Same arithmetic the Setup page shows. Worth repeating here because this
+    # is where a large batch gets planned, and a big pool is neither instant
+    # nor free — 16,000 captions is ~160 model calls.
+    _cc = int(caption_params["caption_count"])
+    st.caption(
+        f"~{max(1, _cc // 100)} model call(s), run "
+        f"{settings.CAPTION_CONCURRENCY} at a time — roughly "
+        f"${_cc / 2000 * 2:.2f} of {settings.GEMINI_POOL_MODEL} usage."
+    )
     if not caption_params["caption_theme"].strip():
         st.error(
             "A caption theme is required to generate a pool — it is what the "
@@ -912,6 +925,30 @@ if ready and df is not None:
                  f"{int(n_batches)} passes — each pairing occurs "
                  f"{int(n_batches) // promo_count}x.")
     st.caption(note)
+
+    # Captions are the other quantity that has to reach `batches x rows`: one
+    # per video, never reused. Without this check the shortfall only surfaces
+    # inside the worker, after the assets are staged and the batch queued —
+    # and the number needed depends on the batch count set right here.
+    if caption_mode == "generate":
+        _planned = int(caption_params.get("caption_count") or 0)
+        if _planned < total_videos:
+            st.warning(
+                f"**{_planned:,} captions for {total_videos:,} videos.** Each "
+                "video takes its own and none is ever reused, so this batch "
+                "would be refused before it rendered. Raise *Captions* in "
+                f"section 4 to at least {total_videos:,}."
+            )
+    elif _pool:
+        _unused, _total_caps = store.pool_remaining(_pool["id"])
+        if _unused < total_videos:
+            st.warning(
+                f"**The active pool has {_unused:,} captions left of "
+                f"{_total_caps:,}, but this batch needs {total_videos:,}.** "
+                "A pool is a consumable and never starts over — generate a "
+                "fresh one, or render fewer batches."
+            )
+
     if total_videos > 3000:
         st.warning(
             f"{total_videos:,} videos is a long run — roughly "

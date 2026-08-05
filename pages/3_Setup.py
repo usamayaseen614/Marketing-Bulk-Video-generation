@@ -235,9 +235,11 @@ theme = st.text_input(
          "on their quality — be specific about the product and the audience.",
 )
 col_c, col_h = st.columns(2)
-n_captions = col_c.number_input("Captions to generate", 50, 5000,
+n_captions = col_c.number_input("Captions to generate", 50,
+                                settings.CAPTION_POOL_MAX,
                                 settings.CAPTION_POOL_SIZE, 50)
-n_hashtags = col_h.number_input("Hashtag sets to generate", 25, 2000,
+n_hashtags = col_h.number_input("Hashtag sets to generate", 25,
+                                settings.HASHTAG_POOL_MAX,
                                 settings.HASHTAG_POOL_SIZE, 25)
 st.caption(
     f"→ {int(n_captions) * int(n_hashtags):,} unique pairs. "
