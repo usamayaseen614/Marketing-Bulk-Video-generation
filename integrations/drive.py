@@ -1,12 +1,19 @@
 """
-integrations/drive.py — uploading finished work to a Google Shared Drive.
+integrations/drive.py — moving work in and out of Google Drive.
 
-Why a **Shared Drive** and not a folder in someone's My Drive: a service
-account has no Drive storage quota of its own. Sharing a My Drive folder with
-it looks like it should work and then fails on the first upload with a storage
-quota error. A Shared Drive is owned by the organisation, so files the service
-account creates there count against the *organisation's* storage. This is not a
-preference — it is the only arrangement that works.
+Two directions, and they do NOT have the same requirements:
+
+*Uploading* finished videos needs a **Shared Drive**, not a folder in someone's
+My Drive. A service account has no Drive storage quota of its own. Sharing a My
+Drive folder with it looks like it should work and then fails on the first
+upload with a storage quota error. A Shared Drive is owned by the organisation,
+so files the service account creates there count against the *organisation's*
+storage. This is not a preference — it is the only arrangement that works.
+
+*Downloading* source clips has no such constraint: reading consumes nobody's
+quota, so an ordinary My Drive folder shared with the service account is a
+perfectly good source. The download half is therefore deliberately routed
+around resolve_target() and its Shared Drive rules — see the download section.
 
 Credentials come from Application Default Credentials, which on the VM means
 its attached service account: no key file to store, rotate or leak. The VM must
@@ -30,6 +37,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 import config
+import workspace
 
 logger = logging.getLogger(__name__)
 
@@ -422,6 +430,295 @@ def upload_many(
             if on_result:
                 on_result(path, drive_name, response, error)
     return ok, failed
+
+
+# --------------------------------------------------------------------------- download
+
+SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
+
+# How far down a source folder is walked. People organise clip libraries in
+# sub-folders, so recursing is the useful default; the cap only stops a
+# pathological tree from turning into thousands of listing calls.
+MAX_SOURCE_DEPTH = 5
+
+# Drive filenames may contain characters Windows forbids outright.
+_ILLEGAL_IN_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+# Part-files live in a sub-folder rather than beside their target, because
+# workspace_from_dir() treats *every file* in a cta_slot_N folder as a clip —
+# a stray `foo.mp4.part` would be handed to FFmpeg as if it were one. It skips
+# directories, so a folder of half-written bytes is invisible to it.
+_INCOMING = ".incoming"
+
+
+def safe_name(name: str) -> str:
+    """A Drive filename made safe to write locally.
+
+    Not only about storage: a clip's local filename is how an Excel
+    `CTA_Clip_<n>` cell pins it, so the name has to survive the trip."""
+    clean = _ILLEGAL_IN_FILENAME.sub("_", str(name or "").strip()).strip(". ")
+    return clean or "clip"
+
+
+def _looks_like_video(name: str, mime: str) -> bool:
+    """Whether a Drive entry is a clip worth fetching.
+
+    mimeType first, but a file that arrived through Drive-for-desktop sync
+    often carries application/octet-stream — so the extension decides in that
+    case, using the same list the renderer accepts on disk."""
+    if str(mime or "").startswith("video/"):
+        return True
+    return workspace.is_video(str(name or ""))
+
+
+def _children(folder_id: str) -> list[dict]:
+    """Every non-trashed child of one folder, following pagination.
+
+    Deliberately no `corpora`/`driveId`: a *source* folder may live in a Shared
+    Drive or in someone's My Drive, and pinning a driveId makes the My Drive
+    case return nothing at all rather than an error."""
+    svc = service()
+    out: list[dict] = []
+    token = None
+    while True:
+        response = svc.files().list(
+            q=f"'{_escape(folder_id)}' in parents and trashed = false",
+            fields=("nextPageToken, files(id, name, mimeType, size, "
+                    "shortcutDetails)"),
+            includeItemsFromAllDrives=True, supportsAllDrives=True,
+            pageSize=1000, pageToken=token,
+        ).execute()
+        out.extend(response.get("files", []))
+        token = response.get("nextPageToken")
+        if not token:
+            return out
+
+
+def _resolved(entry: dict) -> tuple[str, str]:
+    """(id, mimeType) for an entry, following a shortcut to its target.
+
+    Shortcuts are what you get by dragging a folder into another Drive, so a
+    source folder full of them is an ordinary thing rather than an edge case."""
+    if entry.get("mimeType") == SHORTCUT_MIME:
+        details = entry.get("shortcutDetails") or {}
+        return details.get("targetId") or "", details.get("targetMimeType") or ""
+    return entry.get("id") or "", entry.get("mimeType") or ""
+
+
+def folder_info(folder_id: str) -> dict:
+    """Metadata for a folder we intend to READ, with a usable error if we can't.
+
+    resolve_target() is not used here on purpose — it insists on a Shared Drive
+    because it is about writing. Reading needs no quota, so refusing a My Drive
+    folder here would reject a source that works perfectly well."""
+    if not folder_id:
+        raise DriveError("No Google Drive folder link was given.")
+    try:
+        meta = service().files().get(
+            fileId=folder_id, fields="id, name, mimeType, shortcutDetails",
+            supportsAllDrives=True).execute()
+    except Exception as exc:  # noqa: BLE001
+        message = str(exc)
+        if "default credentials were not found" in message.lower():
+            raise DriveError(_no_credentials_help("Drive")) from exc
+        raise DriveError(
+            f"Could not open the Drive folder `{folder_id}`. Either the link is "
+            "wrong, or the service account has not been given access to it — "
+            "share the folder with the service account's address (Viewer is "
+            f"enough to read clips from it).\n\nRaw error: {exc}"
+        ) from exc
+
+    target_id, target_mime = _resolved(meta)
+    if target_mime != FOLDER_MIME:
+        raise DriveError(
+            f"“{meta.get('name')}” is a file, not a folder. Paste the link of "
+            "the folder that holds the clips — open it in Drive and copy the "
+            "URL from the address bar."
+        )
+    return {"id": target_id, "name": meta.get("name") or target_id}
+
+
+def list_videos(folder_id: str, recursive: bool = True,
+                max_files: Optional[int] = None) -> list[dict]:
+    """Every video file under a source folder, as [{id, name, size}].
+
+    Ordering is deterministic — by folder path, then filename — because the
+    names handed to the downloader are de-duplicated positionally. A resumed
+    job has to rebuild the identical list or it would download the same clip
+    again under a different name."""
+    root = folder_info(folder_id)["id"]
+    limit = max_files if max_files is not None else config.DRIVE_MAX_SOURCE_FILES
+
+    found: list[tuple[tuple, str, dict]] = []
+    stack: list[tuple[str, tuple]] = [(root, ())]
+    seen_folders = {root}
+
+    while stack:
+        current, path = stack.pop()
+        for entry in _children(current):
+            entry_id, mime = _resolved(entry)
+            if not entry_id:
+                continue                      # a shortcut to a deleted file
+            name = entry.get("name") or entry_id
+            if mime == FOLDER_MIME:
+                # Depth-capped, and a cycle of shortcuts must not loop forever.
+                if (recursive and len(path) < MAX_SOURCE_DEPTH
+                        and entry_id not in seen_folders):
+                    seen_folders.add(entry_id)
+                    stack.append((entry_id, path + (name,)))
+                continue
+            if not _looks_like_video(name, mime):
+                continue
+            found.append((path, name, {
+                "id": entry_id,
+                "name": name,
+                "size": int(entry.get("size") or 0),
+            }))
+
+    found.sort(key=lambda f: (f[0], f[1], f[2]["id"]))
+    if len(found) > limit:
+        raise DriveError(
+            f"That folder holds {len(found):,} videos, more than the "
+            f"{limit:,}-file limit. Point at a folder with just the clips you "
+            "want, or raise BVG_DRIVE_MAX_SOURCE_FILES."
+        )
+    return [f[2] for f in found]
+
+
+def local_names(files: list[dict]) -> list[str]:
+    """Filesystem-safe, collision-free local names, parallel to `files`.
+
+    Drive is happy to hold three files called `clip.mp4` in one folder, and
+    recursing merges sub-folders into a single flat pool — so uniqueness has to
+    be imposed here or clips would silently overwrite each other."""
+    return unique_names([safe_name(f.get("name") or f.get("id")) for f in files])
+
+
+def download_file(file_id: str, dest: Path, expected_size: int = 0) -> bool:
+    """Stream one Drive file to `dest`. True if bytes moved, False if skipped.
+
+    The bytes land in a `.incoming` sub-folder and are renamed into place only
+    once the transfer completes, so an interrupted download can never be
+    mistaken for a finished clip — by the resume check below, or by the
+    renderer, which would otherwise feed a truncated file to FFmpeg."""
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    # Checked before anything reaches for the network, so a resumed job that
+    # already has every clip costs nothing at all.
+    if dest.is_file() and (not expected_size or dest.stat().st_size == expected_size):
+        return False
+
+    from googleapiclient.http import MediaIoBaseDownload
+
+    staging = dest.parent / _INCOMING
+    staging.mkdir(exist_ok=True)
+    part = staging / (dest.name + ".part")
+
+    request = service().files().get_media(fileId=file_id, supportsAllDrives=True)
+    with open(part, "wb") as handle:
+        downloader = MediaIoBaseDownload(
+            handle, request, chunksize=config.DRIVE_CHUNK_BYTES)
+        done = False
+        while not done:
+            # num_retries gives exponential backoff on 5xx/429 for free, and a
+            # GET is safe to repeat.
+            _status, done = downloader.next_chunk(num_retries=3)
+    part.replace(dest)
+    return True
+
+
+def download_folder(
+    folder_id: str,
+    dest_dir: Path,
+    concurrency: Optional[int] = None,
+    on_progress: Optional[Callable[[int, int], None]] = None,
+) -> dict:
+    """Download every video under a Drive folder into `dest_dir`.
+
+    Returns {folder, files, downloaded, skipped, failed, bytes, errors}.
+    `skipped` counts clips a previous attempt already fetched: the whole point
+    of the size check is that a re-run of a killed job costs only what was
+    actually missing. One bad file is reported rather than raised, exactly as
+    upload_many() does — a single unreadable clip should not throw away a
+    download that otherwise succeeded."""
+    from concurrent.futures import as_completed
+
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    info = folder_info(folder_id)
+    files = list_videos(info["id"])
+    names = local_names(files)
+    total = len(files)
+
+    report = {"folder": info["name"], "folder_id": info["id"], "files": total,
+              "downloaded": 0, "skipped": 0, "failed": 0, "bytes": 0,
+              "errors": []}
+    if not total:
+        return report
+
+    def _one(pair):
+        entry, name = pair
+        try:
+            moved = download_file(entry["id"], dest_dir / name, entry["size"])
+            return name, moved, entry["size"], None
+        except Exception as exc:  # noqa: BLE001 — reported per file
+            return name, False, 0, exc
+
+    workers = concurrency or config.DRIVE_DOWNLOAD_CONCURRENCY
+    done = 0
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futures = [pool.submit(_one, pair) for pair in zip(files, names)]
+        for future in as_completed(futures):
+            name, moved, size, error = future.result()
+            done += 1
+            if error is not None:
+                report["failed"] += 1
+                report["errors"].append(f"{name}: {error}")
+                logger.warning("Drive download failed for %s: %s", name, error)
+            elif moved:
+                report["downloaded"] += 1
+                report["bytes"] += size
+            else:
+                report["skipped"] += 1
+            if on_progress:
+                on_progress(done, total)
+
+    # Best effort: an empty staging folder is litter, and a non-empty one holds
+    # only the debris of failed transfers.
+    staging = dest_dir / _INCOMING
+    if staging.is_dir():
+        import shutil
+
+        shutil.rmtree(staging, ignore_errors=True)
+    return report
+
+
+def check_source(link: str) -> tuple[bool, str]:
+    """Can we READ this folder, and what is in it?
+
+    Separate from check_access() on purpose: that proves we can *write* into a
+    Shared Drive, which a source folder never has to allow."""
+    folder_id = extract_id(link or "")
+    if not folder_id:
+        return False, "Paste a Google Drive folder link first."
+    try:
+        info = folder_info(folder_id)
+        files = list_videos(info["id"])
+    except DriveError as exc:
+        return False, str(exc)
+    except Exception as exc:  # noqa: BLE001
+        return False, f"Could not read that folder: {exc}"
+
+    if not files:
+        return False, (
+            f"“{info['name']}” opened fine, but there are no video files in it "
+            f"(looked in its sub-folders too). {folder_link(info['id'])}"
+        )
+    size_gb = sum(f["size"] for f in files) / 1024 ** 3
+    return True, (
+        f"“{info['name']}” — **{len(files):,} clips**, {size_gb:.2f} GB. "
+        "They'll be downloaded straight to the server when the batch runs."
+    )
 
 
 # --------------------------------------------------------------------------- checks

@@ -628,9 +628,11 @@ def _scrapes_with_clips() -> list[dict]:
 available = _scrapes_with_clips()
 clip_source = st.radio(
     "Where do the clips come from?",
-    options=["upload", "scrape_job", "scrape_now"],
+    options=["upload", "drive_folder", "scrape_job", "scrape_now"],
     format_func=lambda m: {
         "upload": "Upload files in the sidebar (as before)",
+        "drive_folder": "Paste a Google Drive folder link — the server "
+                        "downloads them itself (no upload)",
         "scrape_job": f"Use a previous scrape already on this machine "
                       f"({len(available)} available)",
         "scrape_now": "Scrape a TikTok account now, as part of this run",
@@ -639,7 +641,64 @@ clip_source = st.radio(
 )
 
 clip_params: dict = {}
-if clip_source == "scrape_job":
+if clip_source == "drive_folder":
+    st.caption(
+        "The clips never touch your browser: the server fetches them straight "
+        "from Drive when the batch runs, which is Google-to-Google rather than "
+        "up your own connection. Share the folder with the service account "
+        "first — read access is enough, and unlike the *upload* destination it "
+        "can be an ordinary My Drive folder."
+    )
+    drive_clip_layout = st.radio(
+        "Folder layout",
+        options=["per_slot", "pooled"],
+        format_func=lambda m: {
+            "per_slot": "One folder per clip slot (same as the sidebar uploaders)",
+            "pooled": "One folder for everything — deal the clips across the slots",
+        }[m],
+        horizontal=False,
+        help="Per-slot keeps control of which clip plays where. Pooled is the "
+             "unattended version: every clip in the folder is used, spread "
+             "evenly across the slots and never used twice.",
+    )
+    clip_params["drive_clip_layout"] = drive_clip_layout
+
+    if drive_clip_layout == "per_slot":
+        clip_params["clips_drive_folders"] = [
+            st.text_input(
+                f"Clip {i} — Drive folder link", key=f"cta_clip_drive_{i}",
+                placeholder="https://drive.google.com/drive/folders/…",
+                help="The folder holding this position's sample videos. Leave "
+                     "blank to skip this slot.",
+            ).strip()
+            for i in range(1, cta_slot_count + 1)
+        ]
+        _links_to_check = [(f"Clip {i}", link) for i, link
+                           in enumerate(clip_params["clips_drive_folders"], start=1)
+                           if link]
+    else:
+        clip_params["clips_drive_folder"] = st.text_input(
+            "Drive folder link", key="cta_clips_drive_pooled",
+            placeholder="https://drive.google.com/drive/folders/…",
+            help="Every video in this folder — and its sub-folders — becomes "
+                 "part of the pool.",
+        ).strip()
+        _links_to_check = ([("Clips", clip_params["clips_drive_folder"])]
+                           if clip_params["clips_drive_folder"] else [])
+
+    # Checking here costs one API call and saves finding out three minutes into
+    # a multi-hour job that the folder was never shared.
+    if st.button("🔍 Check the folder(s)", disabled=not _links_to_check):
+        from integrations import drive as _drv
+
+        with st.spinner("Reading Drive…"):
+            for _label, _link in _links_to_check:
+                _ok, _msg = _drv.check_source(_link)
+                (st.success if _ok else st.error)(f"**{_label}** — {_msg}")
+    elif not _links_to_check:
+        st.caption("Paste a folder link to enable the check.")
+
+elif clip_source == "scrape_job":
     if not available:
         st.warning(
             "No finished scrape has clips on this machine. Run one from the "
@@ -669,11 +728,18 @@ elif clip_source == "scrape_now":
     clip_params["trim_duration"] = col_d.number_input(
         "Trim length (s)", 1.0, 60.0, settings.SCRAPE_TRIM_DURATION, 0.5)
 
-if clip_source in ("scrape_job", "scrape_now"):
+if clip_source != "upload":
     st.caption(
-        "The sidebar clip uploaders are ignored in this mode — clips are taken "
-        "from the scrape instead."
+        "The sidebar clip uploaders are ignored in this mode — clips come from "
+        + ("Drive instead. The sidebar's *Number of clip slots* and the per-clip "
+           "speeds still apply." if clip_source == "drive_folder"
+           else "the scrape instead.")
     )
+    # Both non-upload sources fill the same cta_slot_N folders, so the slot
+    # count has to travel with the job.
+    clip_params["slots"] = int(cta_slot_count)
+
+if clip_source in ("scrape_job", "scrape_now"):
     col_st, col_ps = st.columns(2)
     clip_params["clip_strategy"] = col_st.selectbox(
         "Which clips to use",
@@ -687,7 +753,6 @@ if clip_source in ("scrape_job", "scrape_now"):
     )
     clip_params["clips_per_slot"] = col_ps.number_input(
         "Clips per slot", 1, 50, 10, 1)
-    clip_params["slots"] = int(cta_slot_count)
 
 # ---- captions
 st.subheader("4. Captions")
@@ -1027,6 +1092,16 @@ if row_edits and excel_file is not None and not generate_clicked:
 if generate_clicked and ready and caption_mode == "generate"         and not caption_params.get("caption_theme", "").strip():
     st.error("Not queued — set a caption theme first, or choose “Use the "
              "active caption pool”.")
+    generate_clicked = False
+
+if generate_clicked and ready and clip_source == "drive_folder" and not any(
+    clip_params.get("clips_drive_folders")
+    or [clip_params.get("clips_drive_folder")]
+):
+    # Queuing a job whose clips have nowhere to come from only moves the
+    # failure into the worker, minutes later and on another page.
+    st.error("Not queued — paste at least one Google Drive folder link for the "
+             "clips, or choose a different clip source.")
     generate_clicked = False
 
 if generate_clicked and ready:

@@ -273,6 +273,42 @@ at video 250 of 300 costs the one video in flight, not the 250 already done.
 Uploaded assets are deleted as soon as a job finishes; finished job folders are reaped
 after a configurable retention period (7 days by default).
 
+### Where the CTA clips come from
+
+Step **3. CTA clips** on the Generate page picks the source. All four end up in the same
+place — `assets/cta_slot_N/` — so the renderer cannot tell which was used.
+
+| Source | What it does |
+|---|---|
+| **Upload files in the sidebar** | The original path: one uploader per clip slot |
+| **Paste a Google Drive folder link** | The server downloads the clips from Drive itself — nothing goes through your browser |
+| **Use a previous scrape on this machine** | Clips a TikTok scrape already left on the VM, selected in place |
+| **Scrape a TikTok account now** | Scrape and render as one submitted job |
+
+**The Drive option is there because uploading is the slow part.** If the clips already live
+in Drive, a browser upload drags them down your home connection and pushes the same bytes
+straight back to Google. Pasting a link keeps it Google-to-Google, at the VM's bandwidth
+rather than yours, and the batch is queued the instant you click Generate.
+
+Two layouts:
+
+* **One folder per clip slot** — exactly what the sidebar uploaders do, so which clip plays
+  in which position stays yours to decide. Leave a slot's link blank to skip it.
+* **One folder for everything** — every video in the folder (sub-folders included) is dealt
+  evenly across the slots, shuffled, and never used twice.
+
+Notes:
+
+* Share the source folder with the service account first — **Viewer is enough**. Unlike the
+  *upload destination*, a source folder does **not** have to be in a Shared Drive: reading
+  uses nobody's storage quota, so an ordinary My Drive folder is fine.
+* **🔍 Check the folder(s)** reports the clip count and total size before you commit to a
+  multi-hour run — one API call instead of finding out from the Jobs page later.
+* Sub-folders are searched, shortcuts are followed, and non-videos are ignored. Duplicate
+  filenames are made unique so nothing is silently overwritten.
+* Downloads resume: a job that dies part-way re-fetches only what is actually missing,
+  and a half-written file is never mistaken for a finished clip.
+
 ## The other pages
 
 | Page | What it does |

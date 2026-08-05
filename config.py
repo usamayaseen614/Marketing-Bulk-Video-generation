@@ -148,6 +148,16 @@ DRIVE_UPLOAD_CONCURRENCY = _int("BVG_DRIVE_UPLOAD_CONCURRENCY", 8)
 DRIVE_UPLOAD_ATTEMPTS = _int("BVG_DRIVE_UPLOAD_ATTEMPTS", 3)
 DRIVE_CHUNK_BYTES = _int("BVG_DRIVE_CHUNK_BYTES", 8 * 1024 * 1024)
 
+# Pulling CTA clips from a Drive folder instead of uploading them through the
+# browser. The VM's link to Google is an order of magnitude faster than a home
+# connection, so this is server-to-server work the browser never touches.
+DRIVE_DOWNLOAD_CONCURRENCY = _int("BVG_DRIVE_DOWNLOAD_CONCURRENCY", 8)
+
+# A guard against pointing the app at someone's entire Drive by accident.
+# Deliberately an error rather than a silent truncation — quietly using the
+# "first 5,000" of a folder is how you get a batch built from the wrong clips.
+DRIVE_MAX_SOURCE_FILES = _int("BVG_DRIVE_MAX_SOURCE_FILES", 5000)
+
 
 def drive_configured(override: str = "") -> bool:
     """True when there is somewhere to upload to.

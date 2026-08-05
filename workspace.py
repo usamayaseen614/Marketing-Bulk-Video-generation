@@ -25,6 +25,17 @@ from typing import Optional
 
 MAX_PROMO_VIDEOS = 10
 
+# What counts as a clip once it is sitting on disk. One definition, because
+# three places have to agree: the Drive downloader deciding what to fetch, the
+# pipeline gathering a clip pool, and this module handing slots to the
+# renderer. They diverged once — Drive fetched .mov files the pool then ignored
+# — and the symptom was clips that vanished between two green log lines.
+VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
+
+
+def is_video(path: Path) -> bool:
+    return Path(path).suffix.lower() in VIDEO_SUFFIXES
+
 
 @dataclass
 class Workspace:
@@ -114,8 +125,11 @@ def workspace_from_dir(assets: Path, work_dir: Path) -> Workspace:
         (p for p in assets.glob("cta_slot_*") if p.is_dir()),
         key=lambda p: int(p.name.rsplit("_", 1)[1]),
     )
+    # Only actual videos: a slot folder can pick up junk (a Thumbs.db, a
+    # half-written download) and everything in it is handed straight to FFmpeg.
     cta_video_slots = [
-        sorted(f for f in slot.iterdir() if f.is_file()) for slot in slot_dirs
+        sorted(f for f in slot.iterdir() if f.is_file() and is_video(f))
+        for slot in slot_dirs
     ]
 
     # input.mp4 first, then input_2.mp4 … input_10.mp4 in numeric order.
