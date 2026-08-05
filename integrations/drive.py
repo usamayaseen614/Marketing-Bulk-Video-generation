@@ -395,11 +395,27 @@ def upload_many(
 
 # --------------------------------------------------------------------------- checks
 
-def check_access() -> tuple[bool, str]:
-    """Diagnostic for the setup page: can we actually write where we're aimed?"""
-    if not config.drive_configured():
+def check_access(target: Optional[str] = None) -> tuple[bool, str]:
+    """Diagnostic for the setup page: can we actually write where we're aimed?
+
+    `target` tests one specific folder link instead of the configured default —
+    worth doing before pointing a multi-hour job at somewhere new. The override
+    is always cleared afterwards so it cannot leak into later calls on this
+    thread."""
+    if target is not None:
+        set_target(target)
+    try:
+        return _check_access_inner()
+    finally:
+        if target is not None:
+            set_target(None)
+
+
+def _check_access_inner() -> tuple[bool, str]:
+    if not _configured_target():
         return False, ("No Drive destination configured — set "
-                       "BVG_DRIVE_SHARED_DRIVE_ID (a pasted folder URL is fine).")
+                       "BVG_DRIVE_SHARED_DRIVE_ID (a pasted folder URL is fine), "
+                       "or paste a link above to test one directly.")
     try:
         drive_id, parent_id = resolve_target()
         info = service().drives().get(driveId=drive_id, fields="id, name").execute()
@@ -480,6 +496,12 @@ def check_access() -> tuple[bool, str]:
             service().files().delete(fileId=file_id, supportsAllDrives=True).execute()
         except Exception:  # noqa: BLE001
             leftovers.append(name)
+
+    # The probe folder is litter if it survives; removing it is best effort.
+    try:
+        service().files().delete(fileId=target, supportsAllDrives=True).execute()
+    except Exception:  # noqa: BLE001
+        pass
 
     note = ""
     if leftovers:

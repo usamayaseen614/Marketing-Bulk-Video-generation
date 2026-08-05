@@ -140,6 +140,29 @@ if st.button("Test Drive access", disabled=not settings.drive_configured()):
         ok, message = drive.check_access()
     (st.success if ok else st.error)(message)
 
+# Jobs can carry their own destination now, so any link should be checkable
+# before a multi-hour batch is pointed at it.
+st.markdown("**Test a specific folder link**")
+st.caption(
+    "Generate and the Scraper both accept a per-job Drive link. Paste one here "
+    "to check it first — this does a real upload and a real server-side copy, "
+    "then removes what it made."
+)
+custom_link = st.text_input(
+    "Folder link or ID", value="", label_visibility="collapsed",
+    placeholder="https://drive.google.com/drive/folders/…",
+)
+if st.button("Test this link", disabled=not custom_link.strip()):
+    from integrations import drive
+    with st.spinner("Checking that link…"):
+        ok, message = drive.check_access(target=custom_link.strip())
+    (st.success if ok else st.error)(message)
+    if ok:
+        st.caption(
+            "Paste this same link into the job's *Google Drive folder link* "
+            "field to send that batch here."
+        )
+
 with st.expander("Drive setup steps"):
     st.markdown(
         """
