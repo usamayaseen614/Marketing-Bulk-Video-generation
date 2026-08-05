@@ -66,6 +66,29 @@ def make_generator(ws: Workspace, config: RenderConfig, output_dir: Path) -> Vid
     return generator
 
 
+def hashtag_template_bytes() -> bytes:
+    """A ready-to-edit hashtag workbook.
+
+    Generated rather than shipped as a file: sample_assets/ is excluded from
+    the container image, so a committed sample would exist in the repo and be
+    missing on the VM — exactly where it is needed."""
+    rows = [
+        "#asmr #satisfying #fyp #viral #foryou",
+        "#plushie #cozy #asmr #softtoy #foryou",
+        "#relaxing #calm #sleep #asmr #unwind",
+        "#oddlysatisfying #aesthetic #viral #fyp",
+        "#tiktokmademebuyit #musthave #trending #fyp",
+        "#selfcare #cozyvibes #comfort #foryou",
+        "#asmrsounds #tingles #relax #fypage",
+        "#giftideas #cute #plushies #trending",
+    ]
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        pd.DataFrame({"Hashtags": rows}).to_excel(
+            writer, sheet_name="Hashtags", index=False)
+    return buf.getvalue()
+
+
 def apply_saved_edits(df: pd.DataFrame, edits: dict[int, dict]) -> pd.DataFrame:
     """Overlay values saved from the preview editor onto the uploaded sheet.
     Keys are 1-based data row numbers (1 = first row below the header)."""
@@ -686,8 +709,42 @@ if hashtag_source == "excel":
         help="e.g. a column of rows like '#asmr #satisfying #fyp'. They are "
              "cycled across the batch, so the spread is even.",
     )
-    if hashtag_file is None:
-        st.caption("No file yet — the caption pool's hashtags will be used until one is uploaded.")
+    col_t, col_p = st.columns([1, 2])
+    with col_t:
+        st.download_button(
+            "⬇️ Sample file",
+            data=hashtag_template_bytes(),
+            file_name="hashtags_sample.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            help="A ready-to-edit workbook — replace the rows with your own.",
+        )
+    with col_p:
+        if hashtag_file is None:
+            st.warning(
+                "**No file yet** — the caption pool's hashtags will be used "
+                "instead. Upload one, or switch the setting above."
+            )
+        else:
+            # Parsed here, not at render time, so a wrong column or an empty
+            # sheet is obvious now rather than after a multi-hour job.
+            try:
+                from captions import naming
+                preview = pd.read_excel(io.BytesIO(hashtag_file.getvalue()),
+                                        engine="openpyxl")
+                parsed = [" ".join(naming.parse_hashtags(v))
+                          for v in preview.iloc[:, 0].tolist()]
+                parsed = [p for p in parsed if p]
+                if not parsed:
+                    st.error(
+                        "No hashtags found in the first column. Each row should "
+                        "hold one set, e.g. `#asmr #satisfying #fyp`."
+                    )
+                else:
+                    st.success(f"**{len(parsed)} hashtag set(s)** read from "
+                               f"`{hashtag_file.name}`.")
+                    st.caption("First few: " + " · ".join(parsed[:3]))
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Couldn't read that file: {exc}")
 
 if caption_mode == "generate":
     caption_params["generate_pool"] = True
