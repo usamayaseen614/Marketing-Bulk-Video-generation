@@ -23,7 +23,14 @@ from pathlib import Path
 from typing import Optional
 
 
-MAX_PROMO_VIDEOS = 10
+# How many promo videos one render may cycle through, one per batch.
+#
+# Kept in step with the "Batches to render" and "Output folders" limits in
+# app.py: the batch count DEFAULTS to the number of promos uploaded, so a cap
+# here above those widgets' max_value makes Streamlit throw on the upload that
+# crosses it — the page dies rather than the value being clamped. See
+# MAX_PASSES there, which is derived from this.
+MAX_PROMO_VIDEOS = 20
 
 # What counts as a clip once it is sitting on disk. One definition, because
 # three places have to agree: the Drive downloader deciding what to fetch, the

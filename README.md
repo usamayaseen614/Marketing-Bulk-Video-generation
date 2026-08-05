@@ -320,7 +320,7 @@ Notes:
 ### Batches, mixing, and the two filenames
 
 One sheet becomes **`batches × rows`** videos. Set *Batches to render* and the sheet is
-rendered that many times — each pass uses the **next promo video** (upload up to 10) and
+rendered that many times — each pass uses the **next promo video** (upload up to 20) and
 a different variant salt, so every pass picks different CTA clips. The finished videos
 are then **mixed evenly across the output folders**, so no folder is just one promo
 video, and each folder gets an equal share of every batch.

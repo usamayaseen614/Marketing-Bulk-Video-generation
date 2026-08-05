@@ -870,12 +870,19 @@ st.subheader("5. Generate")
 
 # One sheet becomes `batches x rows` videos: the same rows rendered once per
 # batch, each pass with a different promo video and different clip picks.
+#
+# Never below MAX_PROMO_VIDEOS: the batch count's DEFAULT is however many
+# promos were uploaded, and Streamlit raises rather than clamps when a default
+# lands above max_value — so a promo cap above this limit would take the whole
+# page down on the upload that crossed it, not merely refuse the extra passes.
+MAX_PASSES = max(20, MAX_PROMO_VIDEOS)
+
 col_b, col_f = st.columns(2)
 # Default to one pass per promo, which is the pairing people expect: every row
 # rendered once with every promo.
 _n_promos = max(1, len(promo_files or []))
 n_batches = col_b.number_input(
-    "Batches to render", 1, 20, _n_promos, 1, disabled=not ready,
+    "Batches to render", 1, MAX_PASSES, _n_promos, 1, disabled=not ready,
     help="How many times the sheet is rendered. Each pass uses the next promo "
          "video and picks different sample clips. Set this to the number of "
          "promos and every row is rendered once with every promo.",
@@ -887,7 +894,7 @@ if _n_promos > 1 and int(n_batches) < _n_promos:
         f"{_n_promos} to render every row with every promo."
     )
 n_folders = col_f.number_input(
-    "Output folders", 1, 20, int(n_batches), 1, disabled=not ready,
+    "Output folders", 1, MAX_PASSES, int(n_batches), 1, disabled=not ready,
     help="Finished videos are mixed evenly across this many Drive folders, so "
          "no folder is just one promo video. Usually the same as the batch count.",
 )
