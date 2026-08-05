@@ -264,7 +264,16 @@ def build_pool(theme: Optional[str] = None,
     model = model or config.GEMINI_POOL_MODEL
 
     captions = generate_captions(theme, caption_count, model, progress)
-    hashtags = generate_hashtag_sets(theme, hashtag_count, model, progress)
+
+    # hashtag_count=0 means the hashtags are coming from somewhere else (an
+    # uploaded sheet, or none at all). Asking Gemini for sets that will be
+    # discarded at naming time is pure waste, so skip the calls entirely and
+    # store one empty set to keep the pool's arithmetic valid.
+    if hashtag_count > 0:
+        hashtags = generate_hashtag_sets(theme, hashtag_count, model, progress)
+    else:
+        logger.info("Skipping hashtag generation — they come from elsewhere")
+        hashtags = [""]
 
     pool_id = store.save_pool(theme, captions, hashtags, model=model)
     logger.info("Built caption pool %s: %d captions x %d hashtag sets = %s pairs",

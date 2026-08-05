@@ -698,11 +698,29 @@ if caption_mode == "generate":
         help="The single biggest lever on caption quality — be specific about "
              "the product and the audience.",
     )
-    col_cc, col_hh = st.columns(2)
-    caption_params["caption_count"] = col_cc.number_input(
-        "Captions", 50, 5000, 500, 50)
-    caption_params["hashtag_count"] = col_hh.number_input(
-        "Hashtag sets", 25, 2000, 100, 25)
+    if hashtag_source == "pool":
+        col_cc, col_hh = st.columns(2)
+        caption_params["caption_count"] = col_cc.number_input(
+            "Captions", 50, 5000, 500, 50)
+        caption_params["hashtag_count"] = col_hh.number_input(
+            "Hashtag sets", 25, 2000, 100, 25)
+    else:
+        # Generating hashtag sets that an uploaded sheet would immediately
+        # override is money spent on output nobody sees.
+        caption_params["caption_count"] = st.number_input(
+            "Captions", 50, 5000, 500, 50)
+        caption_params["hashtag_count"] = 0
+        st.caption(
+            "Only captions will be generated — hashtags come from "
+            + ("your uploaded file." if hashtag_source == "excel"
+               else "nowhere, by choice.")
+        )
+    if not caption_params["caption_theme"].strip():
+        st.error(
+            "A caption theme is required to generate a pool — it is what the "
+            "captions are about. Enter one, or switch to “Use the active "
+            "caption pool”."
+        )
     if not settings.gemini_configured():
         st.warning("Vertex AI isn't configured — this stage will be skipped and "
                    "files will fall back to Headline names.")
@@ -903,6 +921,11 @@ if row_edits and excel_file is not None and not generate_clicked:
     if col_clear.button("🗑️ Discard saved edits"):
         st.session_state.pop("row_edits", None)
         st.rerun()
+
+if generate_clicked and ready and caption_mode == "generate"         and not caption_params.get("caption_theme", "").strip():
+    st.error("Not queued — set a caption theme first, or choose “Use the "
+             "active caption pool”.")
+    generate_clicked = False
 
 if generate_clicked and ready:
     # Submitting is a two-step dance: reserve an id, stage the uploads into its

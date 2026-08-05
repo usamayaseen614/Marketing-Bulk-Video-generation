@@ -564,8 +564,11 @@ def _coprime_stride(total: int) -> int:
 def save_pool(theme: str, captions: list[str], hashtags: list[str],
               model: str = "") -> str:
     """Store a new pool and make it the active one."""
-    if not captions or not hashtags:
-        raise ValueError("A pool needs at least one caption and one hashtag set.")
+    if not captions:
+        raise ValueError("A pool needs at least one caption.")
+    # A single empty set is legitimate: hashtags may come from an uploaded
+    # sheet, or be switched off entirely.
+    hashtags = list(hashtags) or [""]
     pool_id = uuid.uuid4().hex[:12]
     with _conn() as conn:
         conn.execute("BEGIN IMMEDIATE")

@@ -174,7 +174,12 @@ def _captions_stage(job: dict, params: dict) -> dict:
     job_id = job["id"]
     theme = (params.get("caption_theme") or "").strip()
     if not theme:
-        return {"skipped": "no theme given"}
+        # Silently skipping here meant "Generate a fresh pool" appeared to do
+        # nothing and the old pool was used instead — with no way to tell.
+        raise RuntimeError(
+            "Caption generation was requested but no theme was given. The theme "
+            "is what the captions are about, so there is nothing to generate "
+            "from. Either set one or choose “Use the active caption pool”.")
 
     existing = store.active_pool()
     if existing and not params.get("force_new_pool"):
@@ -187,10 +192,13 @@ def _captions_stage(job: dict, params: dict) -> dict:
     def progress(done: int, total: int) -> None:
         store.heartbeat(job_id, stage=f"captions {done}/{total}")
 
+    # Only generate hashtag sets if the pool is actually the hashtag source.
+    wants_pool_hashtags = params.get("hashtag_source", "pool") == "pool"
     return pool_module.build_pool(
         theme=theme,
         caption_count=int(params.get("caption_count") or config.CAPTION_POOL_SIZE),
-        hashtag_count=int(params.get("hashtag_count") or config.HASHTAG_POOL_SIZE),
+        hashtag_count=(int(params.get("hashtag_count") or config.HASHTAG_POOL_SIZE)
+                       if wants_pool_hashtags else 0),
         progress=progress,
     )
 
