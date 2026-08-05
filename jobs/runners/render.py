@@ -41,6 +41,7 @@ import logging
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -123,13 +124,17 @@ def _assign_names(job_id: str, slots: list[Slot], n_rows: int,
 
     A caption identifies one *video*, not one sheet row — ten batches of the
     same row are ten separate posts and must not share a caption. So the draw
-    is per item, and the pool's no-repeat guarantee covers all
-    `batches x rows` of them.
+    is per item, and every pool caption in a job is different from every other:
+    take_captions makes the caption the unit that cannot repeat, because a
+    short filename is caption + one hashtag, so two videos handed the same
+    caption collide on their name no matter how their hashtags differ.
 
     Precedence, highest first:
       1. a `Caption` the user typed into the sheet — hand-written always wins,
-         and it is reused across batches because the user asked for that text
-      2. a pair drawn from the active caption pool
+         and it is reused across batches because the user asked for that text.
+         This is the one source that can still collide, and therefore the only
+         place a ` (2)` suffix can now come from
+      2. a caption drawn from the active caption pool — never repeated
       3. the row's `Headline`, which is how files were named before captions
          existed — without this fallback a batch run with no pool would name
          every single video `video.mp4`
@@ -157,8 +162,18 @@ def _assign_names(job_id: str, slots: list[Slot], n_rows: int,
     pool = store.active_pool()
     drawn: dict = {}
     if pool and need_pool:
-        for slot, pair in zip(need_pool, store.take_combinations(pool["id"], len(need_pool))):
-            drawn[slot] = pair
+        try:
+            pairs = store.take_captions(pool["id"], len(need_pool))
+        except store.PoolTooSmall as exc:
+            # Before a single frame is rendered: a job that cannot name its
+            # videos apart is not worth the hours of FFmpeg it would cost.
+            raise RuntimeError(
+                f"{exc}\n\nEvery video needs a caption of its own — that is "
+                f"what stops two files in one Drive folder sharing a name. "
+                f"Generate a fresh pool on the Setup page (a pool is spent "
+                f"once its captions are used), or lower “Batches to render”."
+            ) from exc
+        drawn = dict(zip(need_pool, pairs))
 
     # Hashtags may come from somewhere other than the pool entirely.
     override = _hashtag_override(job_id, params or {})
@@ -328,25 +343,36 @@ def _render_batches(job: dict, df: pd.DataFrame, ws, n_batches: int,
 
 # --------------------------------------------------------------------------- upload
 
-def _prefixed(name: str, prefix: str) -> str:
-    """Tag a filename for its platform, keeping the length cap intact.
+def _drive_stamp() -> str:
+    """The name of a job's Drive folder: sortable, and unique to the run.
 
-    The 90-character rule covers the caption and its hashtags; the prefix and
-    the extension are added on top, so a tagged file is at most 97 characters
-    — still far inside every filesystem limit."""
-    from captions import naming
+    Milliseconds because a plain date collided in two ways — two jobs sharing a
+    label on the same day merged into one folder (ensure_folder deliberately
+    reuses), and a job that ran past midnight split across two of them."""
+    now = datetime.now()
+    return now.strftime("%Y-%m-%d_%H-%M-%S.") + f"{now.microsecond // 1000:03d}"
 
-    stem = name[:-4] if name.lower().endswith(".mp4") else name
-    # The 90-character rule applies to the caption and its hashtags. The
-    # platform prefix is a file tag rather than part of the caption, so it sits
-    # outside that count instead of eating three characters of it.
-    return f"{prefix} {stem[:naming.MAX_STEM].rstrip()}.mp4"
+
+def _drive_root_stamp(job_id: str, params: dict) -> str:
+    """The stamp for this job, decided once and reused by every resume.
+
+    Derived fresh each run it would be a *different* folder every time, so a
+    requeued job would scatter one batch across as many folders as it took
+    attempts. Persisted on first use instead."""
+    stamp = (params.get("drive_stamp") or "").strip()
+    if stamp:
+        return stamp
+    stamp = _drive_stamp()
+    params["drive_stamp"] = stamp
+    store.merge_job_params(job_id, drive_stamp=stamp)
+    return stamp
 
 
 def _upload(job: dict, n_rows: int, n_folders: int, placement: dict) -> dict:
     """Upload each video twice — short name uploaded, long name server-copied."""
     job_id = job["id"]
     params = job.get("params") or {}
+    job["params"] = params
     destination = params.get("drive_folder") or ""
     if not config.drive_configured(destination):
         logger.info("Job %s: Drive not configured — videos stay on the VM", job_id)
@@ -360,7 +386,8 @@ def _upload(job: dict, n_rows: int, n_folders: int, placement: dict) -> dict:
 
     try:
         label = job.get("label") or job_id
-        root = drive.ensure_path(["renders", time.strftime("%Y-%m-%d"), label])
+        root = drive.ensure_path(
+            ["renders", _drive_root_stamp(job_id, params), label])
         link = drive.folder_link(root)
         # Two folders per batch: the short single-hashtag name under yt/, the
         # long all-hashtags name under tk/. Keeping both in one folder meant
@@ -406,29 +433,39 @@ def _upload(job: dict, n_rows: int, n_folders: int, placement: dict) -> dict:
 
         folder = placement.get(Slot(batch=batch, row=row_no), 1)
         targets = folder_ids.get(folder) or {"yt": root, "tk": root}
-        short = _prefixed(meta.get("short_name") or src.name, "yt")
-        long_name = _prefixed(meta.get("long_name") or short, "tk")
+        # The platform is the FOLDER, not the filename: yt/ takes the short
+        # name, tk/ the long one. Tagging the name too would put "yt " in front
+        # of a caption that is meant to be pasted as-is.
+        short = meta.get("short_name") or src.name
+        long_name = meta.get("long_name") or short
 
         try:
+            # Both Drive writes follow the same rule: record the id the INSTANT
+            # the write succeeds, in its own DB update, and skip the write when
+            # its id is already recorded. The worker can die between any two
+            # statements here; what makes that survivable is that each write's
+            # record and the write itself are never more than one statement
+            # apart. (The copy used to run unguarded — a worker killed between
+            # the copy and the 'done' write re-copied on resume, and Drive
+            # happily stores two same-named files in one folder.)
             file_id = meta.get("drive_file_id")
             if not file_id:
                 uploaded = drive.upload_file(src, targets["yt"], short)
                 file_id = uploaded["id"]
-                # Recorded BEFORE the copy: if the copy fails or the process
-                # dies between the two calls, the resume knows the bytes are
-                # already in Drive and only needs to make the copy. This is
-                # what makes the `drive_file_id and not copy_file_id` branch
-                # reachable instead of dead.
                 meta["drive_file_id"] = file_id
                 store.update_item(job_id, item["idx"], drive_file_id=file_id,
                                   meta=meta)
 
-            copied = drive.copy_file(file_id, long_name, targets["tk"])
-            meta["copy_file_id"] = copied.get("id")
+            if not meta.get("copy_file_id"):
+                copied = drive.copy_file(file_id, long_name, targets["tk"])
+                meta["copy_file_id"] = copied.get("id")
+                meta["copy_link"] = copied.get("webViewLink")
+                store.update_item(job_id, item["idx"], meta=meta)
+
             store.update_item(
                 job_id, item["idx"], upload_status=store.ITEM_DONE,
                 upload_error=None, drive_file_id=file_id,
-                drive_link=copied.get("webViewLink"), meta=meta)
+                drive_link=meta.get("copy_link"), meta=meta)
             return True
         except Exception as exc:  # noqa: BLE001 — reported per file
             logger.warning("Job %s: upload failed for item %s: %s",
@@ -500,8 +537,6 @@ def _write_manifests(job_id: str, n_rows: int, n_folders: int,
             "Sheet_Row": row_no,
             "Caption": meta.get("caption", ""),
             "Hashtags": meta.get("hashtags", ""),
-            "YT_Filename": _prefixed(meta.get("short_name", item.get("name", "")), "yt"),
-            "TK_Filename": _prefixed(meta.get("long_name", ""), "tk"),
             "Short_Filename": meta.get("short_name", item.get("name", "")),
             "Long_Filename": meta.get("long_name", ""),
             "Promo": meta.get("promo", ""),

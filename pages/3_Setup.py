@@ -195,13 +195,19 @@ st.subheader("✍️ Captions & hashtags")
 
 pool = store.active_pool()
 if pool:
-    st.success(
-        f"Active pool `{pool['id']}` — **{len(pool['captions']):,} captions x "
-        f"{len(pool['hashtags']):,} hashtag sets = "
-        f"{pool['combinations']:,} unique pairs**. "
-        f"{pool['cursor']:,} used so far "
-        f"({pool['combinations'] - pool['cursor']:,} left before any repeat)."
+    unused, total = store.pool_remaining(pool["id"])
+    # Captions, not combinations, is the number that matters: every video takes
+    # one and no caption is ever reused, so this IS the videos remaining.
+    summary = (
+        f"Active pool `{pool['id']}` — **{unused:,} of {total:,} captions "
+        f"left**, drawn against {len(pool['hashtags']):,} hashtag set(s)."
     )
+    if unused:
+        st.success(f"{summary} Good for **{unused:,} more videos** "
+                   f"(`batches x rows`) before a fresh pool is needed.")
+    else:
+        st.warning(f"{summary} This pool is **spent** — generate a new one, or "
+                   f"the next batch will be refused before it renders.")
     st.caption(f"Theme: {pool.get('theme')}")
     with st.expander("Sample from this pool"):
         for caption, tags in zip(pool["captions"][:5], pool["hashtags"][:5]):
@@ -213,10 +219,12 @@ else:
     )
 
 st.caption(
-    "Captions are generic and built around a theme you choose. A pool is "
-    "generated occasionally and recombined per batch, so there is no model call "
-    "per video — 2,000 captions x 500 hashtag sets is a million unique pairs, "
-    "about a year and a half of output at 2,000 videos a day."
+    "Captions are generic and built around a theme you choose, so there is no "
+    "model call per video. **Every video takes one caption and no caption is "
+    "ever reused** — that is what stops two files in a Drive folder sharing a "
+    "name — so generate at least as many captions as `batches x rows`, and a "
+    "fresh pool once this one is spent. Hashtag sets are reused freely, so a "
+    "small number of them is fine."
 )
 
 theme = st.text_input(

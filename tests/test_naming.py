@@ -79,8 +79,34 @@ for n in (0, 1, 3, 5, 12, 30):
     a, b = naming.build_names("caption text", " ".join(f"#x{i}" for i in range(n)))
     assert a.count("#") <= 1, (n, a)
     assert b.count("#") <= 5, (n, b)
+    assert n == 0 or b.count("#") >= 1, (n, b)
     assert len(a[:-4]) <= STEM and len(b[:-4]) <= STEM
-print("across 0/1/3/5/12/30 supplied: short <=1, long <=5, both inside their caps")
+print("across 0/1/3/5/12/30 supplied: short <=1, long 1..5, both inside their caps")
+
+# ---------- the long form drops hashtags to keep the caption whole ----------
+# A 50-char caption beside five long hashtags does not fit in 90. Cutting the
+# caption is what used to happen, and it is what makes two different captions
+# collide on one name. The hashtags give way instead.
+long_tags = "#skincareroutine #asmrsounds #foryoupage #glowuptips #selfcaresunday"
+caption50 = "Your evening routine deserves better than this"
+_s, l_fit = naming.build_names(caption50, long_tags)
+assert caption50 in l_fit, f"caption was truncated: {l_fit}"
+assert 1 <= l_fit.count("#") < 5, l_fit
+assert len(l_fit[:-4]) <= STEM, len(l_fit)
+print(f"\ncaption kept whole, {l_fit.count('#')} of 5 hashtags carried:")
+print("  ", l_fit)
+
+# Two captions sharing a long prefix must NOT collide once the tags give way.
+a1, l1 = naming.build_names("Your evening routine deserves better than A", long_tags)
+a2, l2 = naming.build_names("Your evening routine deserves better than B", long_tags)
+assert l1 != l2, (l1, l2)
+print("  captions sharing a 40-char prefix stay distinct:", l1 != l2)
+
+# But when the caption cannot fit whole even beside ONE hashtag, dropping tags
+# buys nothing — it is truncated either way, so the full set is carried.
+_s, l_big = naming.build_names("word " * 60, "#alpha #beta #gamma")
+assert l_big.count("#") == 3, l_big
+print("  un-fittable caption keeps all 3 hashtags rather than losing them")
 
 # ---------- word-boundary truncation, not mid-word ----------
 s, _ = naming.build_names("The quick brown fox jumps over the lazy dog and keeps running forever onwards", "#tag")

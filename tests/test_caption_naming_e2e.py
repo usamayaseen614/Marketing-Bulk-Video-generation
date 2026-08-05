@@ -136,4 +136,34 @@ pool = store.active_pool()
 assert pool["cursor"] == len(df), f"cursor={pool['cursor']}, rows={len(df)}"
 print(f"\npool cursor advanced to {pool['cursor']} (= {len(df)} rows)")
 
+# ---- a pool too small to name every video must stop BEFORE rendering -------
+# 5 rows x 2 batches = 10 videos, and the stub pool holds 5 captions. Repeating
+# one and bolting ' (2)' onto the filename is exactly what we refuse to do.
+job2 = store.new_job_id()
+store.make_job_dirs(job2)
+stage_uploads(store.assets_dir(job2), Fake(SA / "promo.mp4"),
+              Fake(SA / "backgrounds.zip"), None, None,
+              [[Fake(SA / "cta_video_1.mp4")]])
+df.to_excel(store.assets_dir(job2) / "input.xlsx", index=False, engine="openpyxl")
+store.create_job(
+    kind=store.KIND_RENDER,
+    params={"render_config": asdict(RenderConfig(crf=30, preset="veryfast")),
+            "workers": 4, "make_zip": False, "batches": 2},
+    label="pool-too-small", items=[{"idx": i} for i in range(1, len(df) * 2 + 1)],
+    job_id=job2,
+)
+cursor_before = store.active_pool()["cursor"]
+worker.main(["--once"])
+
+failed = store.get_job(job2)
+assert failed["status"] == store.STATUS_FAILED, failed["status"]
+error = failed.get("error") or ""
+assert "10" in error and "5" in error, error
+assert "caption" in error.lower(), error
+# Nothing may have rendered, and the pool must not have been consumed.
+assert not list(store.videos_dir(job2).rglob("*.mp4")), "rendered despite the shortfall"
+assert store.active_pool()["cursor"] == cursor_before, "a refused job ate captions"
+print("\npool too small -> job failed before rendering, pool untouched:")
+print("  ", error.splitlines()[0])
+
 print("\nCAPTION NAMING E2E PASSED")

@@ -4,7 +4,7 @@ captions/naming.py — the two filenames each video is published under.
 Every video goes to Drive twice under different names:
 
   SHORT  caption + exactly ONE hashtag
-  LONG   caption + up to FIVE hashtags
+  LONG   caption + ONE to FIVE hashtags — as many as fit beside the caption
 
 Both are capped at **90 characters of name** — the caption and its hashtags.
 The ".mp4" is outside that count, so the cap applies to the text you actually
@@ -38,10 +38,12 @@ MAX_SHORT = MAX_STEM + len(EXTENSION)
 MAX_LONG = MAX_STEM + len(EXTENSION)
 
 # Hashtags per name. The short form carries exactly one — the tag doing the
-# reach work. The long form carries up to five: enough to matter, few enough
-# that the caption is still readable in a file listing.
+# reach work. The long form carries one to five: five when they fit, fewer when
+# the caption needs the room. Never zero, so the two names always differ in
+# kind rather than one of them silently becoming the short name again.
 MAX_SHORT_HASHTAGS = 1
 MAX_LONG_HASHTAGS = 5
+MIN_LONG_HASHTAGS = 1
 
 # Characters no Windows/Drive filename may contain, plus control characters.
 _ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -181,17 +183,32 @@ def build_names(caption, hashtags, ext: str = EXTENSION,
     if len(short) > max_short:
         short = _finalize(short[: max_short - len(ext)].rstrip(), ext)
 
-    # ---- long: caption + up to max_long_tags hashtags
+    # ---- long: caption + one to max_long_tags hashtags
     tags = tags[:max(0, int(max_long_tags))]
-    tail = " ".join(tags)
-    if tail:
+    if tags:
+        # Hashtags give way before the caption does. The caption is what makes
+        # this name identify one video — two videos whose captions were cut to
+        # a shared prefix collide, and then the name needs a ' (2)' that says
+        # nothing about what is in the file. The tags past the first are
+        # decoration by comparison, so they are what gets dropped.
+        wanted = list(tags)
+        while (len(tags) > MIN_LONG_HASHTAGS
+               and len(caption) > max_long - len(ext) - 1 - len(" ".join(tags))):
+            tags.pop()
+        if len(caption) > max_long - len(ext) - 1 - len(" ".join(tags)):
+            # Even one hashtag leaves the caption truncated, so dropping tags
+            # bought nothing — it is being cut either way. Carry the full set
+            # rather than losing hashtags for no gain.
+            tags = wanted
+        tail = " ".join(tags)
         budget = max_long - len(ext) - 1 - len(tail)
         if budget < 8:
-            # Too many hashtags to fit any caption — drop tags from the end.
-            while tags and budget < 8:
-                tags.pop()
-                tail = " ".join(tags)
-                budget = max_long - len(ext) - 1 - len(tail)
+            # One hashtag so long it crowds out the caption even alone. Keep a
+            # hashtag — the rule is never zero — but cut it, exactly as the
+            # short name does.
+            tags = [tags[0][:max(2, max_long - len(ext) - 1 - 20)]]
+            tail = " ".join(tags)
+            budget = max_long - len(ext) - 1 - len(tail)
         long_stem = f"{_truncate_words(caption, budget)} {tail}".strip()
     else:
         long_stem = _truncate_words(caption, max_long - len(ext))

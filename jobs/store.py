@@ -263,6 +263,35 @@ def get_job(job_id: str) -> Optional[dict]:
     return _job_from_row(row) if row else None
 
 
+def merge_job_params(job_id: str, **values) -> dict:
+    """Merge keys into a job's params and return the merged dict.
+
+    For values a run has to *decide* and then keep deciding the same way on
+    every resume. The Drive timestamp is the case this exists for: derived
+    fresh each run it would send a requeued job to a brand-new folder, so it is
+    written back the first time it is computed and read from here thereafter.
+
+    Read-modify-write inside BEGIN IMMEDIATE, since the Streamlit process may
+    be writing the same row."""
+    with _conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT params_json FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                conn.execute("ROLLBACK")
+                return dict(values)
+            params = json.loads(row["params_json"] or "{}")
+            params.update(values)
+            conn.execute("UPDATE jobs SET params_json=? WHERE id=?",
+                         (json.dumps(params), job_id))
+            conn.execute("COMMIT")
+            return params
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+
 def list_jobs(limit: int = 50, kinds: Optional[Iterable[str]] = None,
               statuses: Optional[Iterable[str]] = None) -> list[dict]:
     """Newest first — what the Jobs page renders."""
@@ -663,6 +692,91 @@ def take_combinations(pool_id: str, count: int) -> list[tuple[str, str]]:
         combo = (n * stride) % total
         out.append((captions[combo // len(hashtags)], hashtags[combo % len(hashtags)]))
     return out
+
+
+class PoolTooSmall(RuntimeError):
+    """The pool cannot give every video a caption of its own."""
+
+    def __init__(self, needed: int, available: int, total: int):
+        self.needed = int(needed)
+        self.available = int(available)      # never used before
+        self.total = int(total)              # in the pool at all
+        super().__init__(
+            f"The active caption pool has {self.available:,} unused caption(s) "
+            f"left of {self.total:,}, but this job needs {self.needed:,} — one "
+            f"per video, and a caption is never used twice."
+        )
+
+
+def take_captions(pool_id: str, count: int) -> list[tuple[str, str]]:
+    """Hand out `count` pairs whose **captions** are all different.
+
+    take_combinations guarantees distinct caption+hashtag *pairings*, which is
+    a weaker promise than it looks: one caption appears once per hashtag set,
+    so two videos in the same job can be handed the same caption with different
+    tags. A short filename is caption + the *first* hashtag only, so that is a
+    duplicate name — and the old answer was to bolt ` (2)` onto it, which turns
+    two identical captions into two files pretending to be versions of each
+    other.
+
+    Walking the caption list instead makes the caption the unit that cannot
+    repeat: the same coprime-stride trick, but over `len(captions)`.
+
+    **The walk never laps.** A pool is a consumable of exactly `len(captions)`
+    videos — once the cursor reaches the end, the pool is spent and the next
+    job is refused rather than quietly starting the captions over. That is what
+    makes "one caption, one video" true across jobs and not merely inside one:
+    since the cursor only ever moves forward through a single lap, and
+    multiplying by a coprime stride is a bijection, every caption in the pool is
+    handed out exactly once in its lifetime.
+
+    Raises PoolTooSmall rather than repeating a caption — a job that cannot
+    name its videos uniquely should stop before it renders anything, not after.
+    """
+    with _conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT captions_json, hashtags_json, cursor FROM caption_pools "
+                "WHERE id=?", (pool_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"No caption pool {pool_id!r}")
+            captions = json.loads(row["captions_json"])
+            # save_pool already normalises an empty list to [""]; belt and
+            # braces, since a pool row can predate that.
+            hashtags = json.loads(row["hashtags_json"]) or [""]
+            start = int(row["cursor"])
+            unused = max(0, len(captions) - start)
+            if int(count) > unused:
+                raise PoolTooSmall(count, unused, len(captions))
+            conn.execute("UPDATE caption_pools SET cursor=? WHERE id=?",
+                         (start + int(count), pool_id))
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+    # start + count <= len(captions) is guaranteed above, so every index below
+    # is a first visit. Hashtags DO repeat — deliberately: with the caption
+    # already unique per video, the tags carry no naming duty at all.
+    c_n, h_n = len(captions), len(hashtags)
+    stride, hstride = _coprime_stride(c_n), _coprime_stride(h_n)
+    return [
+        (captions[(n * stride) % c_n], hashtags[(n * hstride) % h_n])
+        for n in range(start, start + int(count))
+    ]
+
+
+def pool_remaining(pool_id: Optional[str] = None) -> tuple[int, int]:
+    """(unused, total) captions for a pool — what a job may still draw.
+
+    A pool is spent once `unused` hits zero, so this is the number worth
+    showing next to “Batches to render” rather than the pool's size."""
+    pool = active_pool() if pool_id is None else get_pool(pool_id)
+    if not pool:
+        return 0, 0
+    total = len(pool["captions"])
+    return max(0, total - int(pool.get("cursor") or 0)), total
 
 
 # --------------------------------------------------------------------------- folders

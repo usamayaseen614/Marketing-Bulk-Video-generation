@@ -336,7 +336,9 @@ def copy_file(file_id: str, new_name: str, parent_id: Optional[str] = None) -> d
         fileId=file_id, body=body,
         fields="id, name, webViewLink",
         supportsAllDrives=True,
-    ).execute()
+        # Same exponential backoff on 5xx/429 the chunked upload gets from
+        # next_chunk — without it, one transient 500 failed the whole item.
+    ).execute(num_retries=3)
 
 
 def upload_with_copy(path: Path, parent_id: str, primary_name: str,

@@ -122,4 +122,37 @@ assert j2 in removed and not store.job_dir(j2).is_dir(), removed
 assert store.get_job(j2) is not None, "history row must survive the reaper"
 print("reaper removed folders, kept history:", removed)
 
+# --- merge_job_params: the Drive stamp must survive a resume ----------------
+j3 = store.create_job(kind=store.KIND_RENDER, params={"folders": 3},
+                      label="stamped")
+merged = store.merge_job_params(j3, drive_stamp="2026-08-05_14-23-45.123")
+assert merged["drive_stamp"] == "2026-08-05_14-23-45.123", merged
+assert merged["folders"] == 3, "merge must not drop existing params"
+assert store.get_job(j3)["params"] == merged, "params must round-trip"
+
+# merging again leaves earlier keys alone
+store.merge_job_params(j3, drive_folder="https://drive/x")
+again = store.get_job(j3)["params"]
+assert again["drive_stamp"] == "2026-08-05_14-23-45.123", again
+assert again["folders"] == 3 and again["drive_folder"] == "https://drive/x", again
+assert store.merge_job_params("no-such-job", k="v") == {"k": "v"}
+print("merge_job_params ok:", again)
+
+# the pinning itself: decided once, identical on every later run
+from jobs.runners import render as render_runner
+
+j4 = store.create_job(kind=store.KIND_RENDER, params={}, label="pin")
+p4: dict = store.get_job(j4)["params"]
+first = render_runner._drive_root_stamp(j4, p4)
+assert p4["drive_stamp"] == first, p4
+# a "resumed" run re-reads params from the database and must not re-stamp
+p4_reload = store.get_job(j4)["params"]
+assert p4_reload["drive_stamp"] == first, p4_reload
+time.sleep(0.02)
+assert render_runner._drive_root_stamp(j4, p4_reload) == first, "re-stamped on resume!"
+# and a fresh stamp really does move
+assert render_runner._drive_stamp() != first
+assert len(first) == len("2026-08-05_14-23-45.123"), first
+print("drive stamp pinned across resume:", first)
+
 print("\nALL STORE TESTS PASSED")

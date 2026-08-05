@@ -294,7 +294,7 @@ Every video is published to Drive **twice**, under two names built from its capt
 | | Contents | Limit |
 |---|---|---|
 | **Short** | caption + **exactly one** hashtag | **max 90 characters** (`.mp4` not counted) |
-| **Long** | caption + **up to five** hashtags | **max 90 characters** (`.mp4` not counted) |
+| **Long** | caption + **one to five** hashtags | **max 90 characters** (`.mp4` not counted) |
 
 ```
 Your skin will thank you for this one #skincare.mp4
@@ -306,8 +306,42 @@ caption you will actually post. **Emoji are stripped** — from the caption text
 well as the filename (`BVG_FILENAME_KEEP_EMOJI=true` keeps them). There is no numeric
 prefix; collisions get a ` (2)` suffix that stays inside the cap.
 
+In the long name the **caption never gives way to a hashtag**. Five long tags plus a
+caption exceed 90 characters, and cutting the caption is what makes two different
+captions collide on one filename — so hashtags are dropped instead, down to a floor of
+one. A 46-character caption beside five 12-character tags comes out carrying three:
+
+```
+Your evening routine deserves better than this #skincareroutine #asmrsounds #foryoupage.mp4
+```
+
+The exception is a caption too long to fit even beside a single hashtag: it is being
+truncated either way, so the full set is kept rather than losing tags for nothing.
+
 The second copy is made with Drive's **server-side `files.copy`**, so the bytes cross the
 network once — at 10,000 videos that's ~80 GB of upload instead of ~160 GB.
+
+The two names land in **separate subfolders**, so each folder listing shows every video
+exactly once:
+
+```
+<your Drive folder>/renders/2026-08-05_14-23-45.123/<batch label>/
+├── batch_01/
+│   ├── yt/   ← the short name (one hashtag)
+│   └── tk/   ← the long name (up to five)
+├── batch_02/
+│   ├── yt/
+│   └── tk/
+└── …
+```
+
+The platform is the **folder**, never the filename — nothing is prefixed onto the caption,
+so the name stays paste-ready exactly as shown above.
+
+That timestamp is **to the millisecond**, and it is stamped once when the job first
+uploads, not re-derived per run. Two batches submitted under the same label never merge
+into one folder, a job that uploads past midnight stays in one place, and a job that
+crashes and resumes writes back into the folder it started.
 
 Each output folder gets a `batch_NN_manifest.xlsx` listing exactly what landed in it —
 caption, hashtags, and both filenames — plus a combined `render_manifest.xlsx`. After
@@ -317,9 +351,32 @@ kept alongside it unchanged.
 ### Captions
 
 Captions are generic and themed: a pool of ~2,000 captions × ~500 hashtag sets is
-generated occasionally (Setup page) and recombined per video, giving a million unique
-pairs with no model call per video. A caption identifies one *video*, not one sheet row —
-ten batches of the same row are ten separate posts and each draws its own pair.
+generated occasionally (Setup page) and recombined per video, with no model call per
+video. A caption identifies one *video*, not one sheet row — ten batches of the same row
+are ten separate posts and each draws its own.
+
+**No caption is ever used twice in one job.** That is stricter than it sounds, and it is
+the rule the filenames depend on: a short filename is the caption plus *one* hashtag, so
+two videos sharing a caption collide on their name however much their hashtag sets
+differ. The draw therefore walks the caption list rather than the caption × hashtag grid.
+
+So the pool must hold at least **`batches × rows`** captions. If it doesn't, the job stops
+before rendering and says by how much — a batch that cannot name its videos apart is not
+worth the hours of FFmpeg it would cost. Generate a larger pool, or render fewer batches.
+
+**A pool is a consumable, not a cycle.** It is worth exactly as many videos as it holds
+captions, and it never starts over: once its captions are used the next job is refused
+and you generate a fresh pool. That is what makes "one caption, one video" true *across*
+runs and not just inside one. The Setup page shows how many are left.
+
+Hashtags are the opposite — they repeat freely, and the hashtag pool can be small. With
+the caption already unique per video, the tags carry no naming duty at all; a handful of
+sets is enough. (Keep at least two tags per set, or the short and long names come out
+identical.)
+
+The one exception is a `Caption` you type into the sheet yourself: that text is reused
+across every batch, because you asked for that exact wording. Those are the only files
+that can still pick up a ` (2)` suffix.
 
 ## Deployment
 

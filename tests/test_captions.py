@@ -52,6 +52,88 @@ b = set(store.take_combinations(p3, 500))
 assert not (a & b), "cursor did not persist — overlap between draws"
 print("cursor persists: two 500-draws from one pool never overlap")
 
+# ---------- one caption per video, never repeated ----------
+# take_combinations only promises distinct PAIRS: caption 7 comes back once per
+# hashtag set. A short filename is caption + the first hashtag, so two videos
+# handed the same caption collide on their name. take_captions is the draw the
+# renderer uses, and it makes the caption itself the thing that cannot repeat.
+p4 = store.save_pool("t4", caps, tags)
+drawn = store.take_captions(p4, 40)
+assert len(drawn) == 40, len(drawn)
+assert len({c for c, _ in drawn}) == 40, "a caption was handed out twice"
+assert len({t for _, t in drawn}) > 15, "hashtags stopped spreading"
+print(f"take_captions(40): {len({c for c, _ in drawn})} distinct captions, "
+      f"{len({t for _, t in drawn})} distinct hashtag sets")
+
+# The exact case that used to produce ' (2)': same caption, different tags.
+by_caption: dict[str, set] = {}
+for caption, tag in drawn:
+    by_caption.setdefault(caption, set()).add(tag)
+assert all(len(v) == 1 for v in by_caption.values()), \
+    "same caption reappeared with a different hashtag set"
+
+# The cursor carries, so a second job never reuses the first job's captions.
+p5 = store.save_pool("t5", caps, tags)
+first = {c for c, _ in store.take_captions(p5, 20)}
+second = {c for c, _ in store.take_captions(p5, 20)}
+assert not (first & second), sorted(first & second)
+print("two 20-caption draws from one pool share no caption")
+
+def _cursor(pool_id: str) -> int:
+    return next(p["cursor"] for p in store.list_pools(limit=50)
+                if p["id"] == pool_id)
+
+
+# p5 has now handed out all 40 of its captions, so it is SPENT. The pool never
+# laps: starting the captions over would silently reuse them across jobs, which
+# is the thing "one caption, one video" is supposed to rule out.
+before = _cursor(p5)
+assert before == 40, before
+try:
+    store.take_captions(p5, 1)
+    raise AssertionError("a spent pool handed out a caption again")
+except store.PoolTooSmall as exc:
+    assert exc.available == 0 and exc.total == 40 and exc.needed == 1, exc
+    print("spent pool ->", exc)
+
+# ...and the rejected draw must not have consumed anything.
+assert _cursor(p5) == before, (_cursor(p5), before)
+print("a rejected draw leaves the cursor untouched at", before)
+
+# The shortfall is measured in UNUSED captions, not pool size: a pool with 30
+# left refuses a 31-video job even though it holds 40 in total.
+p6 = store.save_pool("t6", caps, tags)
+store.take_captions(p6, 10)
+try:
+    store.take_captions(p6, 31)
+    raise AssertionError("PoolTooSmall was not raised")
+except store.PoolTooSmall as exc:
+    assert (exc.needed, exc.available, exc.total) == (31, 30, 40), exc
+    assert "30" in str(exc) and "40" in str(exc) and "31" in str(exc), str(exc)
+    print("partially used pool ->", exc)
+
+# Every caption in a pool is handed out exactly once over its whole life,
+# however many jobs it takes to get through it.
+small = store.save_pool("t7", [f"c{i}" for i in range(12)], ["#h0", "#h1"])
+spent: list[tuple[str, str]] = []
+for _ in range(3):
+    job_draw = store.take_captions(small, 4)
+    assert len({c for c, _ in job_draw}) == 4, job_draw
+    spent.extend(job_draw)
+assert len({c for c, _ in spent}) == 12, sorted(c for c, _ in spent)
+assert store.pool_remaining(small) == (0, 12), store.pool_remaining(small)
+# Hashtags repeat freely — with the caption unique, they carry no naming duty.
+assert len({t for _, t in spent}) == 2, "hashtags should be reused"
+print(f"12 captions across 3 jobs of 4: each used exactly once, "
+      f"hashtags reused ({len({t for _, t in spent})} sets for 12 videos)")
+
+# Exactly enough is fine; a one-caption pool can still serve a one-video job —
+# and is spent the moment it does.
+tiny = store.save_pool("t8", ["only one"], ["#x"])
+assert store.take_captions(tiny, 1) == [("only one", "#x")]
+assert store.pool_remaining(tiny) == (0, 1), store.pool_remaining(tiny)
+print("edge cases ok: exact fit spends the pool")
+
 # ---------- realistic scale ----------
 big_caps = [f"c{i}" for i in range(2000)]
 big_tags = [f"t{i}" for i in range(500)]
