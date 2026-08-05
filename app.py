@@ -806,11 +806,21 @@ st.subheader("5. Generate")
 # One sheet becomes `batches x rows` videos: the same rows rendered once per
 # batch, each pass with a different promo video and different clip picks.
 col_b, col_f = st.columns(2)
+# Default to one pass per promo, which is the pairing people expect: every row
+# rendered once with every promo.
+_n_promos = max(1, len(promo_files or []))
 n_batches = col_b.number_input(
-    "Batches to render", 1, 20, 1, 1, disabled=not ready,
-    help="The sheet is rendered this many times. Each pass uses the next promo "
-         "video and picks different sample clips, so the batches differ.",
+    "Batches to render", 1, 20, _n_promos, 1, disabled=not ready,
+    help="How many times the sheet is rendered. Each pass uses the next promo "
+         "video and picks different sample clips. Set this to the number of "
+         "promos and every row is rendered once with every promo.",
 )
+if _n_promos > 1 and int(n_batches) < _n_promos:
+    st.warning(
+        f"Only {int(n_batches)} pass(es) but {_n_promos} promo videos — promos "
+        f"{int(n_batches) + 1}–{_n_promos} would never be used. Set batches to "
+        f"{_n_promos} to render every row with every promo."
+    )
 n_folders = col_f.number_input(
     "Output folders", 1, 20, int(n_batches), 1, disabled=not ready,
     help="Finished videos are mixed evenly across this many Drive folders, so "
@@ -819,12 +829,16 @@ n_folders = col_f.number_input(
 if ready and df is not None:
     total_videos = len(df) * int(n_batches)
     promo_count = len(promo_files or [])
-    note = (f"**{len(df):,} rows x {int(n_batches)} batches = "
+    note = (f"**{len(df):,} rows x {int(n_batches)} passes = "
             f"{total_videos:,} videos**, mixed across {int(n_folders)} folders, "
             f"each uploaded twice ({total_videos * 2:,} Drive files).")
-    if promo_count and int(n_batches) > promo_count:
-        note += (f" Only {promo_count} promo video(s) uploaded, so they cycle "
-                 f"across the {int(n_batches)} batches.")
+    if promo_count > 1 and int(n_batches) == promo_count:
+        note += (f" Every row is rendered once with each of the {promo_count} "
+                 "promos — all pairings, no repeats.")
+    elif promo_count and int(n_batches) > promo_count:
+        note += (f" Only {promo_count} promo video(s), so they cycle across the "
+                 f"{int(n_batches)} passes — each pairing occurs "
+                 f"{int(n_batches) // promo_count}x.")
     st.caption(note)
     if total_videos > 3000:
         st.warning(
