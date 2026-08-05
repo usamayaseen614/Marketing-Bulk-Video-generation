@@ -414,6 +414,20 @@ The one exception is a `Caption` you type into the sheet yourself: that text is 
 across every batch, because you asked for that exact wording. Those are the only files
 that can still pick up a ` (2)` suffix.
 
+**How long a pool takes.** It is built in chunks of ~100 captions per model call, so 5,000
+captions is ~50 calls at roughly half a minute each. Those calls run **concurrently**
+(8 at a time by default, `BVG_CAPTION_CONCURRENCY`), which is what turns half an hour of
+waiting into a few minutes — the chunks are independent single-turn requests, so nothing
+is lost by overlapping them. Uniqueness is enforced locally by de-duplication, never by
+the model, and the work comes in rounds: enough chunks to cover what's missing, then more
+if de-duplication left a shortfall. Throttled chunks (429) are retried with jittered
+backoff, and a chunk that can't be saved costs that chunk rather than the whole pool.
+
+If it's still slower than you want, the model is a setting — `BVG_GEMINI_POOL_MODEL`.
+`gemini-2.5-pro` is the default because a pool is generated rarely and its quality carries
+across every video that reuses it; `gemini-2.5-flash` is several times faster and much
+cheaper if you'd rather have the throughput.
+
 ## Deployment
 
 For team use, deploy on a single GCP Compute Engine VM (Docker image included) —

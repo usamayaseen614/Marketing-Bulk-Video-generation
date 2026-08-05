@@ -21,14 +21,35 @@ generation, with Pro at $1.25/$10 per million input/output tokens. A full
 Vertex AI is used rather than the Gemini Developer API so the app keeps using
 the credentials it already has — the VM's attached service account — with no
 separate key to store or leak.
+
+## Why the chunks run concurrently
+
+A pool is built in chunks of ~100, and every chunk is an independent
+single-turn request — nothing is threaded through as conversation history, so
+chunk 40 knows nothing about chunk 1 and could not echo it if it tried.
+Uniqueness comes from the `seen` set here, not from the model. Running the
+chunks one at a time therefore bought nothing at all: 5,000 captions is 50
+calls of ~35 seconds, and half an hour of that is a process sitting idle
+waiting on HTTP.
+
+They are issued through a bounded pool instead. Bounded rather than all-at-once
+because Vertex throttles, and because the shortfall after de-duplication is
+only known once the responses are back — so the work naturally comes in rounds:
+issue enough chunks to cover what is missing, see what survives dedup, issue
+more if short.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
+import random
 import re
-from typing import Iterable, Optional
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Callable, Iterable, Optional
 
 import config
 
@@ -61,6 +82,18 @@ HASHTAG_SCHEMA = {
 # One call cannot reliably emit 2,000 varied strings, so the pool is built in
 # chunks with a varying angle per chunk to keep them from converging.
 CHUNK_SIZE = 100
+
+# A round issues enough chunks to cover the shortfall, then measures what
+# survived de-duplication. Normally two or three rounds are enough. The cap
+# exists for the pathological case — a model that has run dry and returns a
+# trickle of new strings forever — and stopping short is always logged, because
+# a pool quietly smaller than asked for is exactly the kind of thing that only
+# shows up later as "the caption pool is too small for this job".
+MAX_ROUNDS = 8
+
+# HTTP statuses worth trying again. 429 is the one that matters: with chunks in
+# flight concurrently it is a normal thing to meet, not an error.
+_RETRY_STATUSES = {408, 429, 500, 502, 503, 504}
 
 _ANGLES = [
     "curiosity gap — imply something the viewer needs to see",
@@ -102,25 +135,77 @@ def _client():
     )
 
 
-def _generate(client, prompt: str, schema: dict, model: Optional[str] = None) -> dict:
+_local = threading.local()
+
+
+def _thread_client():
+    """The Vertex client for the calling thread.
+
+    The SDK's client is believed to be safe to share, but the Drive code
+    already keeps a per-thread client because its transport is definitively
+    not — and a client is cheap to build. Following the same pattern removes
+    the question rather than resting on a belief."""
+    existing = getattr(_local, "client", None)
+    if existing is None:
+        existing = _local.client = _client()
+    return existing
+
+
+def _is_transient(exc: Exception) -> bool:
+    """Whether asking again is likely to work.
+
+    A 429 or a 503 is the service saying "not now"; a 403 is it saying "no".
+    Retrying the second kind just turns a clear failure into a slow one."""
+    code = getattr(exc, "code", None)
+    if isinstance(code, int):
+        return code in _RETRY_STATUSES
+    text = str(exc).lower()
+    return any(word in text for word in
+               ("timeout", "timed out", "deadline exceeded", "connection reset",
+                "connection aborted", "temporarily unavailable"))
+
+
+def _generate(client, prompt: str, schema: dict, model: Optional[str] = None,
+              attempts: Optional[int] = None) -> dict:
+    """One constrained call, retried on the failures that are worth retrying.
+
+    An empty or unparseable response is retried too. With `response_schema`
+    set, malformed JSON means the answer was cut off rather than that the model
+    misunderstood — so it is a transport-shaped problem, and asking again is
+    the right move."""
     from google.genai import types
 
-    response = client.models.generate_content(
-        model=model or config.GEMINI_POOL_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=schema,
-            temperature=1.0,   # variety is the whole point here
-        ),
-    )
-    text = (response.text or "").strip()
-    if not text:
-        raise CaptionError("Gemini returned an empty response.")
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise CaptionError(f"Gemini returned unparseable JSON: {text[:200]}") from exc
+    attempts = attempts or config.CAPTION_MAX_ATTEMPTS
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            response = client.models.generate_content(
+                model=model or config.GEMINI_POOL_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                    temperature=1.0,   # variety is the whole point here
+                ),
+            )
+            text = (response.text or "").strip()
+            if not text:
+                raise CaptionError("Gemini returned an empty response.")
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise CaptionError(
+                    f"Gemini returned unparseable JSON: {text[:200]}") from exc
+        except Exception as exc:  # noqa: BLE001 — classified immediately below
+            retryable = isinstance(exc, CaptionError) or _is_transient(exc)
+            if attempt >= attempts or not retryable:
+                raise
+            # Jittered, so eight throttled chunks don't all come back at once
+            # and trip the same limit again in lockstep.
+            delay = min(2 ** attempt, 30) * (0.5 + random.random())
+            logger.warning("Gemini call failed (attempt %d/%d, retrying in "
+                           "%.1fs): %s", attempt, attempts, delay, exc)
+            time.sleep(delay)
+    raise CaptionError("unreachable")  # pragma: no cover — loop always returns
 
 
 def _clean_caption(text: str) -> str:
@@ -155,18 +240,103 @@ def _clean_hashtags(text: str) -> str:
     return " ".join(out[:12])
 
 
+def _fill(count: int, make_prompt: Callable[[int, int], str], schema: dict,
+          key: str, clean: Callable[[str], str], label: str,
+          model: Optional[str] = None, progress=None) -> list[str]:
+    """Build a list of `count` distinct strings by running chunks concurrently.
+
+    `make_prompt(chunk_no, want)` writes one chunk's prompt; `key` is the field
+    to read out of the response; `clean` normalises one string.
+
+    All state — the output list, the `seen` set, the progress callback — is
+    touched only on this thread, as futures land. The workers do nothing but
+    make a call and hand back raw strings, so there is no shared state to lock
+    and no ordering to get wrong."""
+    # Built here, on this thread, purely so a misconfiguration (no project, SDK
+    # missing) surfaces as itself instead of arriving 50 times over as "every
+    # request failed".
+    _client()
+
+    out: list[str] = []
+    seen: set[str] = set()
+    chunk_no = 0
+    workers = max(1, config.CAPTION_CONCURRENCY)
+
+    def _one(number: int, want: int) -> list[str]:
+        return (_generate(_thread_client(), make_prompt(number, want),
+                          schema, model).get(key) or [])
+
+    with ThreadPoolExecutor(max_workers=workers,
+                            thread_name_prefix="caption") as pool:
+        for round_no in range(1, MAX_ROUNDS + 1):
+            missing = count - len(out)
+            if missing <= 0:
+                break
+
+            # Enough chunks to cover the shortfall in one go. They queue behind
+            # the pool's `workers` slots, so this is pipelined rather than a
+            # burst: as one finishes the next starts.
+            futures = {}
+            for _ in range(math.ceil(missing / CHUNK_SIZE)):
+                chunk_no += 1
+                want = min(CHUNK_SIZE, missing)
+                futures[pool.submit(_one, chunk_no, want)] = chunk_no
+
+            fresh = failures = 0
+            first_error: Optional[Exception] = None
+            for future in as_completed(futures):
+                try:
+                    raw_items = future.result()
+                except Exception as exc:  # noqa: BLE001 — reported per chunk
+                    failures += 1
+                    first_error = first_error or exc
+                    logger.warning("%s chunk %d gave up: %s",
+                                   label, futures[future], exc)
+                    continue
+                for raw in raw_items:
+                    value = clean(raw)
+                    marker = value.lower()
+                    if value and marker not in seen:
+                        seen.add(marker)
+                        out.append(value)
+                        fresh += 1
+                if progress:
+                    progress(min(len(out), count), count)
+
+            logger.info("%s: %d/%d after round %d (%d chunk(s), %d new, "
+                        "%d failed)", label, len(out), count, round_no,
+                        len(futures), fresh, failures)
+
+            if failures == len(futures):
+                # Nothing got through at all — a wrong model id, a revoked
+                # permission, an exhausted quota. Returning a silently empty
+                # pool would hide the one thing worth saying.
+                raise CaptionError(
+                    f"Every {label} request failed. Last error: {first_error}"
+                ) from first_error
+            if fresh == 0:
+                # The model has stopped producing anything new; better a
+                # smaller honest pool than an endless loop.
+                logger.warning("%s stopped early at %d of %d — the model "
+                               "returned nothing new.", label, len(out), count)
+                break
+        else:
+            if len(out) < count:
+                logger.warning(
+                    "%s stopped at %d of %d after %d rounds — the model kept "
+                    "repeating itself. Using the smaller pool.",
+                    label, len(out), count, MAX_ROUNDS)
+
+    return out[:count]
+
+
 def generate_captions(theme: str, count: int, model: Optional[str] = None,
                       progress=None) -> list[str]:
     """Generate `count` distinct captions on `theme`."""
-    client = _client()
-    captions: list[str] = []
-    seen: set[str] = set()
-    chunk_no = 0
 
-    while len(captions) < count:
-        angle = _ANGLES[chunk_no % len(_ANGLES)]
-        want = min(CHUNK_SIZE, count - len(captions))
-        prompt = (
+    def make_prompt(chunk_no: int, want: int) -> str:
+        angle = _ANGLES[(chunk_no - 1) % len(_ANGLES)]
+        return (
             f"Write {want} short social-media captions for vertical marketing "
             f"videos (TikTok, Instagram Reels, YouTube Shorts).\n\n"
             f"Theme: {theme}\n"
@@ -179,44 +349,23 @@ def generate_captions(theme: str, count: int, model: Optional[str] = None,
             "- No numbering, quotes, or surrounding punctuation.\n"
             "- Vary sentence shape and length; avoid all of them starting the "
             "same way.\n"
-            f"- These must be distinct from ordinary phrasing you would repeat; "
-            f"set {chunk_no + 1} should not echo earlier sets."
+            f"- Set {chunk_no}: reach for phrasing you would not normally "
+            "repeat."
+            # No "don't echo the earlier sets" instruction: each call is
+            # single-turn, so the model has never seen them. The `seen` set in
+            # _fill is what actually enforces that, and it always did.
         )
-        data = _generate(client, prompt, CAPTION_SCHEMA, model)
-        fresh = 0
-        for raw in data.get("captions") or []:
-            clean = _clean_caption(raw)
-            key = clean.lower()
-            if clean and key not in seen:
-                seen.add(key)
-                captions.append(clean)
-                fresh += 1
-        chunk_no += 1
-        if progress:
-            progress(len(captions), count)
-        logger.info("Caption pool: %d/%d (chunk %d added %d)",
-                    len(captions), count, chunk_no, fresh)
-        if fresh == 0:
-            # The model has stopped producing anything new; better a smaller
-            # honest pool than an infinite loop.
-            logger.warning("Caption generation stopped early at %d — the model "
-                           "returned nothing new.", len(captions))
-            break
 
-    return captions[:count]
+    return _fill(count, make_prompt, CAPTION_SCHEMA, "captions",
+                 _clean_caption, "Caption pool", model, progress)
 
 
 def generate_hashtag_sets(theme: str, count: int, model: Optional[str] = None,
                           progress=None) -> list[str]:
     """Generate `count` distinct hashtag sets on `theme`."""
-    client = _client()
-    sets: list[str] = []
-    seen: set[str] = set()
-    chunk_no = 0
 
-    while len(sets) < count:
-        want = min(CHUNK_SIZE, count - len(sets))
-        prompt = (
+    def make_prompt(chunk_no: int, want: int) -> str:
+        return (
             f"Write {want} hashtag sets for vertical marketing videos "
             f"(TikTok, Instagram Reels, YouTube Shorts).\n\n"
             f"Theme: {theme}\n\n"
@@ -225,27 +374,11 @@ def generate_hashtag_sets(theme: str, count: int, model: Optional[str] = None,
             "- Mix broad reach tags with narrower niche ones.\n"
             "- Letters, numbers and underscores only — no emoji, no punctuation.\n"
             "- No duplicate tags within a set.\n"
-            f"- Set group {chunk_no + 1}: vary the mix from earlier groups."
+            f"- Set group {chunk_no}: vary the mix."
         )
-        data = _generate(client, prompt, HASHTAG_SCHEMA, model)
-        fresh = 0
-        for raw in data.get("hashtag_sets") or []:
-            clean = _clean_hashtags(raw)
-            key = clean.lower()
-            if clean and key not in seen:
-                seen.add(key)
-                sets.append(clean)
-                fresh += 1
-        chunk_no += 1
-        if progress:
-            progress(len(sets), count)
-        logger.info("Hashtag pool: %d/%d (chunk %d added %d)",
-                    len(sets), count, chunk_no, fresh)
-        if fresh == 0:
-            logger.warning("Hashtag generation stopped early at %d.", len(sets))
-            break
 
-    return sets[:count]
+    return _fill(count, make_prompt, HASHTAG_SCHEMA, "hashtag_sets",
+                 _clean_hashtags, "Hashtag pool", model, progress)
 
 
 def build_pool(theme: Optional[str] = None,

@@ -199,6 +199,18 @@ CAPTION_POOL_SIZE = _int("BVG_CAPTION_POOL_SIZE", 2000)
 HASHTAG_POOL_SIZE = _int("BVG_HASHTAG_POOL_SIZE", 500)
 CAPTION_THEME = _str("BVG_CAPTION_THEME")
 
+# A pool is built in chunks of ~100, and the chunks are independent — each is a
+# single-turn request that knows nothing of the others. Running them one after
+# another made a 5,000-caption pool a 30-minute wait for a machine doing
+# nothing but waiting. 8 in flight is the same total token spend, roughly an
+# eighth of the wall-clock, and gentle enough not to trip Vertex's throttling.
+CAPTION_CONCURRENCY = _int("BVG_CAPTION_CONCURRENCY", 8)
+
+# Attempts per chunk before it is given up on. Without this a single 429 threw
+# away the whole pool — which mattered far more once chunks run concurrently
+# and there are more of them in flight to be throttled.
+CAPTION_MAX_ATTEMPTS = _int("BVG_CAPTION_MAX_ATTEMPTS", 4)
+
 
 def gemini_configured() -> bool:
     return bool(GCP_PROJECT)

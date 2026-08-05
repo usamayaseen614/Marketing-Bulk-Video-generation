@@ -1,10 +1,11 @@
 """
 jobs/runners/captions.py — build a caption/hashtag pool in the background.
 
-A full 2,000-caption pool is ~25 model calls and takes several minutes, which
-is too long to hold a browser tab open for. It runs rarely — weekly, or when
-the theme changes — so it reuses the same job machinery as everything else and
-emails when it's done.
+A full 2,000-caption pool is ~20 model calls. They run concurrently (see
+captions/pool.py), so it is minutes rather than the half-hour it used to be —
+but still long enough that holding a browser tab open for it would be wrong.
+It runs rarely — weekly, or when the theme changes — so it reuses the same job
+machinery as everything else and emails when it's done.
 """
 
 from __future__ import annotations
