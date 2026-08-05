@@ -200,7 +200,7 @@ def resolve_target() -> tuple[str, str]:
                 "A service account has no storage of its own, so uploads there "
                 "fail no matter how the folder is shared. Create a Shared Drive "
                 "(drive.google.com → Shared drives → New), move this folder "
-                "into it, add the service account as a Content Manager, and "
+                "into it, share it with the service account as an Editor, and "
                 "paste the new link."
             )
         drive_id, parent_id = meta["driveId"], configured
@@ -453,7 +453,9 @@ def check_access() -> tuple[bool, str]:
                     "has no storage of its own.")
         elif "403" in message:
             hint = ("\n\nAdd the service account to the Shared Drive's members "
-                    "as a Content Manager (Contributor cannot upload).")
+                    "as an Editor — or, if you added it to the Shared Drive itself "
+                    "rather than the folder, a Content Manager. Viewer and "
+                    "Commenter cannot upload.")
         return False, (
             f"Folders can be created in “{info.get('name')}”, but UPLOADING a "
             f"file failed.{hint}\n\nRaw error: {exc}")
@@ -484,7 +486,8 @@ def check_access() -> tuple[bool, str]:
         note = (f"\n\n(Couldn't delete the test file(s) {', '.join(leftovers)} — "
                 "harmless, and the app never deletes anything. Tidy them up by "
                 "hand if you like. It usually means the service account is a "
-                "Contributor rather than a Content Manager on the Shared Drive, "
+                "an Editor on the folder rather than a member of the Shared "
+                "Drive itself, "
                 "which is enough for everything this app does.)")
 
     return True, (

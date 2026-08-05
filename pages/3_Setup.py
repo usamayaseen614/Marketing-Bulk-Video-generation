@@ -149,9 +149,13 @@ with st.expander("Drive setup steps"):
 2. **Find the service account's email.** In Cloud Console → IAM & Admin →
    Service Accounts on project `YOUR_PROJECT_ID`. It ends in
    `.iam.gserviceaccount.com`.
-3. **Add it to the Shared Drive** — open the Shared Drive → *Manage members* →
-   paste that email → set the role to **Content Manager** (not Viewer, or
-   uploads fail) → Send.
+3. **Give it access.** Either route works, and they use different role names:
+   - *Share the folder* (right-click the folder → Share) → role **Editor**.
+     This dialog has no "Content Manager" option — Editor is the top role here.
+   - *Or add it to the Shared Drive* (open the drive → Manage members) → role
+     **Content Manager**.
+
+   Viewer and Commenter are not enough either way.
 4. **Grant the VM the Drive scope.** The VM's token only carries scopes it was
    created with, and `cloud-platform` does *not* include Drive. This needs the
    VM stopped.

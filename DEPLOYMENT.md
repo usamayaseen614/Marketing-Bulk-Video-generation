@@ -360,8 +360,10 @@ it will fail on the first upload:
    If there is no *Shared drives* entry, the account is not on Google Workspace
    and this route will not work.
 2. Open the new Shared Drive → **Manage members** → paste the service account
-   email from above → role **Content Manager** (Viewer or Contributor is not
-   enough) → Send.
+   email from above → role **Content Manager** (Viewer or Commenter is not
+   enough) → Send. If you instead share an individual *folder*, that
+   dialog offers only Viewer / Commenter / **Editor** — pick Editor; it is the
+   top role there and does everything this app needs.
 3. Copy the ID out of the URL: `drive.google.com/drive/folders/`**`<this part>`**.
 
 ### 5c. Settings
