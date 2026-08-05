@@ -3,7 +3,7 @@ tools/seed_demo_pool.py — a fake caption pool, for testing without Gemini.
 
 Caption-based filenames are the part of the pipeline most worth eyeballing, but
 generating a real pool needs Vertex AI configured. This writes a small pool of
-obviously-fake captions so the naming, manifests and the 100-character rule can
+obviously-fake captions so the naming, manifests and the 90-character rule can
 all be exercised end to end first.
 
     python tools/seed_demo_pool.py
@@ -21,7 +21,7 @@ import config  # noqa: E402
 from jobs import store  # noqa: E402
 
 # Deliberately varied: short, long, punctuation, emoji (which must be stripped),
-# and one that would blow the 100-char cap on its own.
+# and one that would blow the 90-char cap on its own.
 CAPTIONS = [
     "This is the one thing nobody tells you about it",
     "Stop scrolling — this actually works",

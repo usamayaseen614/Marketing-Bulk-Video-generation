@@ -293,8 +293,8 @@ Every video is published to Drive **twice**, under two names built from its capt
 
 | | Contents | Limit |
 |---|---|---|
-| **Short** | caption + **exactly one** hashtag | **hard max 100 characters, including `.mp4`** |
-| **Long** | caption + every hashtag | 200 characters |
+| **Short** | caption + **exactly one** hashtag | **max 90 characters** (`.mp4` not counted) |
+| **Long** | caption + **up to five** hashtags | **max 90 characters** (`.mp4` not counted) |
 
 ```
 Your skin will thank you for this one #skincare.mp4

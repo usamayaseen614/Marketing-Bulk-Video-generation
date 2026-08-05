@@ -1,4 +1,4 @@
-"""The 100-character rule is strict, so it gets tested adversarially."""
+"""The 90-character name rule is strict, so it gets tested adversarially."""
 import os, sys
 from pathlib import Path
 
@@ -10,7 +10,8 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from captions import naming
 
-CAP = naming.MAX_SHORT
+CAP = naming.MAX_SHORT          # full filename
+STEM = naming.MAX_STEM          # the rule that actually matters: 90, no .mp4
 
 # ---------- the headline case ----------
 short, long = naming.build_names(
@@ -23,8 +24,8 @@ assert long == ("Your skin will thank you for this one "
                 "#skincare #asmr #fyp #glowup #selfcare.mp4"), long
 assert len(short) <= CAP
 
-# ---------- the 100-char rule, hammered ----------
-print("\n--- 100-char cap (including .mp4) ---")
+# ---------- the 90-char name rule, hammered ----------
+print(f"\n--- {STEM}-char cap on the NAME (.mp4 not counted) ---")
 cases = [
     ("short caption", "#one"),
     ("A" * 300, "#tag"),
@@ -40,15 +41,15 @@ cases = [
 ]
 for caption, tags in cases:
     s, l = naming.build_names(caption, tags)
-    assert len(s) <= CAP, f"SHORT {len(s)} > {CAP}: {s!r}"
-    assert len(l) <= naming.MAX_LONG, f"LONG {len(l)} > {naming.MAX_LONG}"
+    assert len(s[:-4]) <= STEM, f"SHORT stem {len(s[:-4])} > {STEM}: {s!r}"
+    assert len(l[:-4]) <= STEM, f"LONG stem {len(l[:-4])} > {STEM}: {l!r}"
     assert s.endswith(".mp4") and l.endswith(".mp4"), (s, l)
     stem = s[:-4]
     assert stem == stem.strip(), f"leading/trailing space survived: {s!r}"
     assert not stem.endswith("."), f"trailing dot: {s!r}"
     assert not set(s) & set('<>:"/\\|?*'), f"illegal char: {s!r}"
     assert s.count("#") <= 1, f"short name has >1 hashtag: {s!r}"
-    print(f"  len={len(s):3d}  {s}")
+    print(f"  stem={len(s[:-4]):3d} file={len(s):3d}  {s}")
 
 # exactly-at-the-boundary caption
 s, _ = naming.build_names("y" * 200, "#tag")
@@ -78,7 +79,7 @@ for n in (0, 1, 3, 5, 12, 30):
     a, b = naming.build_names("caption text", " ".join(f"#x{i}" for i in range(n)))
     assert a.count("#") <= 1, (n, a)
     assert b.count("#") <= 5, (n, b)
-    assert len(a) <= CAP and len(b) <= naming.MAX_LONG
+    assert len(a[:-4]) <= STEM and len(b[:-4]) <= STEM
 print("across 0/1/3/5/12/30 supplied: short <=1, long <=5, both inside their caps")
 
 # ---------- word-boundary truncation, not mid-word ----------
@@ -163,17 +164,17 @@ print("\n--- collisions ---")
 dupes = ["same name.mp4"] * 4 + ["other.mp4"]
 out = naming.dedupe(dupes)
 assert len(set(n.lower() for n in out)) == len(out), out
-assert all(len(n) <= CAP for n in out)
+assert all(len(n[:-4]) <= STEM for n in out)
 print(" ", out)
 
 # a colliding name already AT the cap must stay at or under it after suffixing
 at_cap = naming.build_names("q" * 200, "#tag")[0]
-assert len(at_cap) <= CAP
+assert len(at_cap[:-4]) == STEM
 out = naming.dedupe([at_cap, at_cap, at_cap], cap=CAP)
 assert len(set(o.lower() for o in out)) == 3, out
 for o in out:
-    assert len(o) <= CAP, f"suffix pushed past the cap: {len(o)} {o!r}"
-print(f"  at-cap collisions stay <= {CAP}: {[len(o) for o in out]}")
+    assert len(o[:-4]) <= STEM, f"suffix pushed past the cap: {len(o[:-4])} {o!r}"
+print(f"  at-cap collisions stay <= {STEM}: {[len(o[:-4]) for o in out]}")
 
 # ---------- whole-batch naming ----------
 rows = [
@@ -186,7 +187,7 @@ shorts = [p[0] for p in pairs]
 longs = [p[1] for p in pairs]
 assert len(set(shorts)) == 3, shorts
 assert len(set(longs)) == 3, longs
-assert all(len(s) <= CAP for s in shorts)
+assert all(len(s[:-4]) <= STEM for s in shorts)
 print("\nbatch naming de-duplicates both lists independently:")
 for s, l in pairs:
     print(f"  {s}\n    {l}")
@@ -201,13 +202,13 @@ for _ in range(4000):
     tags = " ".join(f"#{''.join(rng.choice('abcdefgh') for _ in range(rng.randint(1, 25)))}"
                     for _ in range(rng.randint(0, 12)))
     s, l = naming.build_names(cap_txt, tags)
-    assert len(s) <= CAP, f"CAP BROKEN len={len(s)} caption={cap_txt!r} tags={tags!r}"
-    assert len(l) <= naming.MAX_LONG, f"LONG CAP BROKEN len={len(l)}"
+    assert len(s[:-4]) <= STEM, f"CAP BROKEN stem={len(s[:-4])} caption={cap_txt!r}"
+    assert len(l[:-4]) <= STEM, f"LONG CAP BROKEN stem={len(l[:-4])}"
     assert s.endswith(".mp4") and l.endswith(".mp4")
     assert not set(s) & set('<>:"/\\|?*')
     # The strict rule: exactly one '#', even when the CAPTION contained some.
     assert s.count("#") <= 1, f"short has {s.count('#')} hashes: {s!r}"
-    worst = max(worst, len(s))
+    worst = max(worst, len(s[:-4]))
 print(f"\nfuzzed 4000 random caption/hashtag pairs — cap never broken "
       f"(longest short name seen: {worst})")
 

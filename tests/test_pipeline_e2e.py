@@ -135,9 +135,9 @@ from captions import naming
 items_r = store.list_items(job_id, stage=store.STAGE_RENDER)
 shorts = [(i.get("meta") or {}).get("short_name") for i in items_r
           if i["render_status"] == store.ITEM_DONE]
-assert all(s and len(s) <= naming.MAX_SHORT and s.count("#") == 1 for s in shorts), shorts
+assert all(s and len(s[:-4]) <= naming.MAX_STEM and s.count("#") == 1 for s in shorts), shorts
 assert len(set(shorts)) == len(shorts)
-print("filenames from captions, <=100 chars, one hashtag, unique:")
+print("filenames from captions, <=90 chars, one hashtag, unique:")
 print("   ", shorts[0])
 
 # ---------- the two stages did not collide ----------

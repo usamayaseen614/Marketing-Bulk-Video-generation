@@ -113,7 +113,7 @@ print(f"\nrows whose output differs across batches: {differing}/{len(sizes_by_ro
 assert differing >= 1, ("every batch produced byte-identical output — "
                         "variant_salt / promo rotation is not working")
 
-# ---------- both filenames, and the 100-char rule ----------
+# ---------- both filenames, and the 90-char name rule ----------
 from captions import naming
 shorts, longs = [], []
 for item in items.values():
@@ -122,7 +122,7 @@ for item in items.values():
         continue
     s, l = meta.get("short_name"), meta.get("long_name")
     assert s and l, meta
-    assert len(s) <= naming.MAX_SHORT, f"{len(s)} > 100: {s}"
+    assert len(s[:-4]) <= naming.MAX_STEM, f"{len(s[:-4])} > 90: {s}"
     assert s.count("#") == 1, s
     assert l.count("#") >= 1, l
     assert item["name"] == s, (item["name"], s)
@@ -130,7 +130,7 @@ for item in items.values():
 
 assert len(set(shorts)) == len(shorts), "duplicate short names within a render"
 assert len(set(longs)) == len(longs), "duplicate long names within a render"
-print(f"\n{len(shorts)} videos, all names unique, all shorts <= 100 chars")
+print(f"\n{len(shorts)} videos, all names unique, all names <= {naming.MAX_STEM} chars")
 for s, l in list(zip(shorts, longs))[:3]:
     print(f"  [{len(s):3d}] {s}")
     print(f"        {l}")

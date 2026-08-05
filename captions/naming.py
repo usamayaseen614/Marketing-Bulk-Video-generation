@@ -3,9 +3,12 @@ captions/naming.py — the two filenames each video is published under.
 
 Every video goes to Drive twice under different names:
 
-  SHORT  caption + exactly ONE hashtag, hard maximum **100 characters
-         including ".mp4"**
-  LONG   caption + up to FIVE hashtags, capped at MAX_LONG characters
+  SHORT  caption + exactly ONE hashtag
+  LONG   caption + up to FIVE hashtags
+
+Both are capped at **90 characters of name** — the caption and its hashtags.
+The ".mp4" is outside that count, so the cap applies to the text you actually
+paste as a caption rather than to an implementation detail of the file.
 
 The names are deliberately *paste-ready*: spaces and '#' are preserved so the
 filename reads as the caption you will actually post. Only characters that a
@@ -14,7 +17,7 @@ naming from the caption — if you have to retype it, nothing was saved.
 
 There is no numeric row prefix. Uniqueness is handled by appending a counter
 only when two names actually collide, and that suffix is budgeted inside the
-100-character cap rather than pushing past it.
+90-character cap rather than pushing past it.
 """
 
 from __future__ import annotations
@@ -24,11 +27,15 @@ from typing import Iterable, Optional
 
 EXTENSION = ".mp4"
 
-# Hard cap, INCLUDING the extension.
-MAX_SHORT = 100
-# The long form still has to survive a Drive path and a Windows download
-# folder, so it is capped well inside the 255-character filesystem limit.
-MAX_LONG = 200
+# The hard rule is on the NAME — caption plus hashtags — not on the filename.
+# ".mp4" sits outside it, so what you paste as a caption is what is capped.
+MAX_STEM = 90
+
+# Full-filename equivalents, used by the length checks below. Both forms share
+# the same limit: a long name is "longer" by carrying more hashtags, not by
+# being allowed more characters.
+MAX_SHORT = MAX_STEM + len(EXTENSION)
+MAX_LONG = MAX_STEM + len(EXTENSION)
 
 # Hashtags per name. The short form carries exactly one — the tag doing the
 # reach work. The long form carries up to five: enough to matter, few enough

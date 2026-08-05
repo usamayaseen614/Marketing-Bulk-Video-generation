@@ -85,7 +85,7 @@ for _, row in manifest.iterrows():
     assert row["Short_Filename"] == short, (row["Short_Filename"], short)
     assert row["Long_Filename"] == long_name
     assert short in files, f"{short} not on disk; got {files}"
-    assert len(short) <= naming.MAX_SHORT, len(short)
+    assert len(short[:-4]) <= naming.MAX_STEM, len(short)
     assert short.count("#") == 1, short
     would_have_been = safe_filename(int(row["Sheet_Row"]),
                                     headlines.iloc[int(row["Sheet_Row"]) - 1])

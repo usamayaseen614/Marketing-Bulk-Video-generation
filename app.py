@@ -717,7 +717,7 @@ hashtag_source = st.radio(
     }[m],
     horizontal=True,
     help="Hashtags are optional. Without them the short filename is just the "
-         "caption, still capped at 100 characters.",
+         "caption, still capped at 90 characters.",
 )
 caption_params["hashtag_source"] = hashtag_source
 hashtag_file = None

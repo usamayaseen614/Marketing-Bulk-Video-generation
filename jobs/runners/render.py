@@ -12,8 +12,8 @@ once per batch, each pass using a different promo video and a different
 `variant_salt`, so every pass picks different ASMR clips. The finished videos
 are then **mixed** across the output folders (see batching.py) so no folder is
 just one promo video, and each is uploaded to Drive **twice** — once under a
-short name capped at 100 characters with a single hashtag, once under a longer
-name carrying every hashtag.
+short name carrying a single hashtag, once under a longer name carrying up to
+five. Both are capped at 90 characters of name, with ".mp4" outside that count.
 
 The second copy is made with Drive's server-side `files.copy`, so the bytes
 cross the network once. At 10,000 videos that is the difference between ~80 GB
@@ -331,14 +331,16 @@ def _render_batches(job: dict, df: pd.DataFrame, ws, n_batches: int,
 def _prefixed(name: str, prefix: str) -> str:
     """Tag a filename for its platform, keeping the length cap intact.
 
-    The 100-character rule is a hard limit on the whole filename, so the prefix
-    has to come out of that budget rather than push past it."""
+    The 90-character rule covers the caption and its hashtags; the prefix and
+    the extension are added on top, so a tagged file is at most 97 characters
+    — still far inside every filesystem limit."""
     from captions import naming
 
     stem = name[:-4] if name.lower().endswith(".mp4") else name
-    cap = naming.MAX_SHORT if prefix == "yt" else naming.MAX_LONG
-    room = cap - len(".mp4") - len(prefix) - 1
-    return f"{prefix} {stem[:room].rstrip()}.mp4"
+    # The 90-character rule applies to the caption and its hashtags. The
+    # platform prefix is a file tag rather than part of the caption, so it sits
+    # outside that count instead of eating three characters of it.
+    return f"{prefix} {stem[:naming.MAX_STEM].rstrip()}.mp4"
 
 
 def _upload(job: dict, n_rows: int, n_folders: int, placement: dict) -> dict:
