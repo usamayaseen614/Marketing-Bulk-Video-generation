@@ -130,14 +130,17 @@ def _clean_caption(text: str) -> str:
     only when a filename is built — the caption is pasted into the post as
     well, and it should be clean in both places. Models add emoji regardless of
     being told not to, so this is enforced rather than merely requested."""
-    from captions.naming import strip_emoji
+    from captions.naming import _truncate_words, strip_emoji
 
     text = re.sub(r"\s+", " ", str(text or "")).strip()
     text = text.strip('"“”\'')
     # Hashtags belong in the hashtag column, not baked into the caption.
     text = re.sub(r"\s*#\w+", "", text)
     text = strip_emoji(text)
-    return re.sub(r"\s+", " ", text).strip()[:150]
+    text = re.sub(r"\s+", " ", text).strip()
+    # Word-aware: a blunt slice leaves half a word or a dangling space, which
+    # then gets stripped later and looks like the caption lost a character.
+    return _truncate_words(text, config.CAPTION_MAX_CHARS)
 
 
 def _clean_hashtags(text: str) -> str:
