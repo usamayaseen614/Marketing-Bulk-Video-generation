@@ -63,6 +63,24 @@ print("\nshort keeps exactly 1 hashtag, long keeps all 3")
 print("  short:", s)
 print("  long :", l)
 
+# ---------- the long form is capped at five hashtags ----------
+many = " ".join(f"#t{i}" for i in range(10))
+s5, l5 = naming.build_names("a readable caption", many)
+assert naming.MAX_LONG_HASHTAGS == 5, naming.MAX_LONG_HASHTAGS
+assert s5.count("#") == 1, s5
+assert l5.count("#") == 5, l5
+# the FIRST five, in the order supplied — not an arbitrary subset
+assert "#t0" in l5 and "#t4" in l5 and "#t5" not in l5, l5
+print(f"\n10 hashtags supplied -> short {s5.count('#')}, long {l5.count('#')}")
+print("  long:", l5)
+
+for n in (0, 1, 3, 5, 12, 30):
+    a, b = naming.build_names("caption text", " ".join(f"#x{i}" for i in range(n)))
+    assert a.count("#") <= 1, (n, a)
+    assert b.count("#") <= 5, (n, b)
+    assert len(a) <= CAP and len(b) <= naming.MAX_LONG
+print("across 0/1/3/5/12/30 supplied: short <=1, long <=5, both inside their caps")
+
 # ---------- word-boundary truncation, not mid-word ----------
 s, _ = naming.build_names("The quick brown fox jumps over the lazy dog and keeps running forever onwards", "#tag")
 assert not s[:-4].rstrip("#tag").rstrip().endswith(("-", "_")), s

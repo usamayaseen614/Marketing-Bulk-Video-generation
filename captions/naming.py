@@ -5,7 +5,7 @@ Every video goes to Drive twice under different names:
 
   SHORT  caption + exactly ONE hashtag, hard maximum **100 characters
          including ".mp4"**
-  LONG   caption + every hashtag, capped at MAX_LONG
+  LONG   caption + up to FIVE hashtags, capped at MAX_LONG characters
 
 The names are deliberately *paste-ready*: spaces and '#' are preserved so the
 filename reads as the caption you will actually post. Only characters that a
@@ -29,6 +29,12 @@ MAX_SHORT = 100
 # The long form still has to survive a Drive path and a Windows download
 # folder, so it is capped well inside the 255-character filesystem limit.
 MAX_LONG = 200
+
+# Hashtags per name. The short form carries exactly one — the tag doing the
+# reach work. The long form carries up to five: enough to matter, few enough
+# that the caption is still readable in a file listing.
+MAX_SHORT_HASHTAGS = 1
+MAX_LONG_HASHTAGS = 5
 
 # Characters no Windows/Drive filename may contain, plus control characters.
 _ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -137,7 +143,8 @@ def _finalize(stem: str, ext: str = EXTENSION) -> str:
 def build_names(caption, hashtags, ext: str = EXTENSION,
                 max_short: int = MAX_SHORT,
                 max_long: int = MAX_LONG,
-                keep_emoji: Optional[bool] = None) -> tuple[str, str]:
+                keep_emoji: Optional[bool] = None,
+                max_long_tags: int = MAX_LONG_HASHTAGS) -> tuple[str, str]:
     """Return (short_name, long_name) for one video.
 
     The short name keeps its single hashtag intact and sacrifices caption text
@@ -167,7 +174,8 @@ def build_names(caption, hashtags, ext: str = EXTENSION,
     if len(short) > max_short:
         short = _finalize(short[: max_short - len(ext)].rstrip(), ext)
 
-    # ---- long: caption + every hashtag
+    # ---- long: caption + up to max_long_tags hashtags
+    tags = tags[:max(0, int(max_long_tags))]
     tail = " ".join(tags)
     if tail:
         budget = max_long - len(ext) - 1 - len(tail)
