@@ -332,13 +332,42 @@ def copy_file(file_id: str, new_name: str, parent_id: Optional[str] = None) -> d
     body: dict = {"name": new_name}
     if parent_id:
         body["parents"] = [parent_id]
+    # Deliberately NO num_retries here. files.copy is a non-idempotent POST,
+    # and the client's retry loop re-issues it on transport failures (resets,
+    # read timeouts) that can land AFTER Drive committed the copy — silently
+    # duplicating the file inside one apparently-healthy call. A failed copy
+    # is retried at the item level instead, behind a find_file() check that
+    # looks for the ambiguous previous attempt before copying again.
     return service().files().copy(
         fileId=file_id, body=body,
         fields="id, name, webViewLink",
         supportsAllDrives=True,
-        # Same exponential backoff on 5xx/429 the chunked upload gets from
-        # next_chunk — without it, one transient 500 failed the whole item.
-    ).execute(num_retries=3)
+    ).execute()
+
+
+def find_file(name: str, parent_id: str,
+              drive_id: Optional[str] = None) -> Optional[dict]:
+    """First non-trashed file with this exact name under `parent_id`, as
+    {id, name, webViewLink} — or None.
+
+    Exists for the ambiguous-copy check in the render runner: a files.copy
+    whose response was lost may or may not have committed, and the only way to
+    find out is to look. `drive_id` should be passed by callers running on
+    worker threads — resolve_target() is thread-local, so resolving here on a
+    pool thread would ignore a job's own destination override."""
+    drive_id = drive_id or _require_config()
+    query = (
+        f"name = '{_escape(name)}' and '{parent_id}' in parents "
+        f"and mimeType != '{FOLDER_MIME}' and trashed = false"
+    )
+    response = service().files().list(
+        q=query, spaces="drive", fields="files(id, name, webViewLink)",
+        corpora="drive", driveId=drive_id,
+        includeItemsFromAllDrives=True, supportsAllDrives=True,
+        pageSize=1,
+    ).execute()
+    files = response.get("files", [])
+    return files[0] if files else None
 
 
 def upload_with_copy(path: Path, parent_id: str, primary_name: str,

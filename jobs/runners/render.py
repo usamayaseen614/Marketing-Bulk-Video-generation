@@ -362,7 +362,18 @@ def _drive_root_stamp(job_id: str, params: dict) -> str:
     stamp = (params.get("drive_stamp") or "").strip()
     if stamp:
         return stamp
-    stamp = _drive_stamp()
+    # A job that already has files in Drive but no recorded stamp was mid-
+    # upload when stamps were introduced: its files sit in the legacy
+    # renders/<date>/ tree. Minting a fresh stamp now would split one job
+    # across two roots, so reconstruct the legacy name — the date the job
+    # first started — and let ensure_folder find the existing tree.
+    if any(i.get("drive_file_id") or (i.get("meta") or {}).get("drive_file_id")
+           for i in store.list_items(job_id)):
+        job = store.get_job(job_id) or {}
+        started = job.get("started_at") or job.get("created_at") or time.time()
+        stamp = time.strftime("%Y-%m-%d", time.localtime(started))
+    else:
+        stamp = _drive_stamp()
     params["drive_stamp"] = stamp
     store.merge_job_params(job_id, drive_stamp=stamp)
     return stamp
@@ -400,6 +411,10 @@ def _upload(job: dict, n_rows: int, n_folders: int, placement: dict) -> dict:
                 "yt": drive.ensure_path(["yt"], parent_id=batch_root),
                 "tk": drive.ensure_path(["tk"], parent_id=batch_root),
             }
+        # Resolved HERE, on the runner thread, where set_target's override is
+        # visible — resolve_target is thread-local, so the pool workers below
+        # must never resolve it themselves.
+        shared_drive_id = drive.resolve_target()[0]
     except Exception as exc:  # noqa: BLE001
         logger.exception("Job %s: could not prepare Drive folders", job_id)
         return {"drive_error": str(exc)}
@@ -457,7 +472,18 @@ def _upload(job: dict, n_rows: int, n_folders: int, placement: dict) -> dict:
                                   meta=meta)
 
             if not meta.get("copy_file_id"):
-                copied = drive.copy_file(file_id, long_name, targets["tk"])
+                copied = None
+                if (item.get("upload_attempts") or 0) >= 1:
+                    # A previous attempt may have made the copy without us
+                    # learning its id — a response lost after Drive committed,
+                    # or a crash before the persist below. files.copy is not
+                    # idempotent and Drive stores two same-named files in one
+                    # folder without complaint, so on a RE-attempt, look
+                    # before copying. First attempts skip the extra call.
+                    copied = drive.find_file(long_name, targets["tk"],
+                                             drive_id=shared_drive_id)
+                if not copied:
+                    copied = drive.copy_file(file_id, long_name, targets["tk"])
                 meta["copy_file_id"] = copied.get("id")
                 meta["copy_link"] = copied.get("webViewLink")
                 store.update_item(job_id, item["idx"], meta=meta)
