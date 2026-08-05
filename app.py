@@ -569,9 +569,30 @@ if not ready:
     )
 
 # ---- actions
-st.subheader("2. Generate")
-col_row, col_preview, col_render, col_generate = st.columns(
-    [1, 1.5, 1.5, 1.8], vertical_alignment="bottom")
+st.subheader("2. Preview a row")
+
+# With several promos uploaded, Preview and Render Row always used the first
+# one — so there was no way to see how a particular row looks against a
+# particular promo. In the real batch every row is paired automatically and
+# spread across all of them; this is for checking one pairing by eye.
+if promo_files and len(promo_files) > 1:
+    col_row, col_promo, col_preview, col_render = st.columns(
+        [1, 1.6, 1.4, 1.4], vertical_alignment="bottom")
+    promo_choice = col_promo.selectbox(
+        "Promo video", options=list(range(len(promo_files))),
+        format_func=lambda i: f"{i + 1}. {promo_files[i].name}",
+        disabled=not ready,
+        help="Which promo to pair with this row for the preview and the test "
+             "render. The full batch pairs every row automatically, spread "
+             "evenly across all of them.",
+    )
+    # Preview and Render Row below build their workspace from this one.
+    video_file = promo_files[promo_choice]
+else:
+    promo_choice = 0
+    col_row, col_preview, col_render = st.columns(
+        [1, 1.5, 1.5], vertical_alignment="bottom")
+
 preview_row = col_row.number_input(
     "Row to preview", 1, len(df) if df is not None else 1, 1, disabled=not ready,
     help="Excel data row number (1 = the first row below the header).",
@@ -582,12 +603,10 @@ render_row_clicked = col_render.button(
     help="Render this one row to a real MP4 — with your saved edits — and play "
          "it here. Slower than the static preview, but it's the actual video.",
 )
-generate_clicked = col_generate.button(
-    "🚀 Generate All Videos", disabled=not ready, type="primary", width="stretch"
-)
+
 
 # ---- clip source: the whole point of the unified flow
-st.subheader("2. CTA clips")
+st.subheader("3. CTA clips")
 
 
 def _scrapes_with_clips() -> list[dict]:
@@ -671,7 +690,7 @@ if clip_source in ("scrape_job", "scrape_now"):
     clip_params["slots"] = int(cta_slot_count)
 
 # ---- captions
-st.subheader("3. Captions")
+st.subheader("4. Captions")
 _pool = store.active_pool()
 if _pool:
     st.caption(f"Active pool: **{_pool['combinations']:,} unique pairs** left to "
@@ -782,7 +801,7 @@ if caption_mode == "generate":
         st.warning("Vertex AI isn't configured — this stage will be skipped and "
                    "files will fall back to Headline names.")
 
-st.subheader("4. Generate")
+st.subheader("5. Generate")
 
 # One sheet becomes `batches x rows` videos: the same rows rendered once per
 # batch, each pass with a different promo video and different clip picks.
@@ -850,6 +869,10 @@ if not settings.mail_configured():
         "sent — the Jobs page still shows live progress."
     )
 
+generate_clicked = st.button(
+    "🚀 Generate All Videos", disabled=not ready, type="primary", width="stretch"
+)
+
 if preview_clicked and ready:
     with st.spinner(f"Rendering preview of row {preview_row}…"):
         with tempfile.TemporaryDirectory(prefix="bvg_preview_") as tmp:
@@ -865,6 +888,8 @@ if preview_clicked and ready:
                 st.session_state["preview_payload"] = payload
                 st.session_state["preview_nonce"] = uuid.uuid4().hex
                 st.session_state["preview_row"] = int(preview_row)
+                st.session_state["preview_promo"] = (
+                    video_file.name if promo_files and len(promo_files) > 1 else "")
                 # The payload was built WITH this row's saved edits applied,
                 # so a later save reports changes relative to them — keep the
                 # snapshot to merge against (and to detect reverts).
@@ -899,6 +924,8 @@ if render_row_clicked and ready:
                     # Read the bytes before the TemporaryDirectory vanishes.
                     st.session_state["row_render"] = {
                         "row": int(preview_row),
+                        "promo": (video_file.name if promo_files
+                                  and len(promo_files) > 1 else ""),
                         "name": res.filename,
                         "bytes": (Path(tmp) / "out" / res.filename).read_bytes(),
                         "warnings": list(res.warnings),
@@ -918,8 +945,10 @@ if row_render and not generate_clicked:
         st.video(row_render["bytes"])
     with col_side:
         st.caption(
-            f"Rendered video of row {row_render['row']} — exactly what the "
-            "batch would produce for this row, including your saved edits."
+            f"Rendered video of row {row_render['row']}"
+            + (f" using promo **{row_render['promo']}**" if row_render.get("promo") else "")
+            + " — exactly what the batch would produce for this pairing, "
+              "including your saved edits."
         )
         for message in row_render.get("warnings") or []:
             st.warning(f"Row {row_render['row']}: {message}")
@@ -933,7 +962,9 @@ if row_render and not generate_clicked:
 
 if "preview_payload" in st.session_state and not generate_clicked:
     st.caption(
-        f"Row {st.session_state.get('preview_row', 1)} preview (1080x1920) — drag the "
+        (f"Promo: **{st.session_state.get('preview_promo')}** · " if
+         st.session_state.get("preview_promo") else "")
+        + f"Row {st.session_state.get('preview_row', 1)} preview (1080x1920) — drag the "
         "video, CTA, or texts to move them, drag the corner handle to resize, recolor "
         "texts, and add a background box; click “Save to Excel” in the panel to apply the "
         "changed values to that row for previews, generation, and the Excel download below."
