@@ -1041,12 +1041,30 @@ n_folders = col_f.number_input(
     help="Finished videos are mixed evenly across this many Drive folders, so "
          "no folder is just one promo video. Usually the same as the batch count.",
 )
+_PLATFORM_CHOICES = {
+    "yt,tk": "Both — yt.zip and tk.zip",
+    "tk": "TikTok only — tk.zip (long names)",
+    "yt": "YouTube only — yt.zip (short names)",
+}
+upload_platforms = st.selectbox(
+    "Publish which names?", list(_PLATFORM_CHOICES),
+    format_func=lambda key: _PLATFORM_CHOICES[key], disabled=not ready,
+    help="Google allows one account 750 GB per rolling 24 hours into Drive, "
+         "and each video is published under two names — so a very large batch "
+         "cannot send both in one day. Pick one now and run this job again "
+         "tomorrow with the other: the videos stay on the VM until both have "
+         "been published, and the second run skips what already landed.",
+)
+
 if ready and df is not None:
     total_videos = len(df) * int(n_batches)
     promo_count = len(promo_files or [])
+    _n_names = len(upload_platforms.split(","))
     note = (f"**{len(df):,} rows x {int(n_batches)} passes = "
             f"{total_videos:,} videos**, mixed across {int(n_folders)} folders, "
-            f"each uploaded twice ({total_videos * 2:,} Drive files).")
+            + ("each published under both names."
+               if _n_names == 2 else
+               f"published as `{upload_platforms}.zip` only."))
     if promo_count > 1 and int(n_batches) == promo_count:
         note += (f" Every row is rendered once with each of the {promo_count} "
                  "promos — all pairings, no repeats.")
@@ -1078,6 +1096,25 @@ if ready and df is not None:
                 "A pool is a consumable and never starts over — generate a "
                 "fresh one, or render fewer batches."
             )
+
+    # Google allows one account 750 GB per rolling 24 hours into Drive, and
+    # server-side copies count as well as uploads. At ~31 MB a video (measured
+    # over a 16,000-video night) that is ~12,000 videos a day under both names,
+    # or ~24,000 under one. Worth saying HERE, where the choice is still cheap,
+    # rather than as a 403 eight hours into the upload.
+    _EST_GB = total_videos * _n_names * 31 / 1024
+    if _EST_GB > 750:
+        _fits = int(750 * 1024 / (31 * _n_names))
+        st.warning(
+            f"**About {_EST_GB:,.0f} GB into Drive — over the 750 GB that one "
+            f"account may upload per rolling 24 hours.** The last "
+            f"{total_videos - _fits:,} video(s) would fail with a rate-limit "
+            "error and need requeueing tomorrow."
+            + ("  \nPublishing **one** set of names instead would fit "
+               f"({_EST_GB / 2:,.0f} GB) — run this job again tomorrow for the "
+               "other." if _n_names == 2 else
+               "  \nRender fewer batches, or split this across two days.")
+        )
 
     if total_videos > 3000:
         st.warning(
@@ -1326,6 +1363,7 @@ if generate_clicked and ready:
                 "batches": int(n_batches),
                 "folders": int(n_folders),
                 "make_zip": True,
+                "upload_platforms": upload_platforms.split(","),
                 "excel_name": excel_file.name,
                 "clip_source": clip_source,
                 "gif_source": gif_source,

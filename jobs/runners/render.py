@@ -429,6 +429,10 @@ def _upload_files(job: dict, n_rows: int, n_folders: int, placement: dict) -> di
     params = job.get("params") or {}
     job["params"] = params
     destination = params.get("drive_folder") or ""
+    # Normally both. One of them halves what this run sends to Drive — see
+    # _selected_platforms. The FIRST is uploaded and the rest are server-side
+    # copies of it, so with one platform selected nothing is copied at all.
+    platforms = _selected_platforms(params)
 
     from integrations import drive
 
@@ -449,8 +453,8 @@ def _upload_files(job: dict, n_rows: int, n_folders: int, placement: dict) -> di
         for f in range(1, n_folders + 1):
             batch_root = drive.ensure_path([batching.folder_name(f)], parent_id=root)
             folder_ids[f] = {
-                "yt": drive.ensure_path(["yt"], parent_id=batch_root),
-                "tk": drive.ensure_path(["tk"], parent_id=batch_root),
+                platform: drive.ensure_path([platform], parent_id=batch_root)
+                for platform in platforms
             }
         # Resolved HERE, on the runner thread, where set_target's override is
         # visible — resolve_target is thread-local, so the pool workers below
@@ -488,12 +492,13 @@ def _upload_files(job: dict, n_rows: int, n_folders: int, placement: dict) -> di
             return False
 
         folder = placement.get(Slot(batch=batch, row=row_no), 1)
-        targets = folder_ids.get(folder) or {"yt": root, "tk": root}
+        targets = folder_ids.get(folder) or {p: root for p in platforms}
         # The platform is the FOLDER, not the filename: yt/ takes the short
         # name, tk/ the long one. Tagging the name too would put "yt " in front
         # of a caption that is meant to be pasted as-is.
         short = meta.get("short_name") or src.name
-        long_name = meta.get("long_name") or short
+        names = {"yt": short, "tk": meta.get("long_name") or short}
+        primary, secondaries = platforms[0], platforms[1:]
 
         try:
             # Both Drive writes follow the same rule: record the id the INSTANT
@@ -506,13 +511,19 @@ def _upload_files(job: dict, n_rows: int, n_folders: int, placement: dict) -> di
             # happily stores two same-named files in one folder.)
             file_id = meta.get("drive_file_id")
             if not file_id:
-                uploaded = drive.upload_file(src, targets["yt"], short)
+                uploaded = drive.upload_file(src, targets[primary],
+                                             names[primary])
                 file_id = uploaded["id"]
                 meta["drive_file_id"] = file_id
+                meta["upload_link"] = uploaded.get("webViewLink")
                 store.update_item(job_id, item["idx"], drive_file_id=file_id,
                                   meta=meta)
 
-            if not meta.get("copy_file_id"):
+            # Nothing to copy when only one platform is being published — the
+            # bytes went up under that platform's own name.
+            for secondary in secondaries:
+                if meta.get("copy_file_id"):
+                    break
                 copied = None
                 if (item.get("upload_attempts") or 0) >= 1:
                     # A previous attempt may have made the copy without us
@@ -521,10 +532,11 @@ def _upload_files(job: dict, n_rows: int, n_folders: int, placement: dict) -> di
                     # idempotent and Drive stores two same-named files in one
                     # folder without complaint, so on a RE-attempt, look
                     # before copying. First attempts skip the extra call.
-                    copied = drive.find_file(long_name, targets["tk"],
+                    copied = drive.find_file(names[secondary], targets[secondary],
                                              drive_id=shared_drive_id)
                 if not copied:
-                    copied = drive.copy_file(file_id, long_name, targets["tk"])
+                    copied = drive.copy_file(file_id, names[secondary],
+                                             targets[secondary])
                 meta["copy_file_id"] = copied.get("id")
                 meta["copy_link"] = copied.get("webViewLink")
                 store.update_item(job_id, item["idx"], meta=meta)
@@ -532,7 +544,8 @@ def _upload_files(job: dict, n_rows: int, n_folders: int, placement: dict) -> di
             store.update_item(
                 job_id, item["idx"], upload_status=store.ITEM_DONE,
                 upload_error=None, drive_file_id=file_id,
-                drive_link=meta.get("copy_link"), meta=meta)
+                drive_link=meta.get("copy_link") or meta.get("upload_link"),
+                meta=meta)
             return True
         except Exception as exc:  # noqa: BLE001 — reported per file
             logger.warning("Job %s: upload failed for item %s: %s",
@@ -567,14 +580,15 @@ def _upload_files(job: dict, n_rows: int, n_folders: int, placement: dict) -> di
         if i["upload_status"] == store.ITEM_FAILED
     ][:25]
 
-    logger.info("Job %s: uploaded %d, failed %d (each as 2 Drive files)",
-                job_id, uploaded_ok, failed)
+    logger.info("Job %s: uploaded %d, failed %d (each as %d Drive file(s))",
+                job_id, uploaded_ok, failed, len(platforms))
     return {
         "drive_link": link,
         "drive_folder_id": root,
         "upload_mode": "files",
+        "upload_platforms": list(platforms),
         "uploaded": counts["uploaded"],
-        "drive_files": counts["uploaded"] * 2,
+        "drive_files": counts["uploaded"] * len(platforms),
         "upload_failed": counts["upload_failed"],
         "upload_failures": upload_failures,
     }
@@ -586,6 +600,28 @@ def _upload_files(job: dict, n_rows: int, n_folders: int, placement: dict) -> di
 # never the filename — neither name carries a platform tag, because a filename
 # here is a caption meant to be pasted straight into the post.
 PLATFORMS = ("yt", "tk")
+
+
+def _selected_platforms(params: dict) -> tuple[str, ...]:
+    """Which of the two names this run publishes, in publishing order.
+
+    Both, normally. One of them when a night is too big for Drive's 750 GB per
+    rolling 24 hours: publishing `tk` today and `yt` tomorrow halves each day's
+    traffic, and because each platform's state is recorded separately, the
+    second run skips what the first already sent.
+
+    Unknown names are dropped rather than trusted — `upload_platforms: ["tok"]`
+    should publish nothing new, not silently publish everything."""
+    raw = params.get("upload_platforms")
+    if raw is None:
+        raw = config.UPLOAD_PLATFORMS
+    if isinstance(raw, str):
+        raw = [part.strip() for part in raw.split(",")]
+    chosen = tuple(p for p in PLATFORMS if p in {str(x).strip().lower() for x in raw})
+    if not chosen:
+        logger.warning("No recognised upload platform in %r — publishing both", raw)
+        return PLATFORMS
+    return chosen
 
 
 def _zip_entries(items: list[dict], n_rows: int, videos_root: Path
@@ -664,7 +700,13 @@ def _upload_zips(job: dict, n_rows: int, n_folders: int, placement: dict) -> dic
 
     videos_root = store.videos_dir(job_id)
     pack_root = store.job_dir(job_id) / "packing"
+    platforms = _selected_platforms(params)
+    # The MP4s may only be freed once EVERY platform has an archive — not just
+    # the ones this run was asked for. Publishing tk today and yt tomorrow is
+    # the whole point of the option, and deleting the videos tonight would
+    # leave nothing to build yt.zip from.
     free_local = bool(params.get("free_local_videos", config.UPLOAD_FREE_LOCAL))
+    logger.info("Job %s: publishing %s as ZIPs", job_id, ", ".join(platforms))
 
     # Every rendered item, grouped by the folder it was mixed into. An archive
     # is all-or-nothing — it has to hold the folder's complete contents — so
@@ -681,17 +723,26 @@ def _upload_zips(job: dict, n_rows: int, n_folders: int, placement: dict) -> dic
     state: dict = dict(params.get("zip_uploads") or {})
     archives: list[dict] = []
     errors: list[str] = []
-    freed_files = freed_bytes = 0
+    freed_files = freed_bytes = kept = 0
     total_folders = len(by_folder)
 
     for position, folder in enumerate(sorted(by_folder), start=1):
         items = by_folder[folder]
         name = batching.folder_name(folder)
         recorded = dict(state.get(str(folder)) or {})
+        published: dict = dict(recorded.get("platforms") or {})
+        if not published and recorded.get("complete"):
+            # A folder recorded before publishing became per-platform. Its
+            # archives list says which ones landed, so read that rather than
+            # re-sending them.
+            published = {a["platform"]: a for a in recorded.get("archives") or []
+                         if a.get("platform")}
 
-        if recorded.get("complete"):
-            logger.info("Job %s: %s already published — skipping", job_id, name)
-            archives.extend(recorded.get("archives") or [])
+        todo = [p for p in platforms if p not in published]
+        if not todo:
+            logger.info("Job %s: %s already has %s — skipping", job_id, name,
+                        ", ".join(f"{p}.zip" for p in platforms))
+            archives.extend(published[p] for p in platforms if p in published)
             store.set_upload_status(job_id, [i["idx"] for i in items],
                                     store.ITEM_DONE,
                                     drive_link=recorded.get("link"))
@@ -719,7 +770,7 @@ def _upload_zips(job: dict, n_rows: int, n_folders: int, placement: dict) -> dic
 
         idxs = [item["idx"] for item, _s, _n in packed]
         entries = [(src, names) for _i, src, names in packed]
-        targets = {p: pack_root / name / f"{p}.zip" for p in PLATFORMS}
+        targets = {p: pack_root / name / f"{p}.zip" for p in todo}
 
         try:
             built = packing.build_platform_zips(entries, targets)
@@ -731,18 +782,20 @@ def _upload_zips(job: dict, n_rows: int, n_folders: int, placement: dict) -> dic
 
             store.set_stage(job_id,
                             f"uploading {name} ({position}/{total_folders})")
-            links = {}
-            for platform in sorted(targets):
+            for platform in todo:
                 info = built["platforms"][platform]
                 response = drive.upload_verified(
                     info["path"], folder_ids[folder], f"{platform}.zip",
                     drive_id=shared_drive_id)
-                links[platform] = response.get("webViewLink") or ""
-                archives.append({
+                # Recorded per platform the moment it lands, so a run that dies
+                # after tk.zip and before yt.zip does not re-send tk.zip.
+                published[platform] = {
                     "folder": name, "platform": platform,
                     "id": response.get("id"), "files": info["files"],
                     "bytes": int(response.get("size") or info["size"]),
-                })
+                    "link": response.get("webViewLink") or "",
+                }
+                archives.append(published[platform])
         except Exception as exc:  # noqa: BLE001 — one folder must not lose the rest
             logger.exception("Job %s: could not publish %s", job_id, name)
             errors.append(f"{name}: {exc}")
@@ -752,8 +805,15 @@ def _upload_zips(job: dict, n_rows: int, n_folders: int, placement: dict) -> dic
             shutil.rmtree(pack_root / name, ignore_errors=True)
             continue
 
-        recorded = {"complete": True, "link": links.get("tk") or link,
-                    "archives": [a for a in archives if a["folder"] == name]}
+        # `complete` means every platform, not just the ones asked for today —
+        # it is what tells a later run there is nothing left to publish here.
+        every = all(p in published for p in PLATFORMS)
+        recorded = {
+            "complete": every,
+            "platforms": published,
+            "link": (published.get("tk") or published.get("yt") or {}).get("link") or link,
+            "archives": list(published.values()),
+        }
         state[str(folder)] = recorded
         # Persisted BEFORE the MP4s are deleted: a crash in the tidy-up below
         # must not look like a folder that was never published.
@@ -763,11 +823,16 @@ def _upload_zips(job: dict, n_rows: int, n_folders: int, placement: dict) -> dic
                                 drive_link=recorded["link"])
 
         shutil.rmtree(pack_root / name, ignore_errors=True)
-        if free_local:
+        if free_local and every:
             count, size = packing.free_files(src for src, _names in entries)
             freed_files += count
             freed_bytes += size
             logger.info("Job %s: freed %d MP4(s) from %s", job_id, count, name)
+        elif free_local:
+            missing = [p for p in PLATFORMS if p not in published]
+            kept += len(entries)
+            logger.info("Job %s: keeping %s's MP4s — %s not published yet",
+                        job_id, name, ", ".join(f"{p}.zip" for p in missing))
 
     shutil.rmtree(pack_root, ignore_errors=True)
     counts = store.item_counts(job_id)
@@ -775,11 +840,22 @@ def _upload_zips(job: dict, n_rows: int, n_folders: int, placement: dict) -> dic
                 "freed %.1f GB of MP4s",
                 job_id, len(archives), len(errors), freed_bytes / 1024 ** 3)
 
+    pending_platforms = [p for p in PLATFORMS if p not in platforms]
+    if kept:
+        logger.info(
+            "Job %s: %d MP4(s) kept on the VM — %s still to publish. Requeue "
+            "this job with upload_platforms=%s once Drive's 24h allowance has "
+            "rolled.", job_id, kept,
+            ", ".join(f"{p}.zip" for p in pending_platforms),
+            pending_platforms)
+
     return {
         "drive_link": link,
         "drive_folder_id": root,
         "drive_folder_ids": {str(f): fid for f, fid in folder_ids.items()},
         "upload_mode": "zip",
+        "upload_platforms": list(platforms),
+        "platforms_pending": pending_platforms if kept else [],
         "uploaded": counts["uploaded"],
         "drive_files": len(archives),
         "drive_zips": len(archives),
@@ -788,6 +864,7 @@ def _upload_zips(job: dict, n_rows: int, n_folders: int, placement: dict) -> dic
         "upload_failures": errors[:25],
         "videos_freed": bool(freed_files),
         "freed_bytes": freed_bytes,
+        "videos_kept": kept,
     }
 
 

@@ -415,7 +415,40 @@ delete it afterwards rather than fighting for space at 3am.
 Set `BVG_UPLOAD_FREE_LOCAL=false` to keep the MP4s on the VM after publishing
 (the local ZIP fallback then still works, and the disk must hold everything).
 
-### 5f. Repacking folders already in Drive
+### 5f. The 750 GB/day Drive ceiling (plan around this)
+
+Google allows **one user 750 GB per rolling 24 hours** of data moved into Drive.
+The VM's service account is that user, and **server-side copies count as well as
+uploads**. Past it every write returns `403 userRateLimitExceeded`.
+
+For a night of 16,000 videos (~500 GB of MP4s) that is ~1 TB against the
+allowance in *either* publishing mode — as ZIP uploads, or as uploads plus
+`files.copy`. At ~31 MB a video, **one service account publishes about 12,000
+videos a day under both names.**
+
+Options when a run is bigger than that, best first:
+
+- **Publish one set of names per day.** *Publish which names?* on the Generate
+  page — or `upload_platforms` in the job's params — takes `yt,tk`, `tk` or
+  `yt`. One platform halves the traffic, so ~24,000 videos fit in a day. Run
+  the job, then requeue it the next day with the other platform: state is
+  recorded per platform, so nothing is re-sent.
+
+  The MP4s are **kept on the VM** while a platform is still outstanding, since
+  the second day builds its archives from them. Size the disk for that — they
+  are not freed until every platform has an archive.
+
+- **Add a second service account** and point alternate runs at it with
+  `BVG_DRIVE_CREDENTIALS_FILE` — each account gets its own 750 GB.
+- **Render fewer, or smaller, videos** — at ~31 MB each the allowance is the
+  binding limit long before disk or CPU is.
+
+Throttling short of the ceiling is handled automatically: every Drive call
+retries with exponential backoff, and the budget resets each time a chunk
+lands, so a 30 GB archive survives repeated throttling. Tune with
+`BVG_DRIVE_RETRY_ATTEMPTS` and `BVG_DRIVE_RETRY_MAX_SLEEP`.
+
+### 5g. Repacking folders already in Drive
 
 Renders published before ZIPs existed left every video as its own Drive file
 under `batch_NN/tk/` and `batch_NN/yt/`. `tools/zip_drive_tk.py` converts them

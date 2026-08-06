@@ -30,8 +30,10 @@ storage, which is the documented approach.
 from __future__ import annotations
 
 import logging
+import random
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Iterable, Optional
@@ -313,12 +315,130 @@ def unique_names(names: Iterable[str]) -> list[str]:
 FILE_FIELDS = "id, name, size, webViewLink"
 
 
-def _run_resumable(request) -> dict:
-    """Drive an upload/update to completion, one chunk at a time."""
+# --------------------------------------------------------------------------- throttling
+
+# Transient by definition — the call is fine, Drive is busy or we are going too
+# fast.
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+# 403 reasons that mean "later", not "no". Drive returns a 403 for being
+# throttled, which is indistinguishable from a permission error unless you read
+# the reason — and a run that treats it as fatal throws away hours of work over
+# a wait it should have taken.
+_THROTTLE_REASONS = (
+    "userRateLimitExceeded",     # this user is moving data too fast, or is
+                                 # past the 750 GB/24h transfer allowance
+    "rateLimitExceeded",
+    "dailyLimitExceeded",
+    "sharingRateLimitExceeded",
+)
+
+
+def _sleep(seconds: float) -> None:
+    """Indirected so tests can wait instantly."""
+    time.sleep(seconds)
+
+
+def _is_throttled(exc: Exception) -> bool:
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    if status in _RETRYABLE_STATUS:
+        return True
+    if status != 403:
+        return False
+    # The reason lives in the JSON body, which HttpError renders into str().
+    # Matching on the text avoids depending on the body's exact shape, which
+    # differs between the classic and the newer error formats.
+    return any(reason in str(exc) for reason in _THROTTLE_REASONS)
+
+
+def _throttle_help(what: str, exc: Exception) -> str:
+    return (
+        f"Google Drive kept refusing the {what} after "
+        f"{config.DRIVE_RETRY_ATTEMPTS} attempts.\n\n"
+        "The usual cause is Drive's **750 GB per rolling 24 hours** limit on "
+        "how much data one user may move in. A service account is a user, and "
+        "server-side copies count towards it as well as uploads — so a night "
+        "that puts a terabyte into Drive cannot finish in one day on one "
+        "service account.\n\n"
+        "If it fails immediately every time, that is the daily allowance: wait "
+        "for the window to roll and requeue the job. Nothing local was "
+        "deleted, and folders that were already published are recorded and "
+        "skipped, so it resumes rather than restarting.\n\n"
+        "If it fails only now and then, it is short-term rate limiting — lower "
+        "BVG_DRIVE_UPLOAD_CONCURRENCY, or raise BVG_DRIVE_RETRY_ATTEMPTS so it "
+        f"waits longer.\n\nRaw error: {exc}"
+    )
+
+
+def _retry_call(operation: Callable[[], object], what: str):
+    """Run one Drive call, riding out throttling.
+
+    Deliberately called per *chunk* rather than per file: the budget resets
+    every time a chunk lands, so a transfer that keeps making progress is never
+    abandoned for taking a long time, while one that is genuinely blocked stops
+    after a bounded wait instead of hanging a worker for hours."""
+    attempts = max(1, config.DRIVE_RETRY_ATTEMPTS)
+    tries = 0
+    while True:
+        try:
+            return operation()
+        except DriveError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — re-raised unless it is throttling
+            if not _is_throttled(exc):
+                raise
+            tries += 1
+            if tries >= attempts:
+                raise DriveError(_throttle_help(what, exc)) from exc
+            # Exponential, capped, with jitter — several uploads backing off in
+            # lockstep would retry in lockstep and be throttled together.
+            delay = min(config.DRIVE_RETRY_MAX_SLEEP, 2 ** tries)
+            delay += random.uniform(0, min(1.0, delay / 4))
+            logger.warning("Drive throttled the %s (attempt %d/%d) — waiting "
+                           "%.0fs", what, tries, attempts, delay)
+            _sleep(delay)
+
+
+def _retry_call_refused(operation: Callable[[], object], what: str):
+    """_retry_call, but only for requests Drive explicitly *refused*.
+
+    For a non-idempotent call the difference matters. A 403 or 429 is Drive
+    saying it did not act, so repeating it is safe. A 5xx or a dropped
+    connection is ambiguous — the work may have been done and only the answer
+    lost — and repeating that is how one files.copy becomes two identical files
+    in one folder."""
+    attempts = max(1, config.DRIVE_RETRY_ATTEMPTS)
+    tries = 0
+    while True:
+        try:
+            return operation()
+        except Exception as exc:  # noqa: BLE001 — re-raised unless it is throttling
+            status = getattr(getattr(exc, "resp", None), "status", None)
+            refused = status == 429 or (status == 403 and _is_throttled(exc))
+            tries += 1
+            if not refused or tries >= attempts:
+                if refused:
+                    raise DriveError(_throttle_help(what, exc)) from exc
+                raise
+            delay = min(config.DRIVE_RETRY_MAX_SLEEP, 2 ** tries)
+            delay += random.uniform(0, min(1.0, delay / 4))
+            logger.warning("Drive throttled the %s (attempt %d/%d) — waiting "
+                           "%.0fs", what, tries, attempts, delay)
+            _sleep(delay)
+
+
+def _run_resumable(request, what: str = "upload") -> dict:
+    """Drive an upload to completion, one chunk at a time.
+
+    The same request object is reused across retries, so a chunk that has to be
+    re-sent continues from the offset Drive already accepted instead of
+    restarting a 30 GB archive from zero."""
     response = None
     while response is None:
-        # num_retries gives us exponential backoff on 5xx/429 for free.
-        _status, response = request.next_chunk(num_retries=3)
+        # num_retries handles the quick 5xx blips inside one call; _retry_call
+        # handles being told to slow down, which takes minutes not seconds.
+        _status, response = _retry_call(
+            lambda: request.next_chunk(num_retries=3), what)
     return response
 
 
@@ -330,14 +450,14 @@ def upload_file(path: Path, parent_id: str, name: Optional[str] = None) -> dict:
         raise DriveError(f"File to upload does not exist: {path}")
 
     media = MediaFileUpload(
-        str(path), chunksize=config.DRIVE_CHUNK_BYTES, resumable=True)
+        str(path), chunksize=config.DRIVE_UPLOAD_CHUNK_BYTES, resumable=True)
     request = service().files().create(
         body={"name": name or path.name, "parents": [parent_id]},
         media_body=media,
         fields=FILE_FIELDS,
         supportsAllDrives=True,
     )
-    return _run_resumable(request)
+    return _run_resumable(request, f"upload of {name or path.name}")
 
 
 def upload_or_replace(path: Path, parent_id: str, name: str,
@@ -359,9 +479,10 @@ def upload_or_replace(path: Path, parent_id: str, name: str,
     if not path.is_file():
         raise DriveError(f"File to upload does not exist: {path}")
 
-    existing = find_file(name, parent_id, drive_id=drive_id)
+    existing = _retry_call(lambda: find_file(name, parent_id, drive_id=drive_id),
+                           f"lookup of {name}")
     media = MediaFileUpload(
-        str(path), chunksize=config.DRIVE_CHUNK_BYTES, resumable=True)
+        str(path), chunksize=config.DRIVE_UPLOAD_CHUNK_BYTES, resumable=True)
     if existing:
         logger.info("Replacing the existing %s in %s", name, parent_id)
         request = service().files().update(
@@ -371,7 +492,7 @@ def upload_or_replace(path: Path, parent_id: str, name: str,
         request = service().files().create(
             body={"name": name, "parents": [parent_id]}, media_body=media,
             fields=FILE_FIELDS, supportsAllDrives=True)
-    return _run_resumable(request)
+    return _run_resumable(request, f"upload of {name}")
 
 
 def upload_verified(path: Path, parent_id: str, name: str,
@@ -411,11 +532,18 @@ def copy_file(file_id: str, new_name: str, parent_id: Optional[str] = None) -> d
     # duplicating the file inside one apparently-healthy call. A failed copy
     # is retried at the item level instead, behind a find_file() check that
     # looks for the ambiguous previous attempt before copying again.
-    return service().files().copy(
+    #
+    # An explicit throttle IS safe to retry, and is retried: a 403 or 429 is
+    # Drive stating it refused the request, so unlike a dropped connection
+    # there is no possibility the copy happened anyway. Worth separating,
+    # because copies count against the same 750 GB/24h allowance as uploads and
+    # are therefore exactly what gets throttled on a large night.
+    request = service().files().copy(
         fileId=file_id, body=body,
-        fields="id, name, webViewLink",
+        fields="id, name, size, webViewLink",
         supportsAllDrives=True,
-    ).execute()
+    )
+    return _retry_call_refused(lambda: request.execute(), f"copy to {new_name}")
 
 
 def find_file(name: str, parent_id: str,
@@ -728,8 +856,11 @@ def download_file(file_id: str, dest: Path, expected_size: int = 0) -> bool:
         done = False
         while not done:
             # num_retries gives exponential backoff on 5xx/429 for free, and a
-            # GET is safe to repeat.
-            _status, done = downloader.next_chunk(num_retries=3)
+            # GET is safe to repeat; _retry_call adds the patience needed when
+            # Drive answers a bulk download with a 403 telling us to slow down.
+            _status, done = _retry_call(
+                lambda: downloader.next_chunk(num_retries=3),
+                f"download of {dest.name}")
     part.replace(dest)
     return True
 

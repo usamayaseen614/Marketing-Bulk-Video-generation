@@ -459,6 +459,50 @@ behaviour: every video as its own Drive file under `batch_NN/yt/` and `batch_NN/
 second made with `files.copy`. Worth it when you need to replace one video without
 rebuilding an archive.
 
+#### Drive's 750 GB/day ceiling
+
+Google caps **one user at 750 GB per rolling 24 hours** of data moved into Drive. A
+service account is a user, and **server-side copies count against it as well as
+uploads**. Past the ceiling every write returns `403 userRateLimitExceeded` — which
+reads like a permission error and is not one.
+
+That is a hard planning constraint on a big night, and it applies to *both* publishing
+modes:
+
+| Mode | Bytes against the 750 GB allowance, for 16,000 videos (~500 GB of MP4s) |
+|---|---|
+| `zip` | ~1 TB — each archive is a separate upload |
+| `files` | ~1 TB — ~500 GB uploaded, ~500 GB of `files.copy`, and copies count |
+
+At ~31 MB a video that is roughly **12,000 videos a day** under both names — whichever
+mode you pick, because copies are not free.
+
+**The way out is to publish one set of names at a time.** *Publish which names?* on the
+Generate page (or `upload_platforms` in a job's params, or `BVG_UPLOAD_PLATFORMS`) takes
+`yt,tk`, `tk`, or `yt`. One platform halves the day's traffic, so ~24,000 videos fit:
+
+```
+Monday:  publish tk  → batch_NN/tk.zip   (~500 GB)   videos KEPT on the VM
+Tuesday: requeue the same job with upload_platforms=["yt"]
+         → batch_NN/yt.zip (~500 GB), and now the MP4s are freed
+```
+
+Each platform's state is recorded separately, so the second run re-packs from the MP4s
+still on disk and re-sends nothing. **The videos are deliberately not deleted while a
+platform is still outstanding** — `BVG_UPLOAD_FREE_LOCAL` only takes effect once every
+platform has an archive, or the second day would have nothing to build from. Budget disk
+for that: the MP4s stay put overnight.
+
+The other lever is a second service account (`BVG_DRIVE_CREDENTIALS_FILE`) — each account
+gets its own 750 GB.
+
+Throttling itself is ridden out rather than fatal: every Drive call retries with
+exponential backoff and jitter, and **the retry budget resets each time a chunk lands**,
+so a 30 GB archive that is throttled repeatedly still finishes. Only a sustained refusal
+— which is what the daily ceiling looks like — gives up, and it says so in those terms
+instead of surfacing a bare 403. Nothing local is deleted when it does, so requeueing the
+job after the window rolls picks up where it stopped.
+
 #### Zipping folders that are already in Drive
 
 Renders published before archives existed can be converted in place:

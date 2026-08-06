@@ -234,6 +234,55 @@ assert any("missing" in line for line in result6["upload_failures"])
 print("missing MP4: excluded from the archive AND reported as not uploaded")
 
 
+# ---- publishing one platform at a time, a day apart -------------------------
+# Drive allows one account 750 GB per rolling 24 hours, so a big night has to
+# send tk today and yt tomorrow. What must hold: today sends ONLY tk, the MP4s
+# survive the night (tomorrow builds yt.zip from them), tomorrow sends ONLY yt,
+# and only then are the videos freed.
+job7 = make_job("zip-tk-today", params={"upload_platforms": ["tk"]})
+uploads.clear()
+
+day1 = render._upload(store.get_job(job7), N_ROWS, N_FOLDERS, PLACEMENT)
+assert {u["name"] for u in uploads} == {"tk.zip"}, [u["name"] for u in uploads]
+assert len(uploads) == 2, "one tk.zip per output folder, and nothing else"
+assert day1["upload_platforms"] == ["tk"]
+assert all(src.is_file() for src in sources(job7)), \
+    "the MP4s were deleted with yt.zip still unpublished — tomorrow has nothing to pack"
+assert not day1["videos_freed"] and day1["videos_kept"] == 4
+assert day1["platforms_pending"] == ["yt"], day1
+assert all(i["upload_status"] == store.ITEM_DONE for i in store.list_items(job7))
+print("day 1 (tk only): tk.zip published, MP4s deliberately kept for day 2")
+
+# Tomorrow: the same job, requeued asking for the other half.
+store.merge_job_params(job7, upload_platforms=["yt"])
+uploads.clear()
+day2 = render._upload(store.get_job(job7), N_ROWS, N_FOLDERS, PLACEMENT)
+assert {u["name"] for u in uploads} == {"yt.zip"}, [u["name"] for u in uploads]
+assert len(uploads) == 2, "tk.zip was re-sent — that is 500 GB of wasted quota"
+by_key7 = {(u["parent"].rsplit("/", 1)[-1], u["name"]): u for u in uploads}
+assert by_key7[("batch_01", "yt.zip")]["entries"] == [
+    "caption 1 #one.mp4", "caption 3 #one.mp4"], "yt.zip has the wrong names"
+assert day2["videos_freed"] and not day2["platforms_pending"]
+assert all(not src.exists() for src in sources(job7)), \
+    "both platforms are published — the MP4s should finally be freed"
+print("day 2 (yt only): only yt.zip sent, tk.zip untouched, MP4s then freed")
+
+# A third run has nothing left to do at all.
+uploads.clear()
+store.merge_job_params(job7, upload_platforms=["yt", "tk"])
+render._upload(store.get_job(job7), N_ROWS, N_FOLDERS, PLACEMENT)
+assert not uploads, "a fully published job re-sent something"
+print("day 3 (both): everything already recorded — nothing re-sent")
+
+# An unrecognised platform must not silently mean "publish everything".
+assert render._selected_platforms({"upload_platforms": ["tok"]}) == ("yt", "tk")
+assert render._selected_platforms({"upload_platforms": "tk"}) == ("tk",)
+assert render._selected_platforms({"upload_platforms": ["TK", "yt"]}) == ("yt", "tk"), \
+    "platforms must come back in publishing order, not the order given"
+assert render._selected_platforms({}) == ("yt", "tk")
+print("platform parsing: case-insensitive, ordered, and safe when nonsense")
+
+
 # ---- upload_mode=files still routes to the per-video path -------------------
 calls = []
 drive.upload_file = lambda path, parent, name=None: (
@@ -254,5 +303,24 @@ assert len([c for c in calls if c[0] == "copy"]) == 4
 assert all(src.is_file() for src in sources(job5)), \
     "files mode must not delete the videos"
 print("upload_mode=files: unchanged per-video path, nothing zipped or freed")
+
+# One platform in files mode uploads that platform's OWN name and makes no
+# copy — the copy is what doubles the bytes, so skipping it is the point.
+calls.clear()
+job8 = make_job("files-tk-only",
+                params={"upload_mode": "files", "upload_platforms": ["tk"]})
+result8 = render._upload(store.get_job(job8), N_ROWS, N_FOLDERS, PLACEMENT)
+assert not [c for c in calls if c[0] == "copy"], \
+    "a copy was made for a single platform — that is the quota being wasted"
+uploaded8 = [c for c in calls if c[0] == "upload"]
+assert len(uploaded8) == 4
+assert all(name.endswith("#one #two #three #four #five.mp4")
+           for _kind, _parent, name in uploaded8), \
+    "tk-only must upload the LONG name, not the short one"
+assert all(parent.endswith("/tk") for _kind, parent, _name in uploaded8)
+assert result8["drive_files"] == 4, result8      # not doubled
+assert all(i["drive_link"] == "https://f" for i in store.list_items(job8)), \
+    "with no copy, the item must link to the uploaded file"
+print("files mode, tk only: long name uploaded straight to tk/, no copy made")
 
 print("\nALL ZIP UPLOAD TESTS PASSED")
