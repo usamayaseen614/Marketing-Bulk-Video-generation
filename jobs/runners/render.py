@@ -298,6 +298,7 @@ def _render_batches(job: dict, df: pd.DataFrame, ws, n_batches: int,
                 work_dir=ws.work_dir / f"b{batch:02d}_p{promo_idx:02d}",
                 output_dir=store.videos_dir(job_id) / batching.source_folder_name(batch),
                 cta_video_slots=ws.cta_video_slots,
+                gif_paths=ws.gif_paths,
             )
             for message in generator.input_warnings:
                 if message not in batch_warnings:

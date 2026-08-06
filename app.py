@@ -33,6 +33,8 @@ from video_generator import (
     FONT_CHOICES,
     FONT_CUSTOM,
     REQUIRED_COLUMNS,
+    TEXT_FIT_MIN_SIZE,
+    TEXT_ROLES,
     TEXT_STYLES,
     RenderConfig,
     VideoGenerator,
@@ -58,6 +60,7 @@ def make_generator(ws: Workspace, config: RenderConfig, output_dir: Path) -> Vid
         work_dir=ws.work_dir,
         output_dir=output_dir,
         cta_video_slots=ws.cta_video_slots,
+        gif_paths=ws.gif_paths,
     )
     # Bad uploads caught at construction (e.g. an audio-only "video" clip that
     # would crash FFmpeg mid-render) — show them wherever a generator is built.
@@ -303,6 +306,55 @@ with st.sidebar:
              "hold the last frame. Split-screen mode turns this on automatically.",
     )
 
+    st.subheader("GIFs (optional)")
+    st.caption(
+        "Short looping clips (MP4) shown one after another in their own box — "
+        "separate from the CTA clips above, with their own pool, box and "
+        "layer order. Each gif holds the box for at least the dwell time "
+        "below, repeating **itself** a whole number of times to get there: a "
+        "3-second gif plays twice (6s), it is never cut short. The sequence "
+        "keeps drawing fresh gifs until the promo video ends, so it never "
+        "freezes on a stopped animation."
+    )
+    gif_files = st.file_uploader(
+        "GIF clips (MP4)", type=["mp4"], accept_multiple_files=True,
+        key="gif_pool",
+        help="One flat pool, not slots — a random selection plays in each "
+             "output video, every gif used once before any repeats. Ignored "
+             "when the GIFs come from Drive instead (set below the sheet).",
+    )
+    gif_min_seconds = st.number_input(
+        "Minimum seconds per gif", 1.0, 30.0, 5.0, 0.5,
+        help="The dwell floor. A gif shorter than this repeats itself until it "
+             "clears the floor; a gif already longer plays once, in full.",
+    )
+    st.caption(
+        f"At ~{gif_min_seconds:g}s each, a 20-second promo shows about "
+        f"{max(1, int(20 // gif_min_seconds))} gifs and a 60-second promo about "
+        f"{max(1, int(60 // gif_min_seconds))} — however many you upload. The "
+        "pool is the variety across videos, not within one."
+    )
+    st.caption(
+        "The box is an invisible fit guide, not a visible panel. A gif bigger "
+        "than the box is scaled down to sit inside it (never cropped, never "
+        "stretched); a smaller one keeps its own size. Whatever is behind shows "
+        "through the space around it."
+    )
+    gif_x = st.number_input("GIF box X", 0, CANVAS_W, 60)
+    gif_y = st.number_input("GIF box Y", 0, CANVAS_H, 560)
+    gif_w = st.number_input("GIF box width", 50, CANVAS_W, 360)
+    gif_h = st.number_input("GIF box height", 50, CANVAS_H, 360)
+    gif_fade_start = st.number_input(
+        "GIF fade-in start (s)", 0.0, 30.0, 0.0, 0.1,
+        help="Per-row override: `GIF_Fade_Start`. 0 = visible from the first "
+             "frame, which is also what the static preview shows.",
+    )
+    gif_fade_duration = st.number_input(
+        "GIF fade-in duration (s)", 0.0, 30.0, 0.0, 0.1,
+        help="Per-row override: `GIF_Fade_Duration`. Applies to the first gif "
+             "only — the rest of the sequence cuts straight in.",
+    )
+
     st.subheader("Layer order (z-index)")
     st.caption(
         "Which element sits on top when they overlap — higher number = nearer "
@@ -312,16 +364,23 @@ with st.sidebar:
         "Promo video", 1, 99, 1, 1, key="z_video",
         help="Stacking order of the promo video layer.",
     )
+    gif_z = st.number_input(
+        "GIFs", 1, 99, 2, 1, key="z_gif",
+        help="Stacking order of the GIF layer. Below the CTA layers by "
+             "default — it is decoration, so it yields to anything carrying a "
+             "message. Raise it above the promo video's number to float a gif "
+             "over the video instead of behind it.",
+    )
     cta_video_z = st.number_input(
-        "CTA video", 1, 99, 2, 1, key="z_cta_video",
+        "CTA video", 1, 99, 3, 1, key="z_cta_video",
         help="Stacking order of the CTA video layer.",
     )
     cta_image_z = st.number_input(
-        "CTA image", 1, 99, 3, 1, key="z_cta_image",
+        "CTA image", 1, 99, 4, 1, key="z_cta_image",
         help="Stacking order of the CTA image (button) layer.",
     )
     text_z = st.number_input(
-        "Texts", 1, 99, 4, 1, key="z_text",
+        "Texts", 1, 99, 5, 1, key="z_text",
         help="Stacking order of the headline / subheading / footer texts.",
     )
 
@@ -353,6 +412,33 @@ with st.sidebar:
              "with solid text on top is the classic caption look. Override per "
              "text with `Headline_BgOpacity` etc.",
     )
+
+    st.subheader("Text fit boxes (optional)")
+    st.caption(
+        "Give a text a fixed box and the box drives the type: the text re-wraps "
+        "to the box's width and its font size is picked so the whole block — "
+        "including any outline or glow — fills the box without spilling out. "
+        "Line breaks are added **and removed** as the box changes, so long and "
+        "short texts come out optically the same size across a batch."
+    )
+    st.caption(
+        f"Both width and height are needed; **0 = off**, which leaves that text "
+        f"behaving exactly as before (its `*_Size` cell, wrapped to the canvas). "
+        f"The box is centred on the text's X/Y, so switching it on never moves "
+        f"anything. Per-row overrides: `Headline_Width` / `Headline_Height`, and "
+        f"the same for Subheading and Footer. Text that cannot fit even at "
+        f"{TEXT_FIT_MIN_SIZE}px is drawn at {TEXT_FIT_MIN_SIZE}px and flagged on "
+        "the row rather than shrunk into illegibility."
+    )
+    text_box_dims = {}
+    for _role in TEXT_ROLES:
+        _cw, _ch = st.columns(2)
+        text_box_dims[_role] = (
+            _cw.number_input(f"{_role} box width", 0, CANVAS_W, 0, 10,
+                             key=f"tbox_w_{_role}"),
+            _ch.number_input(f"{_role} box height", 0, CANVAS_H, 0, 10,
+                             key=f"tbox_h_{_role}"),
+        )
 
     st.subheader("Subliminal text (experimental)")
     subliminal_targets = st.multiselect(
@@ -474,9 +560,20 @@ config = RenderConfig(
     cta_video_fade_duration=float(cta_video_fade_duration),
     cta_video_speeds=[float(s) for s in cta_video_speeds],
     cta_video_fill=bool(cta_video_fill),
-    video_z=int(video_z), cta_video_z=int(cta_video_z),
+    gif_x=int(gif_x), gif_y=int(gif_y),
+    gif_w=int(gif_w), gif_h=int(gif_h),
+    gif_min_seconds=float(gif_min_seconds),
+    gif_fade_start=float(gif_fade_start),
+    gif_fade_duration=float(gif_fade_duration),
+    video_z=int(video_z), gif_z=int(gif_z), cta_video_z=int(cta_video_z),
     cta_image_z=int(cta_image_z), text_z=int(text_z),
     default_font=default_font, default_style=default_style,
+    headline_box_w=int(text_box_dims["Headline"][0]),
+    headline_box_h=int(text_box_dims["Headline"][1]),
+    subheading_box_w=int(text_box_dims["Subheading"][0]),
+    subheading_box_h=int(text_box_dims["Subheading"][1]),
+    footer_box_w=int(text_box_dims["Footer"][0]),
+    footer_box_h=int(text_box_dims["Footer"][1]),
     text_opacity=text_opacity_pct / 100.0,
     text_bg_opacity=text_bg_opacity_pct / 100.0,
     subliminal_targets=list(subliminal_targets),
@@ -754,6 +851,39 @@ if clip_source in ("scrape_job", "scrape_now"):
     clip_params["clips_per_slot"] = col_ps.number_input(
         "Clips per slot", 1, 50, 10, 1)
 
+# ---- GIF source. Deliberately its OWN selector rather than reusing
+# clip_source: the CTA options include "scrape a TikTok account", which has no
+# meaning for a pool of gif loops, and the two layers are independent
+# everywhere else too.
+st.markdown("**GIFs**")
+gif_source = st.radio(
+    "Where do the GIFs come from?",
+    options=["upload", "drive_folder"],
+    format_func=lambda m: {
+        "upload": "Upload them in the sidebar (as above)",
+        "drive_folder": "Paste a Google Drive folder link — the server "
+                        "downloads them itself (no upload)",
+    }[m],
+    horizontal=True,
+    key="gif_source",
+    help="Independent of where the CTA clips come from.",
+)
+if gif_source == "drive_folder":
+    clip_params["gifs_drive_folder"] = st.text_input(
+        "GIF folder — Drive link", key="gifs_drive",
+        placeholder="https://drive.google.com/drive/folders/…",
+        help="Every video in this folder — and its sub-folders — becomes part "
+             "of the gif pool. Share it with the service account first.",
+    ).strip()
+    st.caption("The sidebar GIF uploader is ignored in this mode.")
+    if st.button("🔍 Check the GIF folder",
+                 disabled=not clip_params.get("gifs_drive_folder")):
+        from integrations import drive as _drv
+
+        with st.spinner("Reading Drive…"):
+            _ok, _msg = _drv.check_source(clip_params["gifs_drive_folder"])
+            (st.success if _ok else st.error)(f"**GIFs** — {_msg}")
+
 # ---- captions
 st.subheader("4. Captions")
 _pool = store.active_pool()
@@ -1001,7 +1131,7 @@ if preview_clicked and ready:
         with tempfile.TemporaryDirectory(prefix="bvg_preview_") as tmp:
             try:
                 ws = build_workspace(Path(tmp), video_file, zip_file, cta_file,
-                                     font_file, cta_video_slot_files)
+                                     font_file, cta_video_slot_files, gif_files)
                 generator = make_generator(ws, config, Path(tmp) / "out")
                 # Same deterministic background assignment as the real batch,
                 # so the preview shows the row's actual background.
@@ -1033,7 +1163,7 @@ if render_row_clicked and ready:
         with tempfile.TemporaryDirectory(prefix="bvg_rowrender_") as tmp:
             try:
                 ws = build_workspace(Path(tmp), video_file, zip_file, cta_file,
-                                     font_file, cta_video_slot_files)
+                                     font_file, cta_video_slot_files, gif_files)
                 generator = make_generator(ws, config, Path(tmp) / "out")
                 # Same deterministic background assignment as the real batch, so
                 # this row renders with its actual background. df already carries
@@ -1164,7 +1294,13 @@ if generate_clicked and ready:
         stage_uploads(assets, promo_files, zip_file, cta_file, font_file,
                       # Clips come from the scrape in chained mode; the pipeline
                       # materialises them into the same cta_slot_N folders.
-                      None if clip_source != "upload" else cta_video_slot_files)
+                      None if clip_source != "upload" else cta_video_slot_files,
+                      # Gated on the GIF layer's OWN source, never on
+                      # clip_source: a user who fetches CTA clips from Drive but
+                      # uploads their gifs would otherwise lose every one of
+                      # them silently — nothing downstream checks for gifs, so
+                      # the batch would render clean and gif-free.
+                      None if gif_source != "upload" else gif_files)
 
         # The sheet is written with any preview-editor edits baked in, so the
         # worker renders exactly what this page was showing. updated_excel_bytes
@@ -1177,7 +1313,11 @@ if generate_clicked and ready:
                                 st.session_state.get("row_edits") or {})
         )
 
-        chained = clip_source != "upload" or caption_mode == "generate"
+        # Anything that has to be fetched or generated before rendering makes
+        # this a pipeline job rather than a plain render — including a gif pool
+        # that still has to come down from Drive.
+        chained = (clip_source != "upload" or gif_source != "upload"
+                   or caption_mode == "generate")
         store.create_job(
             kind=store.KIND_PIPELINE if chained else store.KIND_RENDER,
             params={
@@ -1188,6 +1328,7 @@ if generate_clicked and ready:
                 "make_zip": True,
                 "excel_name": excel_file.name,
                 "clip_source": clip_source,
+                "gif_source": gif_source,
                 "drive_folder": drive_folder.strip(),
                 **clip_params,
                 **caption_params,
