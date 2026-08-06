@@ -238,19 +238,49 @@ def _escape(name: str) -> str:
     return name.replace("\\", "\\\\").replace("'", "\\'")
 
 
+def _search(query: str, fields: str, drive_id: Optional[str],
+            page_size: int = 10) -> list[dict]:
+    """files.list scoped to a Shared Drive, falling back to an unscoped query.
+
+    `corpora='drive'` requires the caller to be a **member of the Shared
+    Drive**. A service account that was given access to a *folder* inside one
+    is not a member: it reads and writes that folder perfectly well, but any
+    query naming its driveId comes back `404 Shared drive not found`.
+
+    Every caller here already filters by parent, so the unscoped query is
+    correct on its own — the driveId is an optimisation, not a requirement.
+    Losing it must therefore not break the search, because the alternative is
+    ensure_folder() concluding a folder does not exist and creating a second
+    one beside it on every single run."""
+    svc = service()
+    common = dict(q=query, spaces="drive", fields=f"files({fields})",
+                  includeItemsFromAllDrives=True, supportsAllDrives=True,
+                  pageSize=page_size)
+    blocked = getattr(_local, "no_corpus", None)
+    if blocked is None:
+        blocked = _local.no_corpus = set()
+    if drive_id and drive_id not in blocked:
+        try:
+            return svc.files().list(corpora="drive", driveId=drive_id,
+                                    **common).execute().get("files", [])
+        except Exception as exc:  # noqa: BLE001
+            if getattr(getattr(exc, "resp", None), "status", None) != 404:
+                raise
+            # Remembered, so the whole run does not pay a doomed call per
+            # lookup once we know this drive is not visible as a corpus.
+            blocked.add(drive_id)
+            logger.info("Shared Drive %s is not searchable as a corpus "
+                        "(folder-level access?) — querying by parent instead",
+                        drive_id)
+    return svc.files().list(**common).execute().get("files", [])
+
+
 def find_folder(name: str, parent_id: str) -> Optional[str]:
-    drive_id = _require_config()
     query = (
         f"name = '{_escape(name)}' and '{parent_id}' in parents "
         f"and mimeType = '{FOLDER_MIME}' and trashed = false"
     )
-    response = service().files().list(
-        q=query, spaces="drive", fields="files(id, name)",
-        corpora="drive", driveId=drive_id,
-        includeItemsFromAllDrives=True, supportsAllDrives=True,
-        pageSize=10,
-    ).execute()
-    files = response.get("files", [])
+    files = _search(query, "id, name", _require_config(), page_size=10)
     return files[0]["id"] if files else None
 
 
@@ -556,18 +586,11 @@ def find_file(name: str, parent_id: str,
     find out is to look. `drive_id` should be passed by callers running on
     worker threads — resolve_target() is thread-local, so resolving here on a
     pool thread would ignore a job's own destination override."""
-    drive_id = drive_id or _require_config()
     query = (
         f"name = '{_escape(name)}' and '{parent_id}' in parents "
         f"and mimeType != '{FOLDER_MIME}' and trashed = false"
     )
-    response = service().files().list(
-        q=query, spaces="drive", fields=f"files({FILE_FIELDS})",
-        corpora="drive", driveId=drive_id,
-        includeItemsFromAllDrives=True, supportsAllDrives=True,
-        pageSize=1,
-    ).execute()
-    files = response.get("files", [])
+    files = _search(query, FILE_FIELDS, drive_id or _require_config(), page_size=1)
     return files[0] if files else None
 
 
@@ -984,7 +1007,6 @@ def _check_access_inner() -> tuple[bool, str]:
                        "or paste a link above to test one directly.")
     try:
         drive_id, parent_id = resolve_target()
-        info = service().drives().get(driveId=drive_id, fields="id, name").execute()
     except DriveError as exc:
         # These already carry a specific, actionable explanation.
         return False, str(exc)
@@ -1001,13 +1023,52 @@ def _check_access_inner() -> tuple[bool, str]:
             )
         return False, f"Drive check failed: {message}"
 
+    # The Shared Drive's NAME is a nicety, and asking for it is deliberately
+    # NOT allowed to fail the check.
+    #
+    # drives.get requires the caller to be a **member of the Shared Drive**. A
+    # service account that was given access to a folder *inside* one — which is
+    # how these are usually set up — is not a member, and gets
+    # `404 Shared drive not found` for a drive it can write to perfectly well.
+    # Failing here reported a working setup as broken, and pointed at the one
+    # thing that was fine.
+    member = True
+    drive_name = ""
+    try:
+        info = service().drives().get(driveId=drive_id, fields="id, name").execute()
+        drive_name = info.get("name") or drive_id
+    except Exception as exc:  # noqa: BLE001 — a name is not worth failing over
+        member = False
+        drive_name = drive_id
+        logger.info("drives.get(%s) failed — folder-level access rather than "
+                    "Shared Drive membership? %s", drive_id, exc)
+
     where = ("the Shared Drive root" if parent_id == drive_id
              else f"folder `{parent_id}`")
     try:
         target = ensure_path(["_connection_test"], parent_id=parent_id)
     except Exception as exc:  # noqa: BLE001
+        if not member and parent_id == drive_id:
+            # Both facts together are the actual diagnosis: not a member, and
+            # aimed at the drive's ROOT. Writing at the root of a Shared Drive
+            # is a member's privilege, while a folder inside it can be shared
+            # with anyone — so the fix is usually to aim one level lower, not
+            # to change permissions.
+            return False, (
+                f"The service account can see `{drive_id}` but is **not a "
+                "member of that Shared Drive**, and cannot create folders at "
+                "its root — writing there is a member's privilege.\n\n"
+                "Two ways to fix it, either is fine:\n\n"
+                "1. **Point at a folder instead of the drive.** Make a folder "
+                "inside the Shared Drive, share it with the service account as "
+                "a Content Manager, and paste *that folder's* URL as the "
+                "destination. Nothing else has to change.\n"
+                "2. **Add the service account to the Shared Drive** itself "
+                "(Shared drive → Manage members) as a Content Manager.\n\n"
+                f"Raw error: {exc}"
+            )
         return False, (
-            f"Can see Shared Drive “{info.get('name')}” but cannot create "
+            f"Can see Shared Drive “{drive_name}” but cannot create "
             "folders in it — the service account probably has Viewer or "
             f"Contributor access instead of Content Manager.\n\nRaw error: {exc}"
         )
@@ -1039,14 +1100,14 @@ def _check_access_inner() -> tuple[bool, str]:
                     "rather than the folder, a Content Manager. Viewer and "
                     "Commenter cannot upload.")
         return False, (
-            f"Folders can be created in “{info.get('name')}”, but UPLOADING a "
+            f"Folders can be created in “{drive_name}”, but UPLOADING a "
             f"file failed.{hint}\n\nRaw error: {exc}")
 
     try:
         copy = copy_file(probe["id"], "_copy_test.txt", target)
     except Exception as exc:  # noqa: BLE001
         return False, (
-            f"Upload works in “{info.get('name')}”, but the server-side COPY "
+            f"Upload works in “{drive_name}”, but the server-side COPY "
             "failed. Every video is published twice using files.copy, so this "
             "one matters.\n\n"
             f"Raw error: {exc}")
@@ -1078,7 +1139,15 @@ def _check_access_inner() -> tuple[bool, str]:
                 "Drive itself, "
                 "which is enough for everything this app does.)")
 
+    if not member:
+        note += (
+            "\n\n(The service account is **not a member of the Shared Drive "
+            "itself** — it has been given access to the folder instead. That is "
+            "a perfectly good setup and everything above was verified against "
+            "it; it only means the drive's name can't be read, so the id is "
+            "shown in its place.)")
+
     return True, (
-        f"Connected to Shared Drive “{info.get('name')}”, writing into {where}. "
+        f"Connected to Shared Drive “{drive_name}”, writing into {where}. "
         f"Upload and server-side copy both verified. {folder_link(target)}{note}"
     )

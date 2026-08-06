@@ -415,6 +415,27 @@ delete it afterwards rather than fighting for space at 3am.
 Set `BVG_UPLOAD_FREE_LOCAL=false` to keep the MP4s on the VM after publishing
 (the local ZIP fallback then still works, and the disk must hold everything).
 
+### 5e-bis. "Shared drive not found" — membership vs folder access
+
+`404 Shared drive not found: 0A…` means the service account is **not a member
+of the Shared Drive**. That is not necessarily a problem: an account given
+access to a *folder inside* the drive can read and write that folder perfectly
+well, it just cannot see the drive as an object. Two API calls behave
+differently and everything else works:
+
+| Call | Member | Folder access only |
+|---|---|---|
+| `drives.get` — the drive's name | ✅ | ❌ 404 |
+| `files.list(corpora='drive', driveId=…)` | ✅ | ❌ 404 |
+| create folder / upload / copy inside the folder | ✅ | ✅ |
+| create folder at the **drive root** | ✅ | ❌ 403 |
+
+The app handles both: the name is best-effort, and searches fall back to an
+ordinary parent-scoped query. **Point the destination at a folder inside the
+Shared Drive rather than at the drive itself** and folder-level access is
+enough for everything. Aiming at the drive root is the one thing that needs
+real membership.
+
 ### 5f. The 750 GB/day Drive ceiling (plan around this)
 
 Google allows **one user 750 GB per rolling 24 hours** of data moved into Drive.
