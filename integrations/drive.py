@@ -30,10 +30,8 @@ storage, which is the documented approach.
 from __future__ import annotations
 
 import logging
-import random
 import re
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Iterable, Optional
@@ -238,49 +236,19 @@ def _escape(name: str) -> str:
     return name.replace("\\", "\\\\").replace("'", "\\'")
 
 
-def _search(query: str, fields: str, drive_id: Optional[str],
-            page_size: int = 10) -> list[dict]:
-    """files.list scoped to a Shared Drive, falling back to an unscoped query.
-
-    `corpora='drive'` requires the caller to be a **member of the Shared
-    Drive**. A service account that was given access to a *folder* inside one
-    is not a member: it reads and writes that folder perfectly well, but any
-    query naming its driveId comes back `404 Shared drive not found`.
-
-    Every caller here already filters by parent, so the unscoped query is
-    correct on its own — the driveId is an optimisation, not a requirement.
-    Losing it must therefore not break the search, because the alternative is
-    ensure_folder() concluding a folder does not exist and creating a second
-    one beside it on every single run."""
-    svc = service()
-    common = dict(q=query, spaces="drive", fields=f"files({fields})",
-                  includeItemsFromAllDrives=True, supportsAllDrives=True,
-                  pageSize=page_size)
-    blocked = getattr(_local, "no_corpus", None)
-    if blocked is None:
-        blocked = _local.no_corpus = set()
-    if drive_id and drive_id not in blocked:
-        try:
-            return svc.files().list(corpora="drive", driveId=drive_id,
-                                    **common).execute().get("files", [])
-        except Exception as exc:  # noqa: BLE001
-            if getattr(getattr(exc, "resp", None), "status", None) != 404:
-                raise
-            # Remembered, so the whole run does not pay a doomed call per
-            # lookup once we know this drive is not visible as a corpus.
-            blocked.add(drive_id)
-            logger.info("Shared Drive %s is not searchable as a corpus "
-                        "(folder-level access?) — querying by parent instead",
-                        drive_id)
-    return svc.files().list(**common).execute().get("files", [])
-
-
 def find_folder(name: str, parent_id: str) -> Optional[str]:
+    drive_id = _require_config()
     query = (
         f"name = '{_escape(name)}' and '{parent_id}' in parents "
         f"and mimeType = '{FOLDER_MIME}' and trashed = false"
     )
-    files = _search(query, "id, name", _require_config(), page_size=10)
+    response = service().files().list(
+        q=query, spaces="drive", fields="files(id, name)",
+        corpora="drive", driveId=drive_id,
+        includeItemsFromAllDrives=True, supportsAllDrives=True,
+        pageSize=10,
+    ).execute()
+    files = response.get("files", [])
     return files[0]["id"] if files else None
 
 
@@ -339,235 +307,25 @@ def unique_names(names: Iterable[str]) -> list[str]:
     return out
 
 
-# Asked for on every write and lookup. `size` is what lets a caller prove the
-# bytes that arrived are the bytes it sent — the only cheap integrity check
-# Drive offers, and the one that matters for a 30 GB archive.
-FILE_FIELDS = "id, name, size, webViewLink"
-
-
-# --------------------------------------------------------------------------- throttling
-
-# Transient by definition — the call is fine, Drive is busy or we are going too
-# fast.
-_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
-
-# 403 reasons that mean "later", not "no". Drive returns a 403 for being
-# throttled, which is indistinguishable from a permission error unless you read
-# the reason — and a run that treats it as fatal throws away hours of work over
-# a wait it should have taken.
-_THROTTLE_REASONS = (
-    "userRateLimitExceeded",     # this user is moving data too fast, or is
-                                 # past the 750 GB/24h transfer allowance
-    "rateLimitExceeded",
-    "dailyLimitExceeded",
-    "sharingRateLimitExceeded",
-)
-
-
-def _sleep(seconds: float) -> None:
-    """Indirected so tests can wait instantly."""
-    time.sleep(seconds)
-
-
-# The human-readable message, for bodies that arrive without a structured
-# `reason`. The upload endpoint does not always shape its errors the way the
-# metadata API does, and this phrase is specific to rate/allowance limiting —
-# running out of STORAGE says something else entirely.
-_THROTTLE_TEXT = "rate limit exceeded"
-
-
-def _is_throttled(exc: Exception) -> bool:
-    status = getattr(getattr(exc, "resp", None), "status", None)
-    if status in _RETRYABLE_STATUS:
-        return True
-    if status != 403:
-        return False
-    text = str(exc)
-    if "storageQuotaExceeded" in text:
-        # Out of STORAGE, not out of allowance — the destination is full, or
-        # is a My Drive a service account cannot write to. Waiting never fixes
-        # that, so it must not be mistaken for throttling.
-        return False
-    # The reason lives in the JSON body, which HttpError renders into str().
-    # Matching on the text avoids depending on the body's exact shape, which
-    # differs between the classic and the newer error formats.
-    return (any(reason in text for reason in _THROTTLE_REASONS)
-            or _THROTTLE_TEXT in text.lower())
-
-
-QUOTA_HELP = (
-    "Google allows one user — and a service account is a user — to move "
-    "**750 GB into Drive per rolling 24 hours**. Uploads AND server-side "
-    "copies both count against it.\n\n"
-    "Past the allowance, Drive refuses uploads with `403 User rate limit "
-    "exceeded` while everything else — creating folders, listing, renaming — "
-    "keeps working normally. **A tiny file failing while folders can still be "
-    "created is that signature**, and it means the allowance, not permissions "
-    "and not request rate.\n\n"
-    "There is no API for how much is left; the only test is to try again. It "
-    "refills gradually as the previous day's transfers age past 24 hours, so "
-    "capacity comes back over the same hours it was spent.\n\n"
-    "To stay under it, publish one set of names per day — *Publish which "
-    "names?* on the Generate page — which halves what a batch sends."
-)
-
-
-def _throttle_help(what: str, exc: Exception) -> str:
-    return (
-        f"Google Drive kept refusing the {what} after "
-        f"{config.DRIVE_RETRY_ATTEMPTS} attempts.\n\n"
-        + QUOTA_HELP +
-        "\n\nNothing local was deleted, and whatever was already published is "
-        "recorded and skipped — so requeueing the job resumes rather than "
-        "restarting.\n\n"
-        "If instead it fails only now and then, that is short-term rate "
-        "limiting: lower BVG_DRIVE_UPLOAD_CONCURRENCY, or raise "
-        f"BVG_DRIVE_RETRY_ATTEMPTS so it waits longer.\n\nRaw error: {exc}"
-    )
-
-
-def _retry_call(operation: Callable[[], object], what: str):
-    """Run one Drive call, riding out throttling.
-
-    Deliberately called per *chunk* rather than per file: the budget resets
-    every time a chunk lands, so a transfer that keeps making progress is never
-    abandoned for taking a long time, while one that is genuinely blocked stops
-    after a bounded wait instead of hanging a worker for hours."""
-    attempts = max(1, config.DRIVE_RETRY_ATTEMPTS)
-    tries = 0
-    while True:
-        try:
-            return operation()
-        except DriveError:
-            raise
-        except Exception as exc:  # noqa: BLE001 — re-raised unless it is throttling
-            if not _is_throttled(exc):
-                raise
-            tries += 1
-            if tries >= attempts:
-                raise DriveError(_throttle_help(what, exc)) from exc
-            # Exponential, capped, with jitter — several uploads backing off in
-            # lockstep would retry in lockstep and be throttled together.
-            delay = min(config.DRIVE_RETRY_MAX_SLEEP, 2 ** tries)
-            delay += random.uniform(0, min(1.0, delay / 4))
-            logger.warning("Drive throttled the %s (attempt %d/%d) — waiting "
-                           "%.0fs", what, tries, attempts, delay)
-            _sleep(delay)
-
-
-def _retry_call_refused(operation: Callable[[], object], what: str):
-    """_retry_call, but only for requests Drive explicitly *refused*.
-
-    For a non-idempotent call the difference matters. A 403 or 429 is Drive
-    saying it did not act, so repeating it is safe. A 5xx or a dropped
-    connection is ambiguous — the work may have been done and only the answer
-    lost — and repeating that is how one files.copy becomes two identical files
-    in one folder."""
-    attempts = max(1, config.DRIVE_RETRY_ATTEMPTS)
-    tries = 0
-    while True:
-        try:
-            return operation()
-        except Exception as exc:  # noqa: BLE001 — re-raised unless it is throttling
-            status = getattr(getattr(exc, "resp", None), "status", None)
-            refused = status == 429 or (status == 403 and _is_throttled(exc))
-            tries += 1
-            if not refused or tries >= attempts:
-                if refused:
-                    raise DriveError(_throttle_help(what, exc)) from exc
-                raise
-            delay = min(config.DRIVE_RETRY_MAX_SLEEP, 2 ** tries)
-            delay += random.uniform(0, min(1.0, delay / 4))
-            logger.warning("Drive throttled the %s (attempt %d/%d) — waiting "
-                           "%.0fs", what, tries, attempts, delay)
-            _sleep(delay)
-
-
-def _run_resumable(request, what: str = "upload") -> dict:
-    """Drive an upload to completion, one chunk at a time.
-
-    The same request object is reused across retries, so a chunk that has to be
-    re-sent continues from the offset Drive already accepted instead of
-    restarting a 30 GB archive from zero."""
-    response = None
-    while response is None:
-        # num_retries handles the quick 5xx blips inside one call; _retry_call
-        # handles being told to slow down, which takes minutes not seconds.
-        _status, response = _retry_call(
-            lambda: request.next_chunk(num_retries=3), what)
-    return response
-
-
 def upload_file(path: Path, parent_id: str, name: Optional[str] = None) -> dict:
-    """Resumable upload of one file. Returns {id, name, size, webViewLink}."""
+    """Resumable upload of one file. Returns {id, name, webViewLink}."""
     _, _, _, MediaFileUpload = _import_google()
     path = Path(path)
     if not path.is_file():
         raise DriveError(f"File to upload does not exist: {path}")
 
     media = MediaFileUpload(
-        str(path), chunksize=config.DRIVE_UPLOAD_CHUNK_BYTES, resumable=True)
+        str(path), chunksize=config.DRIVE_CHUNK_BYTES, resumable=True)
     request = service().files().create(
         body={"name": name or path.name, "parents": [parent_id]},
         media_body=media,
-        fields=FILE_FIELDS,
+        fields="id, name, webViewLink",
         supportsAllDrives=True,
     )
-    return _run_resumable(request, f"upload of {name or path.name}")
-
-
-def upload_or_replace(path: Path, parent_id: str, name: str,
-                      drive_id: Optional[str] = None) -> dict:
-    """Publish one file under a fixed name, **replacing** any file already
-    there under that name rather than adding a second one.
-
-    This is what makes publishing an archive re-runnable. A `tk.zip` upload
-    that died halfway leaves a partial file behind, and a plain files.create on
-    the next attempt would put a second `tk.zip` beside it — Drive allows two
-    files with one name in one folder, and then nobody can tell which is the
-    good one. files.update overwrites the content of the existing file instead,
-    so the folder holds exactly one `tk.zip` however many attempts it took.
-
-    The size of what landed is returned, and callers are expected to check it
-    against the file they sent."""
-    _, _, _, MediaFileUpload = _import_google()
-    path = Path(path)
-    if not path.is_file():
-        raise DriveError(f"File to upload does not exist: {path}")
-
-    existing = _retry_call(lambda: find_file(name, parent_id, drive_id=drive_id),
-                           f"lookup of {name}")
-    media = MediaFileUpload(
-        str(path), chunksize=config.DRIVE_UPLOAD_CHUNK_BYTES, resumable=True)
-    if existing:
-        logger.info("Replacing the existing %s in %s", name, parent_id)
-        request = service().files().update(
-            fileId=existing["id"], media_body=media,
-            fields=FILE_FIELDS, supportsAllDrives=True)
-    else:
-        request = service().files().create(
-            body={"name": name, "parents": [parent_id]}, media_body=media,
-            fields=FILE_FIELDS, supportsAllDrives=True)
-    return _run_resumable(request, f"upload of {name}")
-
-
-def upload_verified(path: Path, parent_id: str, name: str,
-                    drive_id: Optional[str] = None) -> dict:
-    """upload_or_replace(), plus the assertion that all the bytes arrived.
-
-    Drive reports the stored size, so a truncated upload is detectable for the
-    cost of reading one field. Silently publishing a 12 GB archive that was
-    meant to be 31 GB is the failure worth spending that on."""
-    path = Path(path)
-    expected = path.stat().st_size
-    response = upload_or_replace(path, parent_id, name, drive_id=drive_id)
-    landed = int(response.get("size") or 0)
-    if landed != expected:
-        raise DriveError(
-            f"{name} uploaded as {landed:,} bytes but {path.name} is "
-            f"{expected:,} bytes on disk — the upload was truncated. Nothing "
-            "has been deleted locally; run it again."
-        )
+    response = None
+    while response is None:
+        # num_retries gives us exponential backoff on 5xx/429 for free.
+        _status, response = request.next_chunk(num_retries=3)
     return response
 
 
@@ -588,78 +346,36 @@ def copy_file(file_id: str, new_name: str, parent_id: Optional[str] = None) -> d
     # duplicating the file inside one apparently-healthy call. A failed copy
     # is retried at the item level instead, behind a find_file() check that
     # looks for the ambiguous previous attempt before copying again.
-    #
-    # An explicit throttle IS safe to retry, and is retried: a 403 or 429 is
-    # Drive stating it refused the request, so unlike a dropped connection
-    # there is no possibility the copy happened anyway. Worth separating,
-    # because copies count against the same 750 GB/24h allowance as uploads and
-    # are therefore exactly what gets throttled on a large night.
-    request = service().files().copy(
+    return service().files().copy(
         fileId=file_id, body=body,
-        fields="id, name, size, webViewLink",
+        fields="id, name, webViewLink",
         supportsAllDrives=True,
-    )
-    return _retry_call_refused(lambda: request.execute(), f"copy to {new_name}")
+    ).execute()
 
 
 def find_file(name: str, parent_id: str,
               drive_id: Optional[str] = None) -> Optional[dict]:
     """First non-trashed file with this exact name under `parent_id`, as
-    {id, name, size, webViewLink} — or None.
+    {id, name, webViewLink} — or None.
 
     Exists for the ambiguous-copy check in the render runner: a files.copy
     whose response was lost may or may not have committed, and the only way to
     find out is to look. `drive_id` should be passed by callers running on
     worker threads — resolve_target() is thread-local, so resolving here on a
     pool thread would ignore a job's own destination override."""
+    drive_id = drive_id or _require_config()
     query = (
         f"name = '{_escape(name)}' and '{parent_id}' in parents "
         f"and mimeType != '{FOLDER_MIME}' and trashed = false"
     )
-    files = _search(query, FILE_FIELDS, drive_id or _require_config(), page_size=1)
+    response = service().files().list(
+        q=query, spaces="drive", fields="files(id, name, webViewLink)",
+        corpora="drive", driveId=drive_id,
+        includeItemsFromAllDrives=True, supportsAllDrives=True,
+        pageSize=1,
+    ).execute()
+    files = response.get("files", [])
     return files[0] if files else None
-
-
-def list_files(folder_id: str, include_folders: bool = False) -> list[dict]:
-    """Every non-trashed child of one folder, as [{id, name, size, md5, folder}].
-
-    Written for the repack tool, which walks a tree that is already in Drive
-    rather than one it is building. list_videos() is the wrong shape for that:
-    it flattens sub-folders into one pool and filters to things that look like
-    clips, and here the folder boundaries *are* the unit of work.
-
-    No `corpora`/`driveId`, for the same reason `_children` omits them — a tree
-    being repacked may live in a Shared Drive or in a My Drive, and pinning the
-    driveId makes the second case silently return nothing."""
-    svc = service()
-    out: list[dict] = []
-    token = None
-    while True:
-        response = svc.files().list(
-            q=f"'{_escape(folder_id)}' in parents and trashed = false",
-            fields=("nextPageToken, files(id, name, mimeType, size, "
-                    "md5Checksum, shortcutDetails)"),
-            includeItemsFromAllDrives=True, supportsAllDrives=True,
-            pageSize=1000, pageToken=token, orderBy="name",
-        ).execute()
-        for entry in response.get("files", []):
-            entry_id, mime = _resolved(entry)
-            if not entry_id:
-                continue                      # a shortcut to a deleted file
-            is_folder = mime == FOLDER_MIME
-            if is_folder and not include_folders:
-                continue
-            out.append({
-                "id": entry_id,
-                "name": entry.get("name") or entry_id,
-                "size": int(entry.get("size") or 0),
-                "md5": entry.get("md5Checksum") or "",
-                "folder": is_folder,
-            })
-        token = response.get("nextPageToken")
-        if not token:
-            out.sort(key=lambda f: (f["name"], f["id"]))
-            return out
 
 
 def upload_with_copy(path: Path, parent_id: str, primary_name: str,
@@ -905,11 +621,8 @@ def download_file(file_id: str, dest: Path, expected_size: int = 0) -> bool:
         done = False
         while not done:
             # num_retries gives exponential backoff on 5xx/429 for free, and a
-            # GET is safe to repeat; _retry_call adds the patience needed when
-            # Drive answers a bulk download with a 403 telling us to slow down.
-            _status, done = _retry_call(
-                lambda: downloader.next_chunk(num_retries=3),
-                f"download of {dest.name}")
+            # GET is safe to repeat.
+            _status, done = downloader.next_chunk(num_retries=3)
     part.replace(dest)
     return True
 
@@ -1033,6 +746,7 @@ def _check_access_inner() -> tuple[bool, str]:
                        "or paste a link above to test one directly.")
     try:
         drive_id, parent_id = resolve_target()
+        info = service().drives().get(driveId=drive_id, fields="id, name").execute()
     except DriveError as exc:
         # These already carry a specific, actionable explanation.
         return False, str(exc)
@@ -1049,52 +763,13 @@ def _check_access_inner() -> tuple[bool, str]:
             )
         return False, f"Drive check failed: {message}"
 
-    # The Shared Drive's NAME is a nicety, and asking for it is deliberately
-    # NOT allowed to fail the check.
-    #
-    # drives.get requires the caller to be a **member of the Shared Drive**. A
-    # service account that was given access to a folder *inside* one — which is
-    # how these are usually set up — is not a member, and gets
-    # `404 Shared drive not found` for a drive it can write to perfectly well.
-    # Failing here reported a working setup as broken, and pointed at the one
-    # thing that was fine.
-    member = True
-    drive_name = ""
-    try:
-        info = service().drives().get(driveId=drive_id, fields="id, name").execute()
-        drive_name = info.get("name") or drive_id
-    except Exception as exc:  # noqa: BLE001 — a name is not worth failing over
-        member = False
-        drive_name = drive_id
-        logger.info("drives.get(%s) failed — folder-level access rather than "
-                    "Shared Drive membership? %s", drive_id, exc)
-
     where = ("the Shared Drive root" if parent_id == drive_id
              else f"folder `{parent_id}`")
     try:
         target = ensure_path(["_connection_test"], parent_id=parent_id)
     except Exception as exc:  # noqa: BLE001
-        if not member and parent_id == drive_id:
-            # Both facts together are the actual diagnosis: not a member, and
-            # aimed at the drive's ROOT. Writing at the root of a Shared Drive
-            # is a member's privilege, while a folder inside it can be shared
-            # with anyone — so the fix is usually to aim one level lower, not
-            # to change permissions.
-            return False, (
-                f"The service account can see `{drive_id}` but is **not a "
-                "member of that Shared Drive**, and cannot create folders at "
-                "its root — writing there is a member's privilege.\n\n"
-                "Two ways to fix it, either is fine:\n\n"
-                "1. **Point at a folder instead of the drive.** Make a folder "
-                "inside the Shared Drive, share it with the service account as "
-                "a Content Manager, and paste *that folder's* URL as the "
-                "destination. Nothing else has to change.\n"
-                "2. **Add the service account to the Shared Drive** itself "
-                "(Shared drive → Manage members) as a Content Manager.\n\n"
-                f"Raw error: {exc}"
-            )
         return False, (
-            f"Can see Shared Drive “{drive_name}” but cannot create "
+            f"Can see Shared Drive “{info.get('name')}” but cannot create "
             "folders in it — the service account probably has Viewer or "
             f"Contributor access instead of Content Manager.\n\nRaw error: {exc}"
         )
@@ -1115,16 +790,6 @@ def _check_access_inner() -> tuple[bool, str]:
             fields="id", supportsAllDrives=True).execute()
     except Exception as exc:  # noqa: BLE001
         message = str(exc)
-        # Order matters. Being throttled is ALSO a 403, and the permission
-        # advice below is actively misleading for it: creating the folder
-        # succeeded a moment ago, so access is already proven and sending
-        # someone to check roles wastes their time on the one thing that is
-        # demonstrably fine.
-        if _is_throttled(exc):
-            return False, (
-                f"Folders can be created in “{drive_name}”, so **access is "
-                "fine** — but uploading even a 2-byte test file is being "
-                "refused.\n\n" + QUOTA_HELP + f"\n\nRaw error: {exc}")
         hint = ""
         if "quota" in message.lower():
             hint = ("\n\nA storage-quota error here means the destination is a "
@@ -1136,21 +801,14 @@ def _check_access_inner() -> tuple[bool, str]:
                     "rather than the folder, a Content Manager. Viewer and "
                     "Commenter cannot upload.")
         return False, (
-            f"Folders can be created in “{drive_name}”, but UPLOADING a "
+            f"Folders can be created in “{info.get('name')}”, but UPLOADING a "
             f"file failed.{hint}\n\nRaw error: {exc}")
 
     try:
         copy = copy_file(probe["id"], "_copy_test.txt", target)
     except Exception as exc:  # noqa: BLE001
-        if _is_throttled(exc) or isinstance(exc, DriveError):
-            # Copies draw on the same 750 GB allowance as uploads, so this is
-            # the same diagnosis even though the upload just worked — the
-            # allowance can run out between the two.
-            return False, (
-                f"Uploading works in “{drive_name}”, but the server-side COPY "
-                "is being refused.\n\n" + QUOTA_HELP + f"\n\nRaw error: {exc}")
         return False, (
-            f"Upload works in “{drive_name}”, but the server-side COPY "
+            f"Upload works in “{info.get('name')}”, but the server-side COPY "
             "failed. Every video is published twice using files.copy, so this "
             "one matters.\n\n"
             f"Raw error: {exc}")
@@ -1182,15 +840,7 @@ def _check_access_inner() -> tuple[bool, str]:
                 "Drive itself, "
                 "which is enough for everything this app does.)")
 
-    if not member:
-        note += (
-            "\n\n(The service account is **not a member of the Shared Drive "
-            "itself** — it has been given access to the folder instead. That is "
-            "a perfectly good setup and everything above was verified against "
-            "it; it only means the drive's name can't be read, so the id is "
-            "shown in its place.)")
-
     return True, (
-        f"Connected to Shared Drive “{drive_name}”, writing into {where}. "
+        f"Connected to Shared Drive “{info.get('name')}”, writing into {where}. "
         f"Upload and server-side copy both verified. {folder_link(target)}{note}"
     )

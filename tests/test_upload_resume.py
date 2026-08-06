@@ -35,11 +35,8 @@ placement1 = {Slot(batch=1, row=1): 1, Slot(batch=1, row=2): 1}
 
 
 def make_job(label: str, rows: list[tuple[int, str]]) -> str:
-    # upload_mode=files: these guards are about the per-video path, where the
-    # long name is a server-side COPY of the short one. The default mode packs
-    # a folder into two ZIPs instead and is covered by test_upload_zip.py.
     job_id = store.create_job(
-        kind=store.KIND_RENDER, params={"upload_mode": "files"}, label=label,
+        kind=store.KIND_RENDER, params={}, label=label,
         items=[{"idx": i} for i, _ in rows],
     )
     store.make_job_dirs(job_id)

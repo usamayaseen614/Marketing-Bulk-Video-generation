@@ -137,25 +137,7 @@ def _render_body(job: dict, status: str, result: dict) -> str:
             f"using {result.get('promo_videos', 1)} promo video(s), "
             f"mixed across {result.get('folders', batches)} folders")
 
-    if uploaded is not None and result.get("upload_mode") == "zip":
-        zips = result.get("drive_zips") or result.get("drive_files") or 0
-        size_gb = (result.get("zip_bytes") or 0) / 1024 ** 3
-        published = result.get("upload_platforms") or ["yt", "tk"]
-        lines.append(
-            f"{uploaded:,} of {rendered:,} uploaded to Google Drive as "
-            f"{zips:,} ZIP(s), {size_gb:,.1f} GB — every output folder holds "
-            + " and ".join(f"{p}.zip" for p in published))
-        pending = result.get("platforms_pending") or []
-        if pending:
-            # The single most useful thing this email can say when a night was
-            # split to stay inside Drive's daily allowance: the job is not
-            # finished, the videos are still on the VM, and here is what to do.
-            lines.append(
-                f"  {', '.join(p + '.zip' for p in pending)} NOT published yet "
-                f"— {result.get('videos_kept', 0):,} video(s) are still on the "
-                f"VM. Requeue this batch tomorrow with those platform(s) "
-                f"selected; nothing already uploaded is re-sent.")
-    elif uploaded is not None:
+    if uploaded is not None:
         drive_files = result.get("drive_files", uploaded * 2)
         lines.append(
             f"{uploaded:,} of {rendered:,} uploaded to Google Drive "

@@ -11,10 +11,7 @@ Each output video is composed of:
    size and position can be set **per row** via the `Video_*` Excel columns
 3. **Headline / Subheading / Footer** text with per-row size, color, and position — plus a
    choice of **bundled fonts**, an optional **background highlight box**, and **artistic
-   styles** (outline, drop shadow, neon glow) à la TikTok. Each text can optionally be given
-   a **fixed fit box**: the text then re-wraps to the box's width and its font size is chosen
-   so the whole block fills the box — line breaks added *and removed*, size grown *and*
-   shrunk — so headlines of wildly different lengths come out optically consistent
+   styles** (outline, drop shadow, neon glow) à la TikTok
 4. An **optional CTA image** (PNG with transparency supported) at a configurable position and
    size, overridable **per row** via the `CTA_*` Excel columns, with a **configurable fade-in**.
    Leave the upload empty to skip the CTA-image layer entirely
@@ -22,13 +19,6 @@ Each output video is composed of:
    (1 → 2 → 3 → 4 → 5) in one shared box. Each position is a **pool of sample videos**; one
    sample is **chosen per output video** (pinned by an Excel `CTA_Clip_<n>` cell, otherwise
    at random), with a shared **configurable fade-in** and a **per-clip playback speed**
-6. An optional **GIF layer** — a **flat pool** of short looping clips (supplied as MP4) that
-   play one after another in their own box. Each gif holds the box for at least a
-   **dwell time** (5s by default), repeating **itself** a whole number of times to get
-   there — a 3-second gif plays twice, for 6 seconds; it is never cut short. The sequence
-   keeps drawing fresh gifs until the promo video ends. Gifs are **contain-fitted**: scaled
-   down to sit inside the box, never cropped or stretched, and **never upscaled**, with
-   whatever is behind showing through the space around them
 
 Output: H.264 MP4, 30 fps, `yuv420p`, AAC audio, `+faststart` — upload-ready for social platforms.
 
@@ -89,11 +79,7 @@ rows alone determines how many videos are generated:
 | `CTA_Video_Speed_1` … `CTA_Video_Speed_10` | Playback speed of clip position 1…N individually (1 = normal, 2 = twice as fast, 0.5 = half). Columns exist up to 10; the sidebar's *Number of clip slots* sets how many are active. **Blank/absent = `CTA_Video_Speed`, then the sidebar's per-clip default** | `2.0` |
 | `CTA_Video_Speed` | Playback speed for **every** clip in the row at once — a shortcut for setting all of `CTA_Video_Speed_<n>`. A specific `CTA_Video_Speed_<n>` cell overrides it. Also the speed used by fill clips (see *Keep clips playing to fill the whole video*). **Blank/absent = normal / the sidebar per-clip defaults** | `1.5` |
 | `CTA_Clip_1` … `CTA_Clip_10` | Pin which sample plays in clip position 1…N for this video, by file name (with or without extension). **Blank/absent = a random sample from that position's pool** | `intro_a.mp4` |
-| `GIF_X` / `GIF_Y` | **Top-left corner** of the gif box, per row. Rounded down to an even pixel so the chroma planes stay aligned. **Blank/absent = the sidebar default** | `60` / `560` |
-| `GIF_Width` / `GIF_Height` | Size of the gif box. Each gif is **contain-fitted** into it — scaled down to fit, never cropped, never stretched, and never upscaled, so a gif smaller than the box keeps its own size. **Blank/absent = the sidebar default** | `360` / `360` |
-| `GIF_Fade_Start` / `GIF_Fade_Duration` | Fade-in timing for the gif layer, in **seconds**. Applies to the first gif only. **Blank/absent = the sidebar default (0/0 = visible immediately)** | `0.5` / `0.5` |
 | `Headline` | Headline text (empty = skipped) | `Summer Mega Sale` |
-| `Headline_Width` / `Headline_Height` | Optional **fit box**, in canvas pixels, **centred on `Headline_X`/`Headline_Y`**. Set both and the box drives the type: the text re-wraps to the width and the font size is chosen so the painted block (glyphs *plus* any outline/shadow/glow) fills the box. `Headline_Size` is then ignored — the box computes it. **Blank/absent, or either one alone = the sidebar default, else the classic behaviour** (`Headline_Size`, wrapped to the canvas). Same columns exist for Subheading and Footer | `800` / `300` |
 | `Headline_Size` | Font size in px. **Blank/absent = random** within a sensible range per element (headline 56–88, subheading 34–52, footer 24–36) | `72` |
 | `Headline_Color` | Hex (`#FFD700`), CSS color name (`yellow`, `blue`, `lightyellow`…), `rgb(...)`, or an alpha hex (`#FFFFFF80` = half-transparent white). **Blank/absent = random** vivid palette color, never repeated within one video | `gold` |
 | `Headline_Opacity` | How solid the text is: `0`–`100` (a `%` is allowed), or a `0`–`1` fraction — `65`, `65%` and `0.65` all mean 65% opaque. The outline, glow and shadow fade with it. **Blank/absent = the sidebar's *Text opacity*** | `65%` |
@@ -219,22 +205,6 @@ Notes:
   (TikTok/IG/YouTube) can break it**; the effect reads as a shimmer, not crisp text; and rapid
   flashing can affect photosensitive viewers and may conflict with platform policy. Off by
   default — use deliberately.
-- **Text fit boxes.** Setting a text's `*_Width` and `*_Height` turns the box into the
-  instruction and the type into the output: the text is re-wrapped to the box's width and
-  the font size is searched for the largest value whose block still fits. Three things
-  follow from that and are worth knowing:
-  - The `*_Size` cell is **ignored** for a boxed text — the box computes the size, growing
-    it as readily as shrinking it. "Summer Mega Sale" lands at 58px in a 300×150 box and
-    180px in a 900×400 one, both on two lines.
-  - The **artistic style is part of the fit**, because its padding scales with the font
-    size. The same text in the same 300×150 box comes out at 58px in `classic` but 45px in
-    `neon` — the glow is half the font size on every side, and it has to stay inside the box
-    you drew rather than spill past it.
-  - Text that cannot fit even at **20px** is drawn at 20px, allowed to overflow, and the row
-    is **warned**. Clipping mid-word would read as a rendering fault, and shrinking without a
-    floor produces text nobody can read and nothing to say why.
-
-  Leave either dimension blank and that text behaves exactly as it always has.
 - Output files are named `001_Headline_Text.mp4` (row number + sanitized headline).
 
 ## Sidebar settings
@@ -253,14 +223,8 @@ Notes:
 | CTA image X/Y/W/H | Default position (top-left corner) and size of the CTA image. A row's `CTA_X`/`CTA_Y`/`CTA_Width`/`CTA_Height` cells override these per video |
 | CTA fade-in start / duration | When the CTA image fades in and for how long (seconds). Overridable per row via `CTA_Fade_Start` / `CTA_Fade_Duration` |
 | CTA videos + box + fade + per-clip speed | Optional clips layered with the CTA image; they play back-to-back in a shuffled order in one shared box (`CTA_Video_*`), with a shared fade-in and a separate speed per clip slot (overridable per row via `CTA_Video_Speed_<n>`, or `CTA_Video_Speed` for the whole row). Leave the upload empty to skip the whole element |
-| GIF clips (MP4) | The gif pool. **Flat, not slots** — a random selection plays in each output video, dealt from a shuffled deck so every gif is used once before any repeats. Leave empty to skip the layer entirely |
-| Minimum seconds per gif | The dwell floor (default 5). A gif shorter than this repeats **itself** a whole number of times until it clears the floor — a 3s gif plays twice (6s). A gif already longer plays once, in full. Sidebar-only: it is batch-wide pacing, so there is no per-row column |
-| GIF box X/Y/W/H | The box gifs are fitted into. It is an **invisible fit guide**, not a visible panel — nothing is drawn for it. Overridable per row via `GIF_X`/`GIF_Y`/`GIF_Width`/`GIF_Height` |
-| GIF fade-in start / duration | When the gif layer fades in and for how long. Defaults to 0/0 (visible from the first frame), which is also exactly what the static preview shows. Applies to the first gif only — the rest of the sequence cuts straight in. Overridable per row via `GIF_Fade_Start` / `GIF_Fade_Duration` |
-| Layer order (z-index) | Which layer sits on top: promo video (1), **GIFs (2)**, CTA video (3), CTA image (4), texts (5). Higher = nearer the front; the background is always at the back. Raise the gif number above the promo video's to float a gif over the video instead of behind it |
 | Default font | The font used when a text's `*_Font` cell is blank — a bundled family, the system font, or your uploaded font |
 | Default artistic style | The style used when a text's `*_Style` cell is blank — `classic`, `outline`, `shadow`, or `neon` |
-| Text fit boxes (per role) | Optional fixed box for the Headline / Subheading / Footer, **0 = off**. With one set, the text re-wraps to the box width and its font size is picked so the block fills the box — line breaks are added *and removed*, and the size **grows as well as shrinks**. The box is centred on the text's X/Y, so switching it on never moves anything. Per-row overrides: `Headline_Width`/`Headline_Height` and the same for the other two |
 | Text opacity / Highlight box opacity | Batch defaults for how solid the texts and their `*_BgColor` boxes are (0–100%). Below 100 the video shows through. Overridable per text via `*_Opacity` / `*_BgOpacity`, and per-text sliders in the preview editor |
 | Quality (CRF) | 16 = near-lossless, 28 = small files. 18 is great for social media |
 | Encoder speed | x264 preset; `medium` balances speed and file size |
@@ -273,16 +237,7 @@ Notes:
    without backgrounds, videos render on the sidebar's background color).
    The Excel is validated immediately — missing columns are listed.
 2. Pick a row number and click **👁️ Preview Row** — an interactive preview opens.
-   **Drag** the video box, the CTA image, the CTA video box, the GIF box, or any text to
-   reposition it. The GIF box keeps a permanent dashed outline (every other element only
-   outlines on hover) because a contain-fitted gif is never upscaled — a small gif leaves
-   most of its box empty and see-through, so without a visible edge there is nothing to grab.
-   The box shows the **first** gif of the sequence and cannot show the rotation.
-   A text with a **fit box** shows it as a blue dashed outline, and its corner handle
-   resizes the *box* rather than the font — the type re-fits when you preview again, because
-   the wrap-and-shrink search lives in Python and a second copy of it in the browser is how
-   the editor and the render start disagreeing. Such a text writes `*_Width`/`*_Height` back
-   to the sheet instead of `*_Size`
+   **Drag** the video box, the CTA image, the CTA video box, or any text to reposition it
    (a dotted line shows when an element is centered on the canvas, and it gently snaps
    there), **resize** anything with its corner handle (texts resize their font size around
    their center), **recolor** texts with the color swatches, give any text a
@@ -354,30 +309,6 @@ Notes:
 * Downloads resume: a job that dies part-way re-fetches only what is actually missing,
   and a half-written file is never mistaken for a finished clip.
 
-### Where the GIFs come from
-
-The gif pool has its **own** source selector, right below the CTA-clip one, and the two are
-independent — you can fetch CTA clips from Drive while uploading gifs, or the other way round.
-There are two options rather than four: uploading, or a single pooled Drive folder
-(downloaded straight into `assets/gifs/`). "Scrape a TikTok account" is deliberately absent —
-it harvests posts by view count, which means nothing for a pool of loops.
-
-### What to expect from the gif layer
-
-Two consequences of the dwell floor are worth knowing before you judge a batch:
-
-* **Not every uploaded gif appears in every video.** At 5 seconds each, a 20-second promo
-  shows about 4 gifs, a 60-second promo about 12 — no matter how many you upload. The pool
-  is the source of variety *across* videos, not *within* one. Upload 30 gifs and each video
-  draws a different handful.
-* **The last gif is usually cut mid-animation**, because the output ends exactly when the
-  promo does. That is invisible for a true loop, but a gif with a beginning and an end (a
-  logo reveal, a text animation) will look clipped in that final slot.
-
-Gifs are supplied as **MP4**, not as `.gif` files — a real `.gif` upload is rejected by the
-uploader's file-type filter, and a `.gif` sitting in a Drive folder is skipped rather than
-downloaded.
-
 ## The other pages
 
 | Page | What it does |
@@ -423,102 +354,25 @@ Your evening routine deserves better than this #skincareroutine #asmrsounds #for
 The exception is a caption too long to fit even beside a single hashtag: it is being
 truncated either way, so the full set is kept rather than losing tags for nothing.
 
-Each output folder is published as **two ZIPs**, one per platform, so a 16,000-video night
-arrives as ~32 archives instead of ~32,000 files:
+The second copy is made with Drive's **server-side `files.copy`**, so the bytes cross the
+network once — at 10,000 videos that's ~80 GB of upload instead of ~160 GB.
+
+The two names land in **separate subfolders**, so each folder listing shows every video
+exactly once:
 
 ```
 <your Drive folder>/renders/2026-08-05_14-23-45.123/<batch label>/
 ├── batch_01/
-│   ├── yt.zip                  ← the short name (one hashtag)
-│   ├── tk.zip                  ← the long name (up to five)
-│   └── batch_01_manifest.xlsx  ← readable without downloading 30 GB
+│   ├── yt/   ← the short name (one hashtag)
+│   └── tk/   ← the long name (up to five)
 ├── batch_02/
-│   ├── yt.zip
-│   └── tk.zip
+│   ├── yt/
+│   └── tk/
 └── …
 ```
 
-The platform is the **archive**, never the filename — nothing is prefixed onto the caption,
-so the name stays paste-ready exactly as shown above. Archives are `ZIP_STORED`: MP4s do
-not deflate, so recompressing them would burn hours to save a percent.
-
-Zipping costs the one shortcut the per-file layout had. Uploading a video once and letting
-Drive clone it with server-side `files.copy` only works while the two names are two
-*files* — inside an archive they are entries in two different ZIPs, so the bytes cross the
-network twice. That's the trade: **~2× the upload** in exchange for folders you can
-actually hand to someone.
-
-Packing runs a folder at a time and each folder's MP4s are deleted **only once both of its
-archives are verified in Drive** (Drive reports the stored size; a short upload is
-refused). So the disk high-water mark is the rendered videos plus the two archives of the
-one folder being packed — and a failure anywhere before that leaves every byte where it
-was, ready for the next attempt.
-
-Set `BVG_UPLOAD_MODE=files` (or `upload_mode: files` in a job's params) for the older
-behaviour: every video as its own Drive file under `batch_NN/yt/` and `batch_NN/tk/`, the
-second made with `files.copy`. Worth it when you need to replace one video without
-rebuilding an archive.
-
-#### Drive's 750 GB/day ceiling
-
-Google caps **one user at 750 GB per rolling 24 hours** of data moved into Drive. A
-service account is a user, and **server-side copies count against it as well as
-uploads**. Past the ceiling every write returns `403 userRateLimitExceeded` — which
-reads like a permission error and is not one.
-
-That is a hard planning constraint on a big night, and it applies to *both* publishing
-modes:
-
-| Mode | Bytes against the 750 GB allowance, for 16,000 videos (~500 GB of MP4s) |
-|---|---|
-| `zip` | ~1 TB — each archive is a separate upload |
-| `files` | ~1 TB — ~500 GB uploaded, ~500 GB of `files.copy`, and copies count |
-
-At ~31 MB a video that is roughly **12,000 videos a day** under both names — whichever
-mode you pick, because copies are not free.
-
-**The way out is to publish one set of names at a time.** *Publish which names?* on the
-Generate page (or `upload_platforms` in a job's params, or `BVG_UPLOAD_PLATFORMS`) takes
-`yt,tk`, `tk`, or `yt`. One platform halves the day's traffic, so ~24,000 videos fit:
-
-```
-Monday:  publish tk  → batch_NN/tk.zip   (~500 GB)   videos KEPT on the VM
-Tuesday: requeue the same job with upload_platforms=["yt"]
-         → batch_NN/yt.zip (~500 GB), and now the MP4s are freed
-```
-
-Each platform's state is recorded separately, so the second run re-packs from the MP4s
-still on disk and re-sends nothing. **The videos are deliberately not deleted while a
-platform is still outstanding** — `BVG_UPLOAD_FREE_LOCAL` only takes effect once every
-platform has an archive, or the second day would have nothing to build from. Budget disk
-for that: the MP4s stay put overnight.
-
-The other lever is a second service account (`BVG_DRIVE_CREDENTIALS_FILE`) — each account
-gets its own 750 GB.
-
-Throttling itself is ridden out rather than fatal: every Drive call retries with
-exponential backoff and jitter, and **the retry budget resets each time a chunk lands**,
-so a 30 GB archive that is throttled repeatedly still finishes. Only a sustained refusal
-— which is what the daily ceiling looks like — gives up, and it says so in those terms
-instead of surfacing a bare 403. Nothing local is deleted when it does, so requeueing the
-job after the window rolls picks up where it stopped.
-
-#### Zipping folders that are already in Drive
-
-Renders published before archives existed can be converted in place:
-
-```bash
-python tools/zip_drive_tk.py --link <drive folder url> --dry-run
-python tools/zip_drive_tk.py --link <drive folder url> --platform tk
-```
-
-It walks the tree, and for each `tk/` (or `yt/`) folder it downloads the videos a handful
-at a time, appends each to the archive and deletes it again, then uploads `tk.zip` beside
-the original folder. Peak disk is one folder's archive, not the whole night — which is
-what lets a 200 GB VM repack a terabyte. **Nothing in Drive is ever deleted**: the source
-folder stays exactly as it was, so the videos remain their own backup. Interrupt it and
-re-run whenever; finished folders are recorded and skipped, and an archive that is re-made
-*replaces* the old one instead of becoming a second file with the same name.
+The platform is the **folder**, never the filename — nothing is prefixed onto the caption,
+so the name stays paste-ready exactly as shown above.
 
 That timestamp is **to the millisecond**, and it is stamped once when the job first
 uploads, not re-derived per run. Two batches submitted under the same label never merge
@@ -596,43 +450,15 @@ everything in a single pass per row:
 [1:v]scale=W:H:force_original_aspect_ratio=decrease[vid]   # fit promo video in box, no distortion
 [0:v][vid]overlay=x='X+(W-w)/2':y='Y+(H-h)/2':shortest=1   # center in box over background
 [bgvid][2:v]overlay=0:0[txt]                               # stamp text layer on top
-# optional CTA videos — cover-filled to the box, each sped up/slowed by its own clip speed,
-# concatenated in the row's shuffled order, faded in:
-[N:v]...,scale=increase,crop=CVW:CVH,setpts=PTS/SPEED0,format=rgba[cv0]; ... ; [cv0][cv1]...concat=n=N:v=1:a=0[cseq]
+# optional CTA videos (inputs start at 4 with a CTA image, else 3) — cover-filled to the box,
+# each sped up/slowed by its own clip speed, concatenated in the row's shuffled order, faded in:
+[4:v]...,scale=increase,crop=CVW:CVH,setpts=PTS/SPEED0,format=rgba[cv0]; ... ; [cv0][cv1]...concat=n=N:v=1:a=0[cseq]
 [cseq]fade=t=in:st=CVS:d=CVD:alpha=1[ctav]
 [txt][ctav]overlay=CVX:CVY[txtv]
-# optional GIFs — each claimed with `-stream_loop <repeats-1>` so it replays whole before the
-# graph sees it, then contain-fitted and padded transparent to a common size for concat:
-[N:v]fps=F,format=rgba,scale='min(GW,iw)':'min(GH,ih)':decrease:force_divisible_by=2,
-     pad=GW:GH:'trunc((GW-iw)/4)*2':'trunc((GH-ih)/4)*2':color=0x00000000,setsar=1[gv0]; ...
-[gv0][gv1]...concat=n=N:v=1:a=0[gseq] ; [gseq]fade=...:alpha=1[gifl]
-[txtv][gifl]overlay=GX:GY[withgifs]
-# optional CTA image (only when uploaded): configurable alpha fade-in, placed on top
-[N:v]format=rgba,fade=t=in:st=CFS:d=CFD:alpha=1[cta]
-[withgifs][cta]overlay=CTA_X:CTA_Y,format=yuv420p
+# optional CTA image (input 3, only when uploaded): configurable alpha fade-in, placed on top
+[3:v]format=rgba,fade=t=in:st=CFS:d=CFD:alpha=1[cta]
+[txtv][cta]overlay=CTA_X:CTA_Y,format=yuv420p
 ```
-
-Layers are stacked in ascending z-index order, so the actual chain depends on the sidebar's
-*Layer order* — the sketch above shows the defaults.
-
-Three things about the gif layer are load-bearing and easy to undo by accident:
-
-- **`min(GW,iw)` is the no-upscale rule.** A bare `force_original_aspect_ratio=decrease`
-  *enlarges* anything smaller than the box, which is the opposite of what this layer promises.
-- **The `pad` is not cosmetic.** `concat` rejects inputs of differing sizes, and contain-fitting
-  gifs of assorted shapes produces exactly that. `format=rgba` must come *before* the pad, or
-  the transparent colour flattens to opaque black and the box becomes a visible plate.
-- **No `setpts` on the gif chain.** `-stream_loop` already emits continuous monotonic PTS and
-  `concat` re-stamps the joined timeline; `setpts=N/FRAME_RATE/TB` drops one frame per segment.
-
-Input indices are claimed through a helper that returns the index it took, rather than computed
-by summing list lengths, and `_check_filter_inputs` then asserts every input is referenced
-exactly once. That guard exists because an off-by-one here does **not** fail — it renders a
-different video with exit code 0 and empty stderr.
-
-Gif dwell times are computed from the **video stream's** duration, not the container header:
-an MP4 whose audio outlasts its video reports the audio length, which would silently
-under-repeat the gif and miss the floor.
 
 This is much faster than FFmpeg `drawtext` (text is rasterized once per row, not per frame)
 and sidesteps Windows font-path escaping. See the docstrings in

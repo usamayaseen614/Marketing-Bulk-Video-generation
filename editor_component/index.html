@@ -8,22 +8,7 @@
   .el { position: absolute; cursor: move; touch-action: none; }
   .el:hover, .el.drag { outline: 1.5px dashed rgba(255,255,255,.85); outline-offset: 1px; }
   .el > img { width: 100%; height: 100%; display: block; pointer-events: none; }
-  #videoBox > img.frame, #ctaVideoBox > img.frame, #gifBox > img.frame { position: absolute; width: auto; height: auto; }
-  /* The gif box keeps a permanent outline, unlike every other element, which
-     only outlines on hover. A contain-fitted gif is never upscaled, so a small
-     gif in a large box leaves most of the box empty and see-through — without a
-     visible edge there is nothing to grab and no way to judge the box you are
-     actually setting. */
-  #gifBox { outline: 1.5px dashed rgba(255,255,255,.45); outline-offset: 1px; }
-  /* A text's optional fit box, drawn as its own outline behind the text. It is
-     click-through except for its resize handle, so the text stays the drag
-     target while the corner sizes the box. Visible at all times for the same
-     reason the gif box is: fitted text is usually smaller than the box, and
-     the box is the thing being set. */
-  .fitbox { position: absolute; pointer-events: none;
-            outline: 1.5px dashed rgba(120,200,255,.55); outline-offset: 1px; }
-  .fitbox .handle { pointer-events: auto; opacity: 0; }
-  .fitbox:hover .handle, .fitbox.drag .handle { opacity: 1; }
+  #videoBox > img.frame, #ctaVideoBox > img.frame { position: absolute; width: auto; height: auto; }
   /* Texts are layered (bottom to top): the live CSS background box, the baked
      decoration (outline/shadow/neon glow), then the recolorable glyph mask.
      All position:absolute so they paint in DOM order. */
@@ -76,9 +61,7 @@
   <div id="panel">
     <h3>Excel values</h3>
     <div class="hint">Drag elements to move them, drag the corner handle to resize
-      (texts resize their font size — but a text with a blue <em>fit box</em> resizes
-      the box instead, and re-fits its type when you preview again), recolor texts
-      with the swatches, and give any
+      (texts resize their font size), recolor texts with the swatches, and give any
       text a background box with the bg swatch (“none” removes it). The opacity
       sliders make a text — or just its box — translucent, so the video shows
       through. Font and artistic
@@ -119,7 +102,7 @@
     const items = [];   // editable things, each exposing cols() -> [[column, was, now], ...]
     // Sidebar layer order (z-index); the render stacks layers the same way.
     // Default mirrors the engine if an older payload omits it.
-    const Z = DATA.z || { video: 1, gif: 2, cta_video: 3, cta_image: 4, text: 5 };
+    const Z = DATA.z || { video: 1, cta_video: 2, cta_image: 3, text: 4 };
 
     stage.innerHTML = '';
     tbody.innerHTML = '';
@@ -362,12 +345,10 @@
     //     Each layer's CSS z-index (set from Z above) drives the stacking so the
     //     editor matches the render; inserting before ctaEl only sets the DOM
     //     order, which breaks ties when two layers share the same z-index
-    //     (priority promo < gifs < CTA video < CTA image < texts, as in the
-    //     render). Hoisted like ctaEl so the gif box below can insert under it. ---
-    let cvEl = null;
+    //     (priority promo < CTA video < CTA image < texts, as in the render). ---
     if (DATA.cta_video) {
       const cv = DATA.cta_video;
-      cvEl = document.createElement('div');
+      const cvEl = document.createElement('div');
       cvEl.className = 'el';
       cvEl.id = 'ctaVideoBox';
       const cvFrame = document.createElement('img');
@@ -421,74 +402,6 @@
       items.push(cvItem);
     }
 
-    // --- GIF box (optional). Same drag/resize behaviour as the boxes above,
-    //     with one rule of its own: the gif is contain-fitted and NEVER
-    //     upscaled, so growing the box must not grow the gif. That is the
-    //     Math.min(..., 1) in place(), and it is why the payload ships the
-    //     gif's natural size rather than a pre-fitted tile. ---
-    if (DATA.gif) {
-      const g = DATA.gif;
-      const gEl = document.createElement('div');
-      gEl.className = 'el';
-      gEl.id = 'gifBox';
-      const gFrame = document.createElement('img');
-      gFrame.className = 'frame';
-      gFrame.src = g.frame;
-      gFrame.draggable = false;
-      gEl.appendChild(gFrame);
-      gEl.style.zIndex = (Z.gif === undefined ? 2 : Z.gif);
-      // A still can show one gif of the sequence and no motion at all, so say
-      // so on the box rather than implying this frame is the whole layer.
-      if (g.count > 1) gEl.title = 'GIF 1 of ' + g.count + ' in this video';
-      // DOM order breaks z-index ties; the gif is the lowest overlay after the
-      // promo video, so put it under whatever already exists.
-      if (cvEl) stage.insertBefore(gEl, cvEl);
-      else if (ctaEl) stage.insertBefore(gEl, ctaEl);
-      else stage.appendChild(gEl);
-      const gItem = {
-        x: g.x, y: g.y, w: g.w, h: g.h,
-        center() { return { cx: this.x + this.w / 2, cy: this.y + this.h / 2 }; },
-        snapResize() { snapResizeBox(this, 50); },
-        bounds() {
-          return { minX: 0, maxX: DATA.canvas_w - this.w, minY: 0, maxY: DATA.canvas_h - this.h };
-        },
-        place() {
-          gEl.style.left = px(this.x);
-          gEl.style.top = px(this.y);
-          gEl.style.width = px(this.w);
-          gEl.style.height = px(this.h);
-          // The 1 is the no-upscale clamp — the CSS twin of the render's
-          // scale='min(W,iw)':'min(H,ih)'. Without it a gif smaller than its
-          // box would be blown up here and not in the output.
-          const r = Math.min(this.w / g.nat_w, this.h / g.nat_h, 1);
-          const fw = g.nat_w * r, fh = g.nat_h * r;
-          gFrame.style.width = px(fw);
-          gFrame.style.height = px(fh);
-          gFrame.style.left = px((this.w - fw) / 2);
-          gFrame.style.top = px((this.h - fh) / 2);
-        },
-        startResize(e) { return { w0: this.w, h0: this.h, sx: e.clientX, sy: e.clientY }; },
-        resize(ctx, ev) {
-          this.w = clamp(ctx.w0 + (ev.clientX - ctx.sx) / scale, 50, DATA.canvas_w - this.x);
-          this.h = clamp(ctx.h0 + (ev.clientY - ctx.sy) / scale, 50, DATA.canvas_h - this.y);
-        },
-        endResize() { this.w = Math.round(this.w); this.h = Math.round(this.h); },
-        reset() { this.x = g.x; this.y = g.y; this.w = g.w; this.h = g.h; this.place(); },
-        cols() {
-          return [
-            ['GIF_X', g.x, Math.round(this.x)],
-            ['GIF_Y', g.y, Math.round(this.y)],
-            ['GIF_Width', g.w, Math.round(this.w)],
-            ['GIF_Height', g.h, Math.round(this.h)],
-          ];
-        },
-      };
-      gItem.place();
-      makeDraggable(gEl, gItem);
-      addHandle(gEl, gItem);
-      items.push(gItem);
-    }
-
     // --- texts (x/y is the block CENTER; resizing scales the font size
     //     around that center, so X/Y stay put and centeredness can't change —
     //     hence no snapResize). Layers, bottom to top: a live CSS background
@@ -532,34 +445,15 @@
       }
       el.style.zIndex = Z.text;
       stage.appendChild(el);
-      // Optional fit box. When a text has one, the box — not the font — is what
-      // the corner handle changes; the text keeps the size the server fitted and
-      // re-fits on the next Preview. The wrap-and-shrink search lives in Python,
-      // and a second copy of it here is exactly how the editor and the render
-      // start disagreeing.
-      const boxed = !!(t.box_w && t.box_h);
-      let boxEl = null;
-      if (boxed) {
-        boxEl = document.createElement('div');
-        boxEl.className = 'fitbox';
-        boxEl.style.zIndex = Z.text;
-        boxEl.title = t.role + ' fit box — drag the corner to resize; the text '
-          + 're-fits when you preview again';
-        stage.appendChild(boxEl);
-      }
       const item = {
         x: t.cx, y: t.cy, s: 1, color: t.color, bg: t.bg || null,
         opacity: OP, bgOpacity: BOP,
-        bw: t.box_w || 0, bh: t.box_h || 0,
         curW() { return t.w * this.s; },
         curH() { return t.h * this.s; },
         fontSize() { return Math.round(t.size * this.s); },
         center() { return { cx: this.x, cy: this.y }; },
         bounds() {
-          // A boxed text is kept on canvas by its BOX: that is the space it
-          // occupies, and the fitted text never leaves it.
-          const w = boxed ? this.bw : this.curW();
-          const h = boxed ? this.bh : this.curH();
+          const w = this.curW(), h = this.curH();
           return { minX: w / 2, maxX: DATA.canvas_w - w / 2, minY: h / 2, maxY: DATA.canvas_h - h / 2 };
         },
         place() {
@@ -568,14 +462,6 @@
           el.style.height = px(h);
           el.style.left = px(this.x - w / 2);
           el.style.top = px(this.y - h / 2);
-          if (boxEl) {
-            // Same centre as the text — that is what makes adding a box to an
-            // existing sheet leave the text exactly where it was.
-            boxEl.style.width = px(this.bw);
-            boxEl.style.height = px(this.bh);
-            boxEl.style.left = px(this.x - this.bw / 2);
-            boxEl.style.top = px(this.y - this.bh / 2);
-          }
           // background box: centered, sized from the baked text bbox + padding
           const bw = t.bg_w * this.s, bh = t.bg_h * this.s;
           bgBox.style.width = px(bw);
@@ -599,32 +485,20 @@
           bgBox.style.opacity = this.bgOpacity / 100;
         },
         startResize(e) {
-          if (boxed) return { bw0: this.bw, bh0: this.bh, sx: e.clientX, sy: e.clientY };
           const r = el.getBoundingClientRect();
           const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
           return { cx, cy, s0: this.s, d0: Math.max(10, Math.hypot(e.clientX - cx, e.clientY - cy)) };
         },
         resize(ctx, ev) {
-          if (boxed) {
-            // The box is centred on x/y, so pulling the corner out by d has to
-            // grow the box by 2d or the centre would drift as you drag.
-            this.bw = clamp(ctx.bw0 + 2 * (ev.clientX - ctx.sx) / scale, 40, DATA.canvas_w);
-            this.bh = clamp(ctx.bh0 + 2 * (ev.clientY - ctx.sy) / scale, 40, DATA.canvas_h);
-            return;
-          }
           let s = ctx.s0 * Math.hypot(ev.clientX - ctx.cx, ev.clientY - ctx.cy) / ctx.d0;
           s = clamp(s, 10 / t.size, 250 / t.size);
           // keep the scaled block no larger than the canvas
           s = Math.min(s, DATA.canvas_w / t.w, DATA.canvas_h / t.h);
           this.s = s;
         },
-        endResize() {
-          if (boxed) { this.bw = Math.round(this.bw); this.bh = Math.round(this.bh); return; }
-          this.s = this.fontSize() / t.size;   // snap to a whole font size
-        },
+        endResize() { this.s = this.fontSize() / t.size; },  // snap to a whole font size
         reset() {
           this.x = t.cx; this.y = t.cy; this.s = 1; this.color = t.color;
-          this.bw = t.box_w || 0; this.bh = t.box_h || 0;
           this.bg = t.bg || null;
           this.opacity = OP; this.bgOpacity = BOP;
           ink.style.backgroundColor = t.color;
@@ -645,12 +519,7 @@
           return [
             [t.role + '_X', t.cx, Math.round(this.x)],
             [t.role + '_Y', t.cy, Math.round(this.y)],
-            // A boxed text derives its size from the box, so write the box back
-            // rather than a size the next render would compute over anyway.
-            ...(boxed
-                ? [[t.role + '_Width', t.box_w, Math.round(this.bw)],
-                   [t.role + '_Height', t.box_h, Math.round(this.bh)]]
-                : [[t.role + '_Size', t.size, this.fontSize()]]),
+            [t.role + '_Size', t.size, this.fontSize()],
             [t.role + '_Color', t.color, this.color],
             [t.role + '_Opacity', OP + '%', this.opacity + '%'],
             [t.role + '_BgColor', t.bg || '', this.bg || ''],
@@ -663,9 +532,7 @@
       item.applyOpacity();
       item.place();
       makeDraggable(el, item);
-      // The handle goes on the BOX for a boxed text, so the corner sizes the
-      // box while the text itself remains what you grab to move it.
-      addHandle(boxed ? boxEl : el, item);
+      addHandle(el, item);
       items.push(item);
     });
 

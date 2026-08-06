@@ -117,56 +117,12 @@ CTA_SPEED_COLUMNS = [f"CTA_Video_Speed_{i}" for i in range(1, MAX_CTA_VIDEO_SLOT
 # count / command-line length. See _resolve_cta_sequence.
 CTA_MAX_TOTAL_CLIPS = 40
 
-# The GIF layer: a SECOND, independent clip layer, deliberately unlike the CTA
-# video one in the two ways the feature is actually about.
-#
-#   * Dwell time. Every gif holds its box for at least gif_min_seconds by
-#     repeating ITSELF a whole number of times — a 3s gif plays twice (6s), it
-#     is never cut at 5s. See _resolve_gif_sequence.
-#   * Fit. Each gif is CONTAIN-fitted: scaled down to sit entirely inside its
-#     box, never cropped, never distorted, and never upscaled (a gif smaller
-#     than the box keeps its own size). The leftover box area is transparent,
-#     so the box is a fit guide rather than a visible plate.
-#
-# The pool is FLAT, not slotted: gifs have no position semantics, and with a
-# dwell floor the sequence length is derived from the promo's duration rather
-# than chosen, so a fixed slot count would be wrong for every promo but one.
-GIF_MIN_SECONDS = 5.0
-# Ceiling on gifs concatenated into one sequence — same rationale as
-# CTA_MAX_TOTAL_CLIPS. At the 5s floor this already covers a ~3.3-minute promo.
-GIF_MAX_TOTAL_CLIPS = 40
-# Ceiling on FFmpeg inputs for ONE row across BOTH clip layers plus the fixed
-# inputs and the subliminal stills. Two independent caps are not enough: they
-# add up in a single command line, and Windows stops at 32767 characters with a
-# [WinError 206] that names nothing. See _check_input_budget.
-MAX_TOTAL_FFMPEG_INPUTS = 60
-
 # Every column is optional: absent/blank BG_Image cells get an image randomly
 # assigned from the uploaded ZIP (no repeats until the pool is exhausted),
 # absent Video_*/CTA_* cells fall back to the sidebar's boxes (or a randomized
 # video position), absent texts are skipped, absent sizes/colors get defaults,
 # and absent X/Y coordinates trigger auto-placement. The row count alone
 # drives the batch.
-# Optional fixed-size fit box for a text. When a text's <Role>_Width and
-# <Role>_Height are both set, the box drives the type instead of the other way
-# round: the text re-wraps to the box's width and its font size is searched for
-# the largest value whose PAINTED block still fits — so line breaks are added
-# and removed as the box changes, and the size follows.
-#
-# X/Y stay the block CENTRE, as they always have been for texts (the video, CTA
-# and gif boxes are top-left instead). The box is centred on them, so adding one
-# to an existing sheet never moves the text.
-TEXT_ROLES = ["Headline", "Subheading", "Footer"]
-TEXT_BOX_COLUMNS = [f"{role}_{dim}"
-                    for role in TEXT_ROLES for dim in ("Width", "Height")]
-# Bounds of the fit search. The floor is the readability guard: below it the
-# text is left AT the floor, allowed to overflow, and the row is warned. That is
-# a deliberate trade — clipping reads as a rendering fault, and shrinking
-# without a floor silently produces text nobody can read (a 28-character word in
-# a 200x200 box measured down to 12px before this bound existed).
-TEXT_FIT_MIN_SIZE = 20
-TEXT_FIT_MAX_SIZE = 200
-
 REQUIRED_COLUMNS: list[str] = []
 OPTIONAL_COLUMNS = [
     "BG_Image",
@@ -177,12 +133,6 @@ OPTIONAL_COLUMNS = [
     "CTA_Video_Fade_Start", "CTA_Video_Fade_Duration", "CTA_Video_Speed",
     *CTA_SPEED_COLUMNS,
     *CTA_CLIP_COLUMNS,
-    # The gif box + its fade. Geometry and this-box timing are per-row across
-    # the whole sheet format; the dwell floor is not (it is a batch-wide pacing
-    # decision, so it lives in the sidebar only — see RenderConfig).
-    "GIF_X", "GIF_Y", "GIF_Width", "GIF_Height",
-    "GIF_Fade_Start", "GIF_Fade_Duration",
-    *TEXT_BOX_COLUMNS,
     "Headline", "Headline_Size", "Headline_Color", "Headline_Opacity",
     "Headline_X", "Headline_Y", "Headline_Font",
     "Headline_BgColor", "Headline_BgOpacity", "Headline_Style", "Headline_Subliminal",
@@ -321,97 +271,6 @@ def _has_video_stream(ffmpeg: str, path: Path) -> bool:
     with _VIDEO_STREAM_LOCK:
         _VIDEO_STREAM_CACHE[key] = ok
     return ok
-
-
-# How long a file's VIDEO STREAM runs, as opposed to what its container header
-# claims. The two genuinely differ: an MP4 whose audio outlasts its video
-# reports the AUDIO length in `Duration:`, and a measured 3s-video/9s-audio file
-# reads as 9.0s there. That is harmless for the promo (which only needs an
-# output length) but wrong for a gif, where `ceil(floor / duration)` would then
-# compute 1 repeat for a clip that needs 2 and silently miss the dwell floor by
-# 40%. `-stream_loop` loops on the VIDEO duration, so the repeat count has to be
-# computed in the same unit it will be applied in.
-#
-# Method: demux the video stream to the null muxer (`-c copy`, so nothing is
-# decoded) and divide the reported frame count by the reported frame rate.
-# Reading the trailing `time=` instead would undershoot by one frame interval —
-# a 5.000s gif measures 4.93 and would needlessly double to 10s at the boundary.
-# Frames/rate is exact: measured 3.000 / 4.000 / 5.000 / 6.000 on CFR sources
-# and 2.000 on a real 12.5fps animated GIF.
-#
-# Cached like _VIDEO_STREAM_CACHE on (filename, size) and MODULE-global on
-# purpose: the dwell floor makes this probe mandatory for every picked gif on
-# the *preview* path, Streamlit rebuilds the generator on every interaction, and
-# each probe costs ~350ms — a per-instance cache would re-pay that on every
-# click. None (unprobeable) is cached too, so a bad file is not re-probed.
-_VIDEO_DURATION_CACHE: dict[tuple, Optional[float]] = {}
-_VIDEO_DURATION_LOCK = threading.Lock()
-_FRAME_COUNT_RE = re.compile(r"frame=\s*(\d+)")
-_FRAME_RATE_RE = re.compile(r",\s*([\d.]+)\s*fps\b")
-_CONTAINER_DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
-
-
-def _probe_video_duration(ffmpeg: str, path: Path) -> Optional[float]:
-    """Seconds of VIDEO in `path`, or None if it can't be measured.
-
-    Falls back to the container header when the frame count or rate can't be
-    read (some exotic sources report neither), which is still better than
-    nothing — callers treat None as 'play once and warn'."""
-    path = Path(path)
-    try:
-        key = (path.name.lower(), path.stat().st_size)
-    except OSError:
-        return None
-    with _VIDEO_DURATION_LOCK:
-        if key in _VIDEO_DURATION_CACHE:
-            return _VIDEO_DURATION_CACHE[key]
-    dur: Optional[float] = None
-    try:
-        proc = subprocess.run(
-            [ffmpeg, "-hide_banner", "-i", str(path),
-             "-map", "0:v:0", "-c", "copy", "-f", "null", "-"],
-            capture_output=True, text=True, timeout=120,
-        )
-        err = proc.stderr or ""
-        frames = _FRAME_COUNT_RE.findall(err)
-        rate = _FRAME_RATE_RE.search(err)
-        if frames and rate:
-            n, fps = int(frames[-1]), float(rate.group(1))
-            if n > 0 and fps > 0:
-                dur = n / fps
-        if dur is None:
-            match = _CONTAINER_DURATION_RE.search(err)
-            if match:
-                h, m, s = match.groups()
-                dur = int(h) * 3600 + int(m) * 60 + float(s)
-        # A zero-length read is not a duration. Returning 0.0 here would reach
-        # `floor / dur` in the repeat maths and raise ZeroDivisionError, which
-        # surfaces through render_row's broad except as the bare string
-        # "division by zero" — naming neither the file nor the cause.
-        if not dur or dur <= 0:
-            dur = None
-    except (subprocess.TimeoutExpired, OSError, ValueError) as exc:
-        logger.warning("Could not probe video duration for %s: %s", path, exc)
-        dur = None
-    with _VIDEO_DURATION_LOCK:
-        _VIDEO_DURATION_CACHE[key] = dur
-    return dur
-
-
-def gif_repeats(duration: Optional[float], min_seconds: float) -> int:
-    """How many whole times a gif must play to hold its box for at least
-    `min_seconds`. A 3s gif under a 5s floor plays twice (6s) — the floor is a
-    minimum, never a cut. Clips already at or over the floor play once, and the
-    5.000s boundary resolves to 1 (the epsilon absorbs float error; `ceil` can
-    only ever add a repeat, so error in this direction is safe).
-
-    An unmeasurable duration yields 1: the floor is missed, but the failure is
-    bounded and the caller warns. `-stream_loop -1` is NOT the fallback here —
-    an infinite input with no `-t` to bound it was measured still running and
-    growing past 30s and 99MB for a 20-second output."""
-    if not duration or duration <= 0:
-        return 1
-    return max(1, math.ceil(min_seconds / duration - 1e-9))
 
 
 def find_default_font() -> Optional[str]:
@@ -676,42 +535,13 @@ class RenderConfig:
     # video, so the side panel is never frozen on a last frame. Off preserves
     # the classic play-once/last-frame-hold behavior. Split layout turns this on.
     cta_video_fill: bool = False
-    # Optional GIF layer: a flat pool of short looping clips shown one after
-    # another in their own box. Independent of the CTA video in every respect —
-    # own pool, own box, own fade, own z-index — because the two answer
-    # different briefs (see the GIF_* constants above). Absent pool => the layer
-    # is skipped entirely and the output is identical to before.
-    gif_x: int = 60
-    gif_y: int = 560
-    gif_w: int = 360
-    gif_h: int = 360
-    # Minimum seconds each gif holds the box, reached by repeating the gif a
-    # whole number of times. Sidebar-only, deliberately: this is batch-wide
-    # pacing, so a per-row column would be blank or identical in all 200 rows —
-    # and per-row values would make the FFmpeg input count vary row to row,
-    # right against the command-line ceiling. Matches how cta_video_fill (the
-    # other sequence-construction knob) is scoped.
-    gif_min_seconds: float = GIF_MIN_SECONDS
-    # Defaults to no fade (unlike the CTA video's 0.5/0.5): a mostly-transparent
-    # contain-fitted box is already visually light, and a zero fade takes the
-    # passthrough branch in build_ffmpeg_command, which keeps the static preview
-    # — which always paints the layer fully opaque — exactly honest.
-    gif_fade_start: float = 0.0
-    gif_fade_duration: float = 0.0
-    # Layer order (z-index) for the five overlay layers; higher = nearer the top,
+    # Layer order (z-index) for the four overlay layers; higher = nearer the top,
     # the background is always the base. Equal values fall back to a fixed tie
-    # priority (promo < gifs < CTA video < CTA image < texts) — the gif layer is
-    # the most decorative and least informational, so it loses ties to anything
-    # carrying a message. Applies to every video.
-    #
-    # These four defaults shifted up by one when the gif layer landed. In-flight
-    # jobs are unaffected: RenderConfig(**base_config) restores the persisted
-    # ints, so an old job keeps 1/2/3/4 and its relative order is unchanged.
+    # priority (promo < CTA video < CTA image < texts). Applies to every video.
     video_z: int = 1
-    gif_z: int = 2
-    cta_video_z: int = 3
-    cta_image_z: int = 4
-    text_z: int = 5
+    cta_video_z: int = 2
+    cta_image_z: int = 3
+    text_z: int = 4
     fps: int = FPS                # output frame rate; see FPS_CHOICES
     crf: int = 18                 # 16-28; lower = higher quality / bigger files
     preset: str = "medium"        # x264 speed/size tradeoff
@@ -733,16 +563,6 @@ class RenderConfig:
     # blank. default_font is a FONT_LIBRARY key, FONT_SYSTEM, or FONT_CUSTOM.
     default_font: str = FONT_SYSTEM
     default_style: str = "classic"
-    # Optional fixed fit box per text role, as (width, height) in canvas pixels;
-    # 0 (either dimension) = off, which is the default and leaves every text
-    # behaving exactly as it did before. A row's <Role>_Width/<Role>_Height cells
-    # override these. The box is CENTRED on the text's X/Y — see TEXT_BOX_COLUMNS.
-    headline_box_w: int = 0
-    headline_box_h: int = 0
-    subheading_box_w: int = 0
-    subheading_box_h: int = 0
-    footer_box_w: int = 0
-    footer_box_h: int = 0
     # Default translucency for every text and every highlight box, as a 0..1
     # factor (1.0 = fully opaque). A row's <Role>_Opacity / <Role>_BgOpacity
     # cell overrides it per element, and both MULTIPLY any alpha already in the
@@ -797,12 +617,6 @@ class TextSpec:
     color: Optional[tuple]   # None = random palette color
     x: Optional[int]         # None = auto-place (X/Y cell left blank in the Excel)
     y: Optional[int]
-    # Optional fixed fit box (<Role>_Width/<Role>_Height), CENTRED on x/y. When
-    # both are set, _fit_text_box re-wraps to box_w and derives `size` from the
-    # box rather than reading it. Either one absent = the classic behaviour,
-    # where the text sizes itself and wraps against the canvas.
-    box_w: Optional[int] = None
-    box_h: Optional[int] = None
     font: Optional[str] = None       # font choice name; None = config.default_font
     bg_color: Optional[tuple] = None # highlight box behind the text; None = no box
     style: Optional[str] = None      # classic|outline|shadow|neon; None = default_style
@@ -866,21 +680,6 @@ class RowSpec:
     # by _resolve_positions.
     cta_clip_names: Optional[list] = None
     cta_video_clips: Optional[list] = None
-    # Per-row gif box + fade (GIF_* cells); blank => sidebar values. There is no
-    # per-row gif COUNT: the sequence length is derived from the promo duration.
-    gif_x: Optional[int] = None
-    gif_y: Optional[int] = None
-    gif_w: Optional[int] = None
-    gif_h: Optional[int] = None
-    gif_fade_start: Optional[float] = None
-    gif_fade_duration: Optional[float] = None
-    # The resolved gif sequence, filled by _resolve_gif_sequence: the chosen
-    # files in play order, and — index-aligned with them — how many times each
-    # must repeat to satisfy the dwell floor. The two lists MUST stay the same
-    # length: build_ffmpeg_command zips them into `-stream_loop N -i path`, so a
-    # mismatch would emit fewer inputs than the index arithmetic accounts for.
-    gif_clips: Optional[list] = None
-    gif_clip_repeats: Optional[list] = None
     # The sheet's row number (1-based), mixed into placement_seed so two rows
     # with identical text still get distinct random picks — CTA-video clips,
     # colors, sizes, auto-placement. Without it, a templated sheet where every
@@ -902,10 +701,6 @@ class RowSpec:
                 color=_parse_color(row.get(f"{prefix}_Color"), warnings, f"{prefix}_Color"),
                 x=_parse_opt_int(row.get(f"{prefix}_X"), warnings, f"{prefix}_X"),
                 y=_parse_opt_int(row.get(f"{prefix}_Y"), warnings, f"{prefix}_Y"),
-                box_w=_parse_opt_int(row.get(f"{prefix}_Width"), warnings,
-                                     f"{prefix}_Width"),
-                box_h=_parse_opt_int(row.get(f"{prefix}_Height"), warnings,
-                                     f"{prefix}_Height"),
                 font=_clean_str(row.get(f"{prefix}_Font")) or None,
                 bg_color=_parse_color(row.get(f"{prefix}_BgColor"), warnings,
                                       f"{prefix}_BgColor", fallback_desc="no background"),
@@ -945,14 +740,6 @@ class RowSpec:
             cta_clip_speeds=[_parse_opt_float(row.get(col), warnings, col)
                              for col in CTA_SPEED_COLUMNS],
             cta_clip_names=[_clean_str(row.get(col)) or None for col in CTA_CLIP_COLUMNS],
-            gif_x=_parse_opt_int(row.get("GIF_X"), warnings, "GIF_X"),
-            gif_y=_parse_opt_int(row.get("GIF_Y"), warnings, "GIF_Y"),
-            gif_w=_parse_opt_int(row.get("GIF_Width"), warnings, "GIF_Width"),
-            gif_h=_parse_opt_int(row.get("GIF_Height"), warnings, "GIF_Height"),
-            gif_fade_start=_parse_opt_float(
-                row.get("GIF_Fade_Start"), warnings, "GIF_Fade_Start"),
-            gif_fade_duration=_parse_opt_float(
-                row.get("GIF_Fade_Duration"), warnings, "GIF_Fade_Duration"),
             seed_salt=row_number,
             warnings=warnings,
         )
@@ -1002,7 +789,6 @@ class VideoGenerator:
         work_dir: Path,
         output_dir: Path,
         cta_video_slots: Optional[list] = None,
-        gif_paths: Optional[list] = None,
     ):
         self.config = config
         self.video_path = Path(video_path)
@@ -1012,11 +798,6 @@ class VideoGenerator:
         self.cta_video_slots = [[Path(p) for p in (slot or [])]
                                 for slot in (cta_video_slots or [])]
         self._has_cta_video = any(self.cta_video_slots)
-        # Optional GIF layer: one FLAT pool (no slots — gifs have no position
-        # semantics and the sequence length is derived, not chosen). Empty =>
-        # the layer is skipped entirely.
-        self.gif_paths = [Path(p) for p in (gif_paths or [])]
-        self._has_gifs = bool(self.gif_paths)
         self.work_dir = Path(work_dir)
         self.output_dir = Path(output_dir)
         self.work_dir.mkdir(parents=True, exist_ok=True)
@@ -1049,17 +830,6 @@ class VideoGenerator:
             checked_slots.append(good)
         self.cta_video_slots = checked_slots
         self._has_cta_video = any(self.cta_video_slots)
-        good_gifs = []
-        for p in self.gif_paths:
-            if _has_video_stream(self.ffmpeg, p):
-                good_gifs.append(p)
-            else:
-                self.input_warnings.append(
-                    f"GIF '{p.name}' has no video stream (audio-only or "
-                    "corrupt) — skipped. Rows would otherwise fail with an "
-                    "FFmpeg 'matches no streams' error.")
-        self.gif_paths = good_gifs
-        self._has_gifs = bool(self.gif_paths)
 
         self._bg_index, self._bg_names = self._build_bg_index(Path(bg_dir))
         # Fonts are cached by (file path, named variation, size). The uploaded
@@ -1312,97 +1082,6 @@ class VideoGenerator:
             lines = _greedy_wrap(words, max_w, font.getlength)
         element.text = "\n".join(lines)
 
-    def _fit_text_box(self, element: TextSpec, warnings: list[str]) -> None:
-        """Re-flow and re-size a text so its painted block fills a fixed box.
-
-        Replaces _wrap_text for any element carrying a box. The box drives the
-        type: the text is wrapped to the box's width and the font size is
-        searched for the largest value whose painted block still fits BOTH
-        dimensions. Line breaks are recomputed from scratch each time, so a
-        wider box pulls text back onto fewer lines and a narrower one adds them.
-
-        Two things this measures that a naive fit would not:
-
-        * The PAINTED block, not the glyphs. _style_metrics' padding scales with
-          the font size — a neon glow alone is half the font size on every side —
-          so measuring glyphs would let the treatment spill outside the box the
-          user drew. The same text in the same box lands at 58px in `classic`
-          and 45px in `neon`, and that is correct.
-        * Manual line breaks. A real newline (Alt+Enter) or a '|' still forces a
-          break; each segment is then wrapped further only if it is too wide.
-
-        The size GROWS as well as shrinks, so <Role>_Size is not consulted for a
-        boxed text — the box is the instruction. That is what keeps headlines
-        optically consistent across a batch of wildly different lengths."""
-        box_w, box_h = int(element.box_w), int(element.box_h)
-        segments = [s for s in (seg.strip() for seg in
-                                element.text.replace("|", "\n").split("\n")) if s]
-        seg_words = [seg.split() for seg in segments if seg.split()]
-        if not seg_words:
-            return
-        draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
-
-        def layout(size: int) -> Optional[str]:
-            """The wrapped text at `size`, or None if it cannot fit the box."""
-            element.size = size
-            font = self._font_for(element)
-            pad = self._style_metrics(element)[5]
-            avail_w, avail_h = box_w - 2 * pad, box_h - 2 * pad
-            if avail_w <= 0 or avail_h <= 0:
-                return None
-            lines: list[str] = []
-            for words in seg_words:
-                # A single word wider than the box can't be wrapped out of
-                # trouble — only a smaller size fixes it.
-                if max(font.getlength(w) for w in words) > avail_w:
-                    return None
-                joined = " ".join(words)
-                if font.getlength(joined) <= avail_w:
-                    lines.append(joined)
-                else:
-                    lines.extend(_greedy_wrap(words, avail_w, font.getlength))
-            text = "\n".join(lines)
-            bbox = draw.multiline_textbbox((0, 0), text, font=font, anchor="mm",
-                                           align="center")
-            if bbox[2] - bbox[0] > avail_w or bbox[3] - bbox[1] > avail_h:
-                return None
-            return text
-
-        # Binary search for the largest fitting size. Height grows monotonically
-        # with the font size in every realistic case (a bigger face wraps onto
-        # more, taller lines), and scanning the whole range linearly costs an
-        # order of magnitude more for a result that differs by at most a pixel.
-        lo, hi = TEXT_FIT_MIN_SIZE, TEXT_FIT_MAX_SIZE
-        best_size, best_text = None, None
-        while lo <= hi:
-            mid = (lo + hi) // 2
-            got = layout(mid)
-            if got is not None:
-                best_size, best_text, lo = mid, got, mid + 1
-            else:
-                hi = mid - 1
-        if best_text is not None:
-            element.size, element.text = best_size, best_text
-            return
-
-        # Nothing fits even at the floor. Draw it at the floor and let it
-        # overflow, with a warning naming the text: clipping mid-word reads as a
-        # rendering fault, and shrinking without a bound produces text nobody
-        # can read and nothing to tell you why.
-        element.size = TEXT_FIT_MIN_SIZE
-        font = self._font_for(element)
-        pad = self._style_metrics(element)[5]
-        avail_w = max(1.0, box_w - 2 * pad)
-        lines = []
-        for words in seg_words:
-            lines.extend(_greedy_wrap(words, avail_w, font.getlength))
-        element.text = "\n".join(lines) or element.text
-        warnings.append(
-            f"{element.role}: the text does not fit its {box_w}x{box_h} box even "
-            f"at {TEXT_FIT_MIN_SIZE}px — drawn at {TEXT_FIT_MIN_SIZE}px and it "
-            "will overflow. Widen the box, shorten the text, or switch off the "
-            "outline/glow style (its padding scales with the font size).")
-
     def _measure_text(self, element: TextSpec) -> tuple[float, float]:
         """Rendered width/height of a text block at its font size."""
         draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
@@ -1568,29 +1247,6 @@ class VideoGenerator:
             spec.cta_video_clips = chosen
             spec.cta_video_clip_speeds = chosen_speeds
 
-        # Gif box (resolved unconditionally, same reasoning as the CTA video box
-        # above: the editor needs concrete numbers whether or not a pool exists).
-        spec.gif_w = box_dim(spec.gif_w, cfg.gif_w, CANVAS_W, "GIF_Width")
-        spec.gif_h = box_dim(spec.gif_h, cfg.gif_h, CANVAS_H, "GIF_Height")
-        if spec.gif_x is None:
-            spec.gif_x = cfg.gif_x
-        if spec.gif_y is None:
-            spec.gif_y = cfg.gif_y
-        if spec.gif_fade_start is None:
-            spec.gif_fade_start = cfg.gif_fade_start
-        if spec.gif_fade_duration is None:
-            spec.gif_fade_duration = cfg.gif_fade_duration
-        # Even origin: the gif is centered inside its box on an even offset (see
-        # the pad expression in build_ffmpeg_command) to keep the yuv420p chroma
-        # planes aligned. That only holds all the way through if the box itself
-        # starts on an even pixel.
-        spec.gif_x -= spec.gif_x % 2
-        spec.gif_y -= spec.gif_y % 2
-        gif_rect = (spec.gif_x, spec.gif_y,
-                    spec.gif_x + spec.gif_w, spec.gif_y + spec.gif_h)
-        if self._has_gifs:
-            self._resolve_gif_sequence(spec)
-
         color_deck = list(RANDOM_TEXT_COLORS)
         for element in spec.text_elements:
             if not element.text:
@@ -1605,14 +1261,6 @@ class VideoGenerator:
                 spec.warnings.append(
                     f"{element.role}_Style: unknown style '{element.style}', using 'classic'")
                 element.style = "classic"
-            # The fit box: a row's cells first, else the sidebar default for
-            # this role. Both dimensions are needed — a width alone has no
-            # height to fit against, so it falls back to the classic behaviour.
-            if element.box_w is None:
-                element.box_w = getattr(cfg, f"{element.role.lower()}_box_w", 0)
-            if element.box_h is None:
-                element.box_h = getattr(cfg, f"{element.role.lower()}_box_h", 0)
-            boxed = bool(element.box_w and element.box_h)
             if element.size is None:
                 lo, hi = RANDOM_SIZE_RANGES[element.role]
                 element.size = rng.randint(lo, hi)
@@ -1629,15 +1277,8 @@ class VideoGenerator:
             element.bg_color = _apply_opacity(
                 element.bg_color,
                 element.bg_opacity if element.bg_opacity is not None else cfg.text_bg_opacity)
-            # Lay the text out once its font and style are final. A boxed text
-            # derives its size from the box (so the <Role>_Size above is only a
-            # starting value the search discards); an unboxed one keeps the
-            # classic rules — footer balanced to 3 lines, others wrapped to the
-            # canvas.
-            if boxed:
-                self._fit_text_box(element, spec.warnings)
-            else:
-                self._wrap_text(element)
+            # Wrap once size is final: footer to 3 lines, others to fit canvas.
+            self._wrap_text(element)
 
         explicit_rects: list[tuple] = []
         pending: list[tuple[TextSpec, float, float]] = []
@@ -1645,11 +1286,6 @@ class VideoGenerator:
             if not element.text:
                 continue
             w, h = self._measure_text(element)
-            # A boxed text reserves its BOX, not the block that happened to fit
-            # inside it: the box is the space the user allotted, and holding it
-            # clear keeps the layout stable when the text later changes length.
-            if element.box_w and element.box_h:
-                w, h = float(element.box_w), float(element.box_h)
             if element.x is not None and element.y is not None:
                 explicit_rects.append(_rect_from_center(element.x, element.y, w, h))
             else:
@@ -1701,23 +1337,10 @@ class VideoGenerator:
                 spec.warnings.append(
                     f"CTA image at y={spec.cta_y} is outside the panel band "
                     f"({band[0]}-{band[1]}) — it will be cropped out of the output")
-            # The gif box is not repositioned in split mode — it is a floating
-            # accent over one of the panels, not a panel — but BOTH its edges
-            # have to be inside the band or it is silently half-cropped. The
-            # checks above test a single y because a text/CTA-image anchor is a
-            # point; a box is not.
-            if self._has_gifs and not (band[0] <= spec.gif_y
-                                       and spec.gif_y + spec.gif_h <= band[1]):
-                spec.warnings.append(
-                    f"GIF box (y={spec.gif_y}..{spec.gif_y + spec.gif_h}) is not "
-                    f"fully inside the panel band ({band[0]}-{band[1]}) — the "
-                    "part outside will be cropped out of the output")
         else:
             occupied = [video_rect] + cta_occupied + explicit_rects
             if self._has_cta_video:
                 occupied.append(cta_video_rect)
-            if self._has_gifs:
-                occupied.append(gif_rect)
             y_bounds = None
         for element, w, h in pending:
             x, y, clean = self._find_spot(element.x, element.y, w, h, occupied, rng,
@@ -1897,94 +1520,6 @@ class VideoGenerator:
                 f"CTA video: reached the {CTA_MAX_TOTAL_CLIPS}-clip cap before "
                 "covering the full main video (clips may be very short).")
 
-    def _resolve_gif_sequence(self, spec: RowSpec) -> None:
-        """Decide which gifs play for this row, in what order, and how many
-        times each repeats. Fills spec.gif_clips / spec.gif_clip_repeats.
-
-        The sequence LENGTH IS DERIVED, not configured: gifs are drawn from the
-        flat pool until their combined on-screen time covers the promo, so the
-        layer never freezes on a stopped animation. That is deliberate — with a
-        dwell floor the count needed depends on the promo, and one sheet renders
-        against up to MAX_PROMO_VIDEOS promos of different lengths, so any fixed
-        count would be right for at most one of them.
-
-        This is _fill_cta_sequence's shape but NOT its arithmetic, and the two
-        must not be merged: a CTA clip contributes `duration / speed`, whereas a
-        gif contributes `duration * repeats` where `repeats` is itself derived
-        from the duration.
-        """
-        cfg = self.config
-        pool = self.gif_paths
-        if not pool:
-            return
-        # A different salt from the CTA picker's 0xC7A. Seeding both from the
-        # same row seed with the same salt would lock the two layers together:
-        # every row that drew CTA clip #3 would also draw gif #3, in every batch.
-        rng = random.Random(spec.placement_seed() ^ 0x91F)
-        floor = max(0.1, float(cfg.gif_min_seconds or GIF_MIN_SECONDS))
-        target = self._probe_duration(self.video_path)
-        if target is None:
-            spec.warnings.append(
-                "GIFs: couldn't measure the promo video's duration, so the "
-                "sequence length can't be derived — playing each gif in the "
-                "pool once. It may stop before the video ends.")
-
-        chosen: list[Path] = []
-        repeats: list[int] = []
-        unmeasured: list[str] = []
-        covered = 0.0
-        # Deal from a shuffled deck rather than picking independently each time,
-        # the same way backgrounds are assigned: every gif in the pool is used
-        # once before any is used twice. Independent random picks look fine in
-        # theory and bad in practice — with four gifs against a 20s promo they
-        # produced green, amber, green, amber, leaving two uploads never shown.
-        deck: list[Path] = []
-
-        def draw() -> Path:
-            if not deck:
-                deck.extend(pool)
-                rng.shuffle(deck)
-                # Don't let a reshuffle put the same gif either side of the
-                # seam; that is the one repeat the deck can't rule out.
-                if chosen and len(deck) > 1 and str(deck[0]) == str(chosen[-1]):
-                    deck.append(deck.pop(0))
-            return deck.pop(0)
-
-        # Without a target, fall back to one pass over the pool: bounded, and
-        # with the floor applied it still covers 5s per gif.
-        untargeted_limit = min(len(pool), GIF_MAX_TOTAL_CLIPS)
-        while len(chosen) < GIF_MAX_TOTAL_CLIPS:
-            if target is None:
-                if len(chosen) >= untargeted_limit:
-                    break
-            elif covered >= target:
-                break
-            pick = draw()
-            dur = _probe_video_duration(self.ffmpeg, pick)
-            reps = gif_repeats(dur, floor)
-            chosen.append(pick)
-            repeats.append(reps)
-            if dur:
-                covered += dur * reps
-            else:
-                # Unmeasurable: it plays once and misses the floor, but the
-                # failure stays bounded and named. Count the floor toward the
-                # target anyway so an entirely unmeasurable pool can't spin the
-                # loop all the way to the cap.
-                unmeasured.append(pick.name)
-                covered += floor
-        if unmeasured:
-            names = ", ".join(sorted(set(unmeasured))[:5])
-            spec.warnings.append(
-                f"GIFs: couldn't measure the length of {names} — played once "
-                f"instead of repeating to {floor:g}s.")
-        if target is not None and covered < target:
-            spec.warnings.append(
-                f"GIFs: reached the {GIF_MAX_TOTAL_CLIPS}-gif cap before "
-                "covering the whole video; the last gif's final frame will hold.")
-        spec.gif_clips = chosen
-        spec.gif_clip_repeats = repeats
-
     def _paint_text(self, target: Image.Image, ax: float, ay: float, element: TextSpec,
                     what: str = "full", fill: Optional[tuple] = None) -> None:
         """Draw one text element onto `target` (any RGBA image) with its block
@@ -2101,18 +1636,6 @@ class VideoGenerator:
                 self._paint_text(layer, element.x, element.y, element, "full")
             canvas = Image.alpha_composite(canvas, layer)
         if include_cta:
-            # Painted in the layers' DEFAULT z-order (gifs < CTA video < CTA
-            # image), which is what makes overlapping boxes look right in the
-            # still. Custom z-indexes are honoured by the render, not here — the
-            # static preview has always been an approximation of the stacking.
-            if self._has_gifs and spec.gif_clips:
-                # Contain-fit the first gif of this row's sequence. Pasted WITH
-                # its alpha as the mask, unlike the cover-filled CTA frame
-                # below: this tile is mostly transparent, and a maskless paste
-                # would punch an opaque hole through everything under the box.
-                tile = self._contain_frame(spec.gif_w, spec.gif_h,
-                                           self._lead_gif_path(spec))
-                canvas.paste(tile, (spec.gif_x, spec.gif_y), tile)
             if self._has_cta_video:
                 # Cover-fill the box with the first clip in this row's order
                 # (matches the render, which cover-fills each clip to the box).
@@ -2396,44 +1919,7 @@ class VideoGenerator:
         """The clip shown first in this row's CTA sequence (slot 1's pick)."""
         return spec.cta_video_clips[0]
 
-    def _lead_gif_path(self, spec: RowSpec) -> Path:
-        """The gif shown first in this row's sequence — the one frame a static
-        preview can honestly show."""
-        return spec.gif_clips[0]
-
     # ------------------------------------------------------------- FFmpeg
-
-    # Every `[<n>:v]` reference in a filter_complex.
-    _FILTER_INPUT_RE = re.compile(r"\[(\d+):v\]")
-
-    @classmethod
-    def _check_filter_inputs(cls, filter_complex: str, n_inputs: int) -> None:
-        """Assert that each of the n_inputs declared inputs is referenced
-        exactly once in the filter graph.
-
-        This is a real guard, not a formality. With two clip layers plus the
-        subliminal stills, the inputs form three variable-length runs in one
-        command, and an index that drifts by one does not fail — an injected
-        off-by-one was measured to exit 0 with empty stderr and silently render
-        a different video (the gif box playing a subliminal text still, the CTA
-        sequence eating a gif). By construction every input feeds exactly one
-        filter chain here, so any drift shows up as one index referenced twice
-        and another not at all, which this catches and a max-index check does
-        not."""
-        seen: dict[int, int] = {}
-        for match in cls._FILTER_INPUT_RE.findall(filter_complex):
-            index = int(match)
-            seen[index] = seen.get(index, 0) + 1
-        missing = [i for i in range(n_inputs) if i not in seen]
-        duplicated = sorted(i for i, count in seen.items() if count > 1)
-        stray = sorted(i for i in seen if i >= n_inputs)
-        if missing or duplicated or stray:
-            raise RuntimeError(
-                "Internal error building the FFmpeg command: input indices and "
-                f"the filter graph disagree ({n_inputs} inputs declared; "
-                f"unreferenced={missing}, referenced more than once={duplicated}, "
-                f"out of range={stray}). Refusing to render rather than produce "
-                "a video with the wrong clips in it.")
 
     def build_ffmpeg_command(self, spec: RowSpec, base_png: Path,
                              overlay_png: Path, cta_png: Optional[Path],
@@ -2460,126 +1946,36 @@ class VideoGenerator:
               and never disturbs the chosen layering.
 
           CTA videos (present only when uploaded) -> [ctav]
-              One sample is chosen per slot for this row. Each is cover-filled to
-              the CTA box (scale=increase + crop, so all share one size) and sped
-              up/slowed by its own `setpts=PTS/SPEED`, then joined with `concat`
-              in the fixed slot order into one stream and alpha-faded in. They
-              play once through (the last frame holds if the promo outlasts
-              them); -shortest trims excess.
+              One sample is chosen per slot for this row (inputs are exactly those
+              picks, starting at clip_input_base — 4 with a CTA image, else 3).
+              Each is cover-filled to the CTA box (scale=increase + crop, so all
+              share one size) and sped up/slowed by its own `setpts=PTS/SPEED`,
+              then joined with `concat` in the fixed slot order into one stream and
+              alpha-faded in. They play once through (the last frame holds if the
+              promo outlasts them); -shortest trims excess.
 
-          GIFs (present only when a pool was supplied) -> [gifl]
-              A different treatment from the CTA clips on both axes that matter:
-
-              * Dwell. Each gif is claimed with `-stream_loop <repeats-1>`, an
-                input-LEVEL option that replays the file before the filter graph
-                sees it, so a 3s gif under a 5s floor arrives as 6s of video. The
-                `loop` video filter would do the same thing by buffering decoded
-                frames — measured at ~740MB peak against ~75MB for -stream_loop,
-                and it silently appends a frozen tail when placed before `fps=`.
-              * Fit. `scale='min(W,iw)':'min(H,ih)':decrease` fits the gif INSIDE
-                the box without ever upscaling it — the min() is what a bare
-                force_original_aspect_ratio=decrease gets wrong, since that
-                enlarges anything smaller than the box. `pad` then centres the
-                result on the box at an even offset with a fully transparent
-                colour, so whatever sits below shows through the leftover area
-                instead of black bars.
-
-              The pad is not cosmetic: concat REJECTS inputs of differing sizes
-              ("Input link parameters do not match"), and contain-fitting gifs of
-              assorted shapes produces exactly that. format=rgba must precede the
-              pad or the transparent colour flattens to opaque black.
-
-              No setpts here. -stream_loop already emits continuous monotonic
-              PTS, concat re-stamps the joined timeline, and setpts=N/FRAME_RATE/TB
-              was measured to drop one frame per segment.
-
-          [N:v]format=rgba,fade=t=in:st=CFS:d=CFD:alpha=1 -> [cta]
-              The CTA image (present only when one is uploaded) as its own
+          [3:v]format=rgba,fade=t=in:st=CFS:d=CFD:alpha=1 -> [cta]
+              The CTA image (input 3, present only when one is uploaded) as its own
               stream: force an alpha-capable format, then fade ONLY the alpha
               channel — fully transparent until cta_fade_start, fully visible
               cta_fade_duration later.
 
-          Z-order: the overlay layers — promo video [vidB], optional gifs [gifl],
-          optional CTA video [ctav], optional CTA image [cta], texts — are stacked
-          onto [anchored] in ascending order of their sidebar z-index (video_z /
-          gif_z / cta_video_z / cta_image_z / text_z; higher = on top). The
-          background is always the base. Equal z-indexes fall back to a fixed
-          priority (promo < gifs < CTA video < CTA image < texts) so the order is
-          deterministic. The topmost overlay also converts to yuv420p — required
-          for maximum player/social-platform compatibility.
+          Z-order: the overlay layers — promo video [vidB], optional CTA video
+          [ctav], optional CTA image [cta], texts [2:v] — are stacked onto
+          [anchored] in ascending order of their sidebar z-index (video_z /
+          cta_video_z / cta_image_z / text_z; higher = on top). The background is
+          always the base. Equal z-indexes fall back to a fixed priority (promo <
+          CTA video < CTA image < texts) so the order is deterministic. The
+          topmost overlay also converts
+          to yuv420p — required for maximum player/social-platform compatibility.
 
-        INPUT INDICES. Every input is claimed through add_input(), which appends
-        it and returns the index it took; the filter graph is then written using
-        those returned values. Nothing derives an index by summing the lengths of
-        other lists. That used to be safe by construction with one run of clip
-        inputs, but a second run makes it a hazard rather than a chore — an
-        off-by-one was measured to produce a DIFFERENT video with exit code 0 and
-        empty stderr (the gif box quietly playing a subliminal text still). It is
-        not a class of bug that announces itself, so _check_filter_inputs asserts
-        the real invariant afterwards: every input referenced exactly once.
-
-        Still inputs use -loop 1 -framerate <fps> so they behave as streams
+        Inputs use -loop 1 -framerate <fps> so the still images behave as streams
         aligned with the output rate (config.fps, 30 or 60). -shortest at the
         muxer trims audio to the video length; -movflags +faststart relocates the
         moov atom for instant playback start after upload.
         """
         cfg = self.config
         fps = int(cfg.fps or FPS)
-        has_cta = self._has_cta
-        clips = spec.cta_video_clips or []
-        has_ctav = bool(self._has_cta_video and clips)
-        gifs = list(spec.gif_clips or [])
-        gif_reps = list(spec.gif_clip_repeats or [])
-        has_gif = bool(self._has_gifs and gifs)
-        sub_layers = sub_layers or []
-        # These two are built together and stay aligned by construction, but a
-        # mismatch here would be silent and expensive: zip() truncates, so the
-        # command would carry fewer -i than the filter graph references and every
-        # later input would shift by one. Normalise rather than trust.
-        if len(gif_reps) != len(gifs):
-            gif_reps = (gif_reps + [1] * len(gifs))[:len(gifs)]
-
-        # ---- inputs: claimed in order, each handing back its own index -------
-        cmd = [self.ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
-        n_inputs = 0
-
-        def add_input(*args: str) -> int:
-            """Append one input to `cmd` and return the index it claimed."""
-            nonlocal n_inputs
-            index = n_inputs
-            n_inputs += 1
-            cmd.extend(args)
-            return index
-
-        def add_still(path) -> int:
-            """A still image as an endless stream at the output rate."""
-            return add_input("-loop", "1", "-framerate", str(fps), "-i", str(path))
-
-        base_i = add_still(base_png)
-        promo_i = add_input("-i", str(self.video_path))
-        text_i = add_still(overlay_png)
-        cta_i = add_still(cta_png) if has_cta else None
-        clip_ix = [add_input("-i", str(p)) for p in clips]
-        # Gifs are the only inputs carrying an input-level option. -stream_loop N
-        # replays the file N extra times before decoding, which is what turns a
-        # 3s gif into the 6s the dwell floor asks for.
-        gif_ix = [add_input("-stream_loop", str(max(1, int(r)) - 1), "-i", str(p))
-                  for p, r in zip(gifs, gif_reps)]
-        sub_ix = [add_still(sl["png"]) for sl in sub_layers]
-
-        if n_inputs > MAX_TOTAL_FFMPEG_INPUTS:
-            # Two independent per-layer caps are not enough — they land in one
-            # command line together. Fail with something that names the cause,
-            # because the alternative is [WinError 206] surfacing through
-            # render_row's broad except as "The filename or extension is too long".
-            raise RuntimeError(
-                f"This row needs {n_inputs} FFmpeg inputs, over the "
-                f"{MAX_TOTAL_FFMPEG_INPUTS} limit: {len(clips)} CTA clip(s), "
-                f"{len(gifs)} gif(s), {len(sub_layers)} subliminal layer(s). "
-                "Raise the gif dwell time so fewer gifs are needed, use fewer "
-                "CTA clips, or shorten the promo video.")
-
-        # ---- filter graph, written against the indices claimed above ---------
         # spec.video_* are the per-row resolved box (Excel Video_* overrides,
         # the configured values, or a randomized spot when randomize_video_pos
         # is enabled). The promo video defines the render length: [vidA] anchors
@@ -2588,24 +1984,32 @@ class VideoGenerator:
         video_pos = (f"x='{spec.video_x}+({spec.video_w}-w)/2'"
                      f":y='{spec.video_y}+({spec.video_h}-h)/2'")
         parts = [
-            f"[{promo_i}:v]scale={spec.video_w}:{spec.video_h}"
+            f"[1:v]scale={spec.video_w}:{spec.video_h}"
             f":force_original_aspect_ratio=decrease:force_divisible_by=2,"
             f"split[vidA][vidB];",
-            f"[{base_i}:v][vidA]overlay={video_pos}:shortest=1[anchored];",
+            f"[0:v][vidA]overlay={video_pos}:shortest=1[anchored];",
         ]
+        has_cta = self._has_cta
+        # Fixed inputs: 0=base, 1=promo video, 2=overlay(texts). The CTA image is
+        # input 3 only when supplied; the per-row CTA clips follow it, so their
+        # first input index shifts down by one when there's no CTA image.
+        clip_input_base = 4 if has_cta else 3
+        clips = spec.cta_video_clips or []
+        has_ctav = bool(self._has_cta_video and clips)
         if has_ctav:
             n = len(clips)
             speeds = spec.cta_video_clip_speeds or [1.0] * n
             cw, ch = spec.cta_video_w, spec.cta_video_h
             # Cover-fill each chosen clip to the box so they share one size
-            # (needed to concat). setpts=PTS/SPEED is applied per clip BEFORE the
+            # (needed to concat); inputs clip_input_base..+n-1 are the per-row
+            # picks in order. setpts=PTS/SPEED is applied per clip BEFORE the
             # concat so each slot plays at its own speed; concat then re-stamps
             # the joined timeline.
             labels = []
-            for k, idx in enumerate(clip_ix):
+            for k in range(n):
                 sp = speeds[k] if k < len(speeds) else 1.0
                 parts.append(
-                    f"[{idx}:v]fps={fps},"
+                    f"[{clip_input_base + k}:v]fps={fps},"
                     f"scale={cw}:{ch}:force_original_aspect_ratio=increase,"
                     f"crop={cw}:{ch},setsar=1,setpts=PTS/{sp:.4f},format=rgba[cv{k}];"
                 )
@@ -2625,34 +2029,9 @@ class VideoGenerator:
                 )
             else:
                 parts.append(f"{seq}null[ctav];")
-        if has_gif:
-            gw, gh = spec.gif_w, spec.gif_h
-            labels = []
-            for k, idx in enumerate(gif_ix):
-                parts.append(
-                    f"[{idx}:v]fps={fps},format=rgba,"
-                    f"scale='min({gw},iw)':'min({gh},ih)'"
-                    f":force_original_aspect_ratio=decrease:force_divisible_by=2,"
-                    f"pad={gw}:{gh}:'trunc(({gw}-iw)/4)*2':'trunc(({gh}-ih)/4)*2'"
-                    f":color=0x00000000,setsar=1[gv{k}];"
-                )
-                labels.append(f"[gv{k}]")
-            if len(labels) > 1:
-                parts.append(
-                    f"{''.join(labels)}concat=n={len(labels)}:v=1:a=0[gseq];")
-                gseq = "[gseq]"
-            else:
-                gseq = labels[0]
-            if (spec.gif_fade_duration or 0) > 0:
-                parts.append(
-                    f"{gseq}fade=t=in:st={spec.gif_fade_start}"
-                    f":d={spec.gif_fade_duration}:alpha=1[gifl];"
-                )
-            else:
-                parts.append(f"{gseq}null[gifl];")
         if has_cta:
             parts.append(
-                f"[{cta_i}:v]format=rgba,"
+                f"[3:v]format=rgba,"
                 f"fade=t=in:st={spec.cta_fade_start}:d={spec.cta_fade_duration}:alpha=1[cta];"
             )
         # Stack the overlay layers by their sidebar z-index (higher = on top; the
@@ -2661,25 +2040,22 @@ class VideoGenerator:
         # (z-index, tie-break priority, overlay input, overlay position, enable?).
         layers = [
             (cfg.video_z, 0, "[vidB]", video_pos),
-            (cfg.text_z, 4, f"[{text_i}:v]", "0:0"),
+            (cfg.text_z, 3, "[2:v]", "0:0"),
         ]
         if has_cta:
-            layers.append((cfg.cta_image_z, 3, "[cta]", f"{spec.cta_x}:{spec.cta_y}"))
+            layers.append((cfg.cta_image_z, 2, "[cta]", f"{spec.cta_x}:{spec.cta_y}"))
         if has_ctav:
-            layers.append((cfg.cta_video_z, 2, "[ctav]",
+            layers.append((cfg.cta_video_z, 1, "[ctav]",
                            f"{spec.cta_video_x}:{spec.cta_video_y}"))
-        if has_gif:
-            # No shortest=1 here: the gif sequence is finite, and terminating the
-            # composite on it would cut the video short whenever the sequence
-            # under-fills. The promo's own anchor plus -t bound the render.
-            layers.append((cfg.gif_z, 1, "[gifl]",
-                           f"{spec.gif_x}:{spec.gif_y}"))
         # Subliminal text: each partial is a looped-still input painted at 0,0 but
         # timeline-gated to one frame slot of the cycle via `enable`, so per output
         # frame exactly one partial shows and no frame carries the whole text. They
-        # sit at text_z (just above the static texts).
+        # sit at text_z (just above the static texts); their inputs trail the CTA
+        # clips so clip_input_base stays valid.
+        sub_layers = sub_layers or []
+        sub_input_base = clip_input_base + len(clips)
         for m, sl in enumerate(sub_layers):
-            layers.append((cfg.text_z, 5, f"[{sub_ix[m]}:v]", "x=0:y=0",
+            layers.append((cfg.text_z, 4, f"[{sub_input_base + m}:v]", "x=0:y=0",
                            sl["enable"]))
         layers.sort(key=lambda layer: (layer[0], layer[1]))
 
@@ -2704,17 +2080,30 @@ class VideoGenerator:
             parts.append(f"[{last}]{label}overlay={pos}{en}{fmt}[{out}]{sep}")
             last = out
         filter_complex = "".join(parts)
-        # The invariant that actually catches an index slip. Checking that the
-        # highest referenced index equals n_inputs-1 does NOT: an injected
-        # off-by-one in either direction passes it and still renders a different
-        # video with exit 0.
-        self._check_filter_inputs(filter_complex, n_inputs)
 
+        cmd = [
+            self.ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+            "-loop", "1", "-framerate", str(fps), "-i", str(base_png),
+            "-i", str(self.video_path),
+            "-loop", "1", "-framerate", str(fps), "-i", str(overlay_png),
+        ]
+        # CTA image is input 3 only when supplied (keeps clip indices aligned
+        # with clip_input_base above).
+        if has_cta:
+            cmd += ["-loop", "1", "-framerate", str(fps), "-i", str(cta_png)]
+        # CTA clips: this row's chosen sample per slot, in fixed play order; the
+        # filter concats them. They play once through (no -stream_loop).
+        for clip_path in clips:
+            cmd += ["-i", str(clip_path)]
+        # Subliminal partials: looped stills (one per cycle frame slot), trailing
+        # the CTA clips so clip_input_base / clip indices stay valid.
+        for sl in sub_layers:
+            cmd += ["-loop", "1", "-framerate", str(fps), "-i", str(sl["png"])]
         cmd += ["-filter_complex", filter_complex, "-map", "[out]"]
         if cfg.include_audio:
-            # Take audio from the promo video if it exists; never fail without
-            # it. The CTA video's and the gifs' audio is intentionally ignored.
-            cmd += ["-map", f"{promo_i}:a?", "-c:a", "aac", "-b:a", cfg.audio_bitrate]
+            # '1:a?' = take audio from the promo video if it exists; never fail
+            # without it. The CTA video's audio is intentionally ignored.
+            cmd += ["-map", "1:a?", "-c:a", "aac", "-b:a", cfg.audio_bitrate]
         else:
             cmd += ["-an"]
         cmd += [
@@ -2897,30 +2286,6 @@ class VideoGenerator:
         up edge to edge in the box."""
         return ImageOps.fit(self._first_video_frame(path), (box_w, box_h), Image.LANCZOS)
 
-    def _contain_content(self, box_w: int, box_h: int, path: Path) -> Image.Image:
-        """A gif's first frame scaled to fit INSIDE the box without upscaling —
-        the visible content only, no padding.
-
-        Neither existing helper can stand in: _fit_frame deliberately UPSCALES
-        small sources (it mirrors an unbounded force_original_aspect_ratio=
-        decrease) and _cover_frame crops. The `1.0` in the ratio is the
-        no-upscale rule, the Pillow counterpart of the filter's
-        scale='min(W,iw)':'min(H,ih)'."""
-        frame = self._first_video_frame(path)
-        ratio = min(box_w / frame.width, box_h / frame.height, 1.0)
-        size = (max(2, round(frame.width * ratio)), max(2, round(frame.height * ratio)))
-        return frame.resize(size, Image.LANCZOS)
-
-    def _contain_frame(self, box_w: int, box_h: int, path: Path) -> Image.Image:
-        """_contain_content centred on a fully transparent box-sized tile — the
-        counterpart of the filter's `pad ... color=0x00000000`, so the static
-        preview shows the same see-through margins the render produces."""
-        content = self._contain_content(box_w, box_h, path)
-        tile = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 0))
-        tile.paste(content.convert("RGBA"),
-                   ((box_w - content.width) // 2, (box_h - content.height) // 2))
-        return tile
-
     def render_preview(self, row: pd.Series, row_number: Optional[int] = None) -> Image.Image:
         """Static composite of one row — same layout math as the real render,
         with the video represented by its first frame. Pass the row's 1-based
@@ -2989,11 +2354,6 @@ class VideoGenerator:
                 "role": element.role,
                 "cx": element.x, "cy": element.y, "w": iw, "h": ih,
                 "size": element.size,
-                # The fit box, when this text has one (0 = unboxed). The editor
-                # resizes THIS instead of scaling the font, and draws it as an
-                # outline so the allotted space is visible even when the fitted
-                # text is much smaller than it.
-                "box_w": int(element.box_w or 0), "box_h": int(element.box_h or 0),
                 # Color and opacity travel separately: the editor's <input
                 # type=color> only speaks 6-digit hex, and they map to two
                 # different Excel columns (*_Color and *_Opacity).
@@ -3033,8 +2393,7 @@ class VideoGenerator:
             # Sidebar layer order — the editor applies these as CSS z-index so the
             # preview stacking matches the render (higher = on top).
             "z": {
-                "video": self.config.video_z, "gif": self.config.gif_z,
-                "cta_video": self.config.cta_video_z,
+                "video": self.config.video_z, "cta_video": self.config.cta_video_z,
                 "cta_image": self.config.cta_image_z, "text": self.config.text_z,
             },
         }
@@ -3050,24 +2409,5 @@ class VideoGenerator:
                 "w": spec.cta_video_w, "h": spec.cta_video_h,
                 "frame": _img_to_data_uri(cv.convert("RGB"), "JPEG"),
                 "frame_w": cv.width, "frame_h": cv.height,
-            }
-        if self._has_gifs and spec.gif_clips:
-            lead = self._lead_gif_path(spec)
-            natural = self._first_video_frame(lead)
-            # Ship the content WITHOUT the transparent padding, plus the gif's
-            # true natural size. The editor's box is resizable, so it has to
-            # apply the no-upscale rule itself — growing the box must not grow
-            # the gif, which is what the render does. Baking a box-sized padded
-            # tile instead would stretch on resize and quietly lie.
-            shown = self._contain_content(spec.gif_w, spec.gif_h, lead)
-            payload["gif"] = {
-                "x": spec.gif_x, "y": spec.gif_y,
-                "w": spec.gif_w, "h": spec.gif_h,
-                "frame": _img_to_data_uri(shown.convert("RGB"), "JPEG"),
-                "nat_w": natural.width, "nat_h": natural.height,
-                # What a still cannot show: the sequence rotates. The editor
-                # captions the box with this so the preview is honest about
-                # being one gif of several.
-                "count": len(spec.gif_clips),
             }
         return payload

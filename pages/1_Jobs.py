@@ -278,32 +278,6 @@ def render_job(job: dict, expanded: bool = False) -> None:
                 f"`{result['clips_dir']}`. Configure Google Drive on the Setup "
                 "page to have future scrapes uploaded automatically."
             )
-        elif result.get("upload_mode") == "zip" and result.get("drive_zips"):
-            # There is no local ZIP to offer in this mode and there never was:
-            # the videos were packed straight into the per-folder archives in
-            # Drive. Saying "the ZIP has been cleaned up" here would send
-            # someone looking for a file that was never on this machine.
-            names = " and ".join(f"`{p}.zip`" for p in
-                                 (result.get("upload_platforms") or ["yt", "tk"]))
-            freed = (" The videos were removed from the server once Drive "
-                     "confirmed them." if result.get("videos_freed") else "")
-            st.caption(
-                f"Published as **{result['drive_zips']:,} ZIP(s)** — {names} "
-                f"inside each `batch_NN` folder in Drive.{freed}"
-            )
-            pending = result.get("platforms_pending") or []
-            if pending:
-                st.info(
-                    "**"
-                    + ", ".join(f"`{p}.zip`" for p in pending)
-                    + f" still to publish.** {result.get('videos_kept', 0):,} "
-                    "video(s) are being kept on the VM for it — they are not "
-                    "deleted until every set of names has been published. "
-                    "Once Drive's 750 GB/24h allowance has rolled over, submit "
-                    "this batch again with "
-                    + " and ".join(f"*{p}*" for p in pending)
-                    + " selected; anything already uploaded is skipped."
-                )
         elif job["status"] == store.STATUS_SUCCEEDED and counts["rendered"]:
             st.caption(
                 "The ZIP has been cleaned up (job folders are kept for "
