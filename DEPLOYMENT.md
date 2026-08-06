@@ -395,6 +395,113 @@ theme and press *Generate a new pool*. 2,000 captions × 500 hashtag sets is a
 million unique pairs, roughly a year and a half at 2,000 videos a day, and costs
 about $2 of Gemini usage to build.
 
+### 5e. Disk sizing
+
+Rendering needs room for the MP4s, and publishing them as ZIPs needs room for
+two archives on top of that. Packing runs **one output folder at a time** and
+each folder's MP4s are deleted as soon as both of its archives are verified in
+Drive, so the high-water mark is:
+
+```
+all rendered MP4s  +  two archives of ONE output folder
+```
+
+At ~31 MB a video that is roughly **35 GB per 1,000 videos**, plus about 65 GB
+of headroom for a 1,000-video folder. A 16,000-video night therefore wants a
+**600 GB** data disk. A `pd-balanced` disk is $0.10/GB-month, so 600 GB for the
+twelve hours a render actually takes is about **$1** — size it generously and
+delete it afterwards rather than fighting for space at 3am.
+
+Set `BVG_UPLOAD_FREE_LOCAL=false` to keep the MP4s on the VM after publishing
+(the local ZIP fallback then still works, and the disk must hold everything).
+
+### 5e-bis. "Shared drive not found" — membership vs folder access
+
+`404 Shared drive not found: 0A…` means the service account is **not a member
+of the Shared Drive**. That is not necessarily a problem: an account given
+access to a *folder inside* the drive can read and write that folder perfectly
+well, it just cannot see the drive as an object. Two API calls behave
+differently and everything else works:
+
+| Call | Member | Folder access only |
+|---|---|---|
+| `drives.get` — the drive's name | ✅ | ❌ 404 |
+| `files.list(corpora='drive', driveId=…)` | ✅ | ❌ 404 |
+| create folder / upload / copy inside the folder | ✅ | ✅ |
+| create folder at the **drive root** | ✅ | ❌ 403 |
+
+The app handles both: the name is best-effort, and searches fall back to an
+ordinary parent-scoped query. **Point the destination at a folder inside the
+Shared Drive rather than at the drive itself** and folder-level access is
+enough for everything. Aiming at the drive root is the one thing that needs
+real membership.
+
+### 5f. The 750 GB/day Drive ceiling (plan around this)
+
+Google allows **one user 750 GB per rolling 24 hours** of data moved into Drive.
+The VM's service account is that user, and **server-side copies count as well as
+uploads**. Past it every write returns `403 userRateLimitExceeded`.
+
+For a night of 16,000 videos (~500 GB of MP4s) that is ~1 TB against the
+allowance in *either* publishing mode — as ZIP uploads, or as uploads plus
+`files.copy`. At ~31 MB a video, **one service account publishes about 12,000
+videos a day under both names.**
+
+Options when a run is bigger than that, best first:
+
+- **Publish one set of names per day.** *Publish which names?* on the Generate
+  page — or `upload_platforms` in the job's params — takes `yt,tk`, `tk` or
+  `yt`. One platform halves the traffic, so ~24,000 videos fit in a day. Run
+  the job, then requeue it the next day with the other platform: state is
+  recorded per platform, so nothing is re-sent.
+
+  The MP4s are **kept on the VM** while a platform is still outstanding, since
+  the second day builds its archives from them. Size the disk for that — they
+  are not freed until every platform has an archive.
+
+- **Add a second service account** and point alternate runs at it with
+  `BVG_DRIVE_CREDENTIALS_FILE` — each account gets its own 750 GB.
+- **Render fewer, or smaller, videos** — at ~31 MB each the allowance is the
+  binding limit long before disk or CPU is.
+
+Throttling short of the ceiling is handled automatically: every Drive call
+retries with exponential backoff, and the budget resets each time a chunk
+lands, so a 30 GB archive survives repeated throttling. Tune with
+`BVG_DRIVE_RETRY_ATTEMPTS` and `BVG_DRIVE_RETRY_MAX_SLEEP`.
+
+### 5g. Repacking folders already in Drive
+
+Renders published before ZIPs existed left every video as its own Drive file
+under `batch_NN/tk/` and `batch_NN/yt/`. `tools/zip_drive_tk.py` converts them
+in place, and it is built for a VM far smaller than the data: it works one
+folder at a time, and inside a folder it downloads a handful of videos,
+appends them to the archive and deletes them again — so **peak disk is one
+folder's archive**, not the whole night.
+
+```bash
+# Over SSH on the VM. Check the plan first — this touches nothing:
+sudo docker exec $(sudo docker compose ps -q app) \
+  python tools/zip_drive_tk.py --link 'https://drive.google.com/drive/folders/XXXX' --dry-run
+
+# One folder, to see the result in Drive before committing hours:
+sudo docker exec $(sudo docker compose ps -q app) \
+  python tools/zip_drive_tk.py --link 'https://drive.google.com/drive/folders/XXXX' --max-folders 1
+
+# Then the rest. Use `screen`/`tmux`, or nohup, so SSH dropping doesn't kill it:
+sudo docker exec $(sudo docker compose ps -q app) \
+  python tools/zip_drive_tk.py --link 'https://drive.google.com/drive/folders/XXXX'
+```
+
+**Nothing in Drive is ever deleted.** The `tk/` folder is left exactly as it
+was, so the videos remain their own backup until you decide otherwise. Re-run
+the same command any time: finished folders are recorded in
+`/data/jobs/_repack/state.json` and skipped, and an archive that *is* re-made
+replaces the old one rather than becoming a second file with the same name.
+
+Add `--platform yt` to do the other half, and `--verify md5` to check every
+download against Drive's checksum instead of just its size (exact, but it
+re-reads every file).
+
 ## 6. Security — worth doing before this goes further
 
 The firewall rule `video-gen-public` currently allows `tcp:8501` from

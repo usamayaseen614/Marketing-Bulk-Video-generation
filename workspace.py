@@ -53,6 +53,13 @@ class Workspace:
     font_path: Optional[Path]
     work_dir: Path
     cta_video_slots: list = field(default_factory=list)
+    # The GIF layer's pool. FLAT, not slotted: gifs have no position semantics
+    # and the sequence length is derived from the promo's duration, so there is
+    # nothing for slots to address. Lives in its own `gifs/` folder rather than
+    # a `*_slot_N` sibling — workspace_from_dir parses a trailing integer off
+    # every `cta_slot_*` match, and a colliding prefix would raise ValueError
+    # for every job in the batch.
+    gif_paths: list = field(default_factory=list)
     # Every promo video uploaded, in order. A multi-batch render uses a
     # different one per batch; `video_path` is the first, so single-promo
     # callers (Preview, Render Row) are unaffected.
@@ -70,7 +77,7 @@ class Workspace:
 
 
 def stage_uploads(dest: Path, video_file, zip_file, cta_file, font_file,
-                  cta_video_slot_files=None) -> None:
+                  cta_video_slot_files=None, gif_files=None) -> None:
     """Write the in-memory uploads to disk where FFmpeg/PIL can read them.
 
     `video_file` may be a single upload or a list of up to MAX_PROMO_VIDEOS —
@@ -114,6 +121,14 @@ def stage_uploads(dest: Path, video_file, zip_file, cta_file, font_file,
         for f in files or []:
             (slot_dir / Path(f.name).name).write_bytes(f.getvalue())
 
+    # One flat folder for the gif pool. Always created, so a job resumed after
+    # a restart can tell "no gifs were uploaded" from "the folder is missing".
+    gif_dir = dest / "gifs"
+    gif_dir.mkdir(parents=True, exist_ok=True)
+    for f in gif_files or []:
+        if f is not None:
+            (gif_dir / Path(f.name).name).write_bytes(f.getvalue())
+
 
 def workspace_from_dir(assets: Path, work_dir: Path) -> Workspace:
     """Rebuild a Workspace by reading a folder staged by stage_uploads().
@@ -139,6 +154,14 @@ def workspace_from_dir(assets: Path, work_dir: Path) -> Workspace:
         for slot in slot_dirs
     ]
 
+    # The gif pool, in sorted filename order for the same reason the clip pools
+    # are: a job resumed after a crash must see the pool exactly as it did the
+    # first time, or the seeded per-row sequence stops being reproducible.
+    gif_dir = assets / "gifs"
+    gif_paths = sorted(
+        (f for f in gif_dir.iterdir() if f.is_file() and is_video(f))
+    ) if gif_dir.is_dir() else []
+
     # input.mp4 first, then input_2.mp4 … input_10.mp4 in numeric order.
     video_paths = [assets / "input.mp4"] if (assets / "input.mp4").is_file() else []
     video_paths += sorted(
@@ -155,13 +178,14 @@ def workspace_from_dir(assets: Path, work_dir: Path) -> Workspace:
         font_path=fonts[0] if fonts else None,
         work_dir=work_dir,
         cta_video_slots=cta_video_slots,
+        gif_paths=gif_paths,
         video_paths=video_paths,
     )
 
 
 def build_workspace(tmp: Path, video_file, zip_file, cta_file, font_file,
-                    cta_video_slot_files=None) -> Workspace:
+                    cta_video_slot_files=None, gif_files=None) -> Workspace:
     """Stage the uploads into `tmp` and return the Workspace over them."""
     stage_uploads(tmp, video_file, zip_file, cta_file, font_file,
-                  cta_video_slot_files)
+                  cta_video_slot_files, gif_files)
     return workspace_from_dir(tmp, tmp / "work")

@@ -293,6 +293,29 @@ def _drive_clips_stage(job: dict, params: dict) -> dict:
     }
 
 
+def _drive_gifs_stage(job: dict, params: dict) -> dict:
+    """The GIF pool from a Google Drive folder.
+
+    Simpler than _drive_clips_stage because the gif pool is FLAT — there are no
+    slots to deal across, so the folder is downloaded straight into
+    `assets/gifs/`, which is exactly where workspace_from_dir looks for it. No
+    selection step either: every gif in the folder is in the pool, and which
+    ones a given video uses is decided per row at render time."""
+    job_id = job["id"]
+    dest = store.assets_dir(job_id) / "gifs"
+    dest.mkdir(parents=True, exist_ok=True)
+    store.set_stage(job_id, "downloading GIFs from Drive")
+    report = _download_drive_folder(
+        job_id, params.get("gifs_drive_folder"), dest, "GIFs")
+    return {
+        "source": "drive_folder",
+        "drive_folder": report["folder"],
+        "downloaded": report["downloaded"],
+        "already_present": report["skipped"],
+        "download_failed": report["failed"],
+    }
+
+
 def _captions_stage(job: dict, params: dict) -> dict:
     """Generate a pool first, when asked. Reuses the existing pool builder."""
     job_id = job["id"]
@@ -348,6 +371,10 @@ def run(job: dict) -> dict:
         result["clips"] = _clips_stage(job, params)
     elif params.get("clip_source") == "drive_folder":
         result["clips"] = _drive_clips_stage(job, params)
+
+    # ---- 1b. gifs (independent of where the CTA clips came from)
+    if params.get("gif_source") == "drive_folder":
+        result["gifs"] = _drive_gifs_stage(job, params)
 
     # ---- 2. captions
     if params.get("generate_pool"):

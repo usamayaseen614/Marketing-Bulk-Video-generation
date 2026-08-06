@@ -499,6 +499,43 @@ def update_item(job_id: str, idx: int, **fields: Any) -> None:
             "WHERE job_id=? AND idx=?", values)
 
 
+def set_upload_status(job_id: str, idxs: Iterable[int], status: str, *,
+                      error: Optional[str] = None,
+                      drive_link: Optional[str] = None,
+                      drive_file_id: Optional[str] = None,
+                      count_attempt: bool = False) -> int:
+    """Record ONE Drive outcome across MANY items.
+
+    Uploading a folder as a ZIP settles every video in it with a single Drive
+    write, so the thousand items inside share one fate. update_item() opens a
+    connection per row, which for a 16,000-video job would mean 16,000
+    connections to record 32 facts — this writes them a chunk at a time
+    instead.
+
+    Chunked at 400 because the values go into an `IN (...)` list, and SQLite's
+    parameter limit is 999 on older builds."""
+    idxs = [int(i) for i in idxs]
+    if not idxs:
+        return 0
+    attempts = "upload_attempts=upload_attempts+1, " if count_attempt else ""
+    changed = 0
+    with _conn() as conn:
+        for start in range(0, len(idxs), 400):
+            chunk = idxs[start:start + 400]
+            marks = ",".join("?" * len(chunk))
+            cur = conn.execute(
+                "UPDATE job_items SET upload_status=?, upload_error=?, "
+                "drive_link=COALESCE(?, drive_link), "
+                "drive_file_id=COALESCE(?, drive_file_id), "
+                f"{attempts}updated_at=? "
+                f"WHERE job_id=? AND idx IN ({marks})",
+                [status, error, drive_link, drive_file_id, time.time(),
+                 job_id, *chunk],
+            )
+            changed += cur.rowcount
+    return changed
+
+
 def bump_item_attempts(job_id: str, idx: int, column: str) -> None:
     if column not in {"render_attempts", "upload_attempts"}:
         raise ValueError(f"Not an attempts column: {column}")

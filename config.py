@@ -144,9 +144,56 @@ DRIVE_ROOT_FOLDER_ID = _str("BVG_DRIVE_ROOT_FOLDER_ID")
 # key file to store, rotate or leak.
 DRIVE_CREDENTIALS_FILE = _str("BVG_DRIVE_CREDENTIALS_FILE")
 
+# How finished videos are published.
+#
+#   zip    one `yt.zip` and one `tk.zip` per output folder (the default). A
+#          16,000-video night becomes ~32 archives instead of 32,000 files.
+#   files  every video as its own Drive file under batch_NN/yt/ and
+#          batch_NN/tk/, the second made with a server-side copy.
+#
+# `files` moves the bytes once and `zip` moves them twice: a ZIP is opaque to
+# files.copy, so the archive holding the long names cannot be cloned from the
+# one holding the short names. That is the price of the archives, and it is
+# paid knowingly — see packing.py.
+UPLOAD_MODE = _str("BVG_UPLOAD_MODE", "zip").lower()
+
+# Which of the two names to publish: `yt`, `tk`, or both.
+#
+# This exists because of Drive's 750 GB per rolling 24 hours (see README). Each
+# video is published under two names, so a night that renders 500 GB of MP4s
+# moves a terabyte into Drive and cannot finish in one day. Publishing ONE
+# platform halves that to something that fits, and the other can go the next
+# day — the videos are kept on the VM until every selected platform has been
+# published, and a requeued job skips what already landed.
+UPLOAD_PLATFORMS = _list("BVG_UPLOAD_PLATFORMS", "yt,tk")
+
+# In `zip` mode, delete an output folder's MP4s once BOTH of its archives are
+# verified in Drive. Rendering 16,000 videos needs ~500 GB of disk; this keeps
+# a long run from also needing room for the archives on top of it. Set false to
+# keep the MP4s on the VM (the local ZIP fallback then still works).
+UPLOAD_FREE_LOCAL = _bool("BVG_UPLOAD_FREE_LOCAL", True)
+
 DRIVE_UPLOAD_CONCURRENCY = _int("BVG_DRIVE_UPLOAD_CONCURRENCY", 8)
 DRIVE_UPLOAD_ATTEMPTS = _int("BVG_DRIVE_UPLOAD_ATTEMPTS", 3)
 DRIVE_CHUNK_BYTES = _int("BVG_DRIVE_CHUNK_BYTES", 8 * 1024 * 1024)
+
+# Uploads are sent a chunk at a time and every chunk is its own HTTP request.
+# 8 MB was sized for ~8 MB videos; a 30 GB archive at that size is ~3,750
+# requests, which is slow and an efficient way to get rate-limited. Must stay a
+# multiple of 256 KB — Drive's resumable protocol requires it — and costs this
+# much memory per upload in flight.
+DRIVE_UPLOAD_CHUNK_BYTES = _int("BVG_DRIVE_UPLOAD_CHUNK_BYTES", 64 * 1024 * 1024)
+
+# How patiently a throttled Drive call is retried before giving up.
+#
+# googleapiclient's own `num_retries` handles 5xx and 429 but gives up after a
+# few seconds, and Drive answers a sustained transfer with 403
+# userRateLimitExceeded — a *retryable* 403 that reads like a permission error
+# and is not one. The budget is per chunk, so a transfer that keeps making
+# progress is never abandoned for being slow. Ten attempts backing off to two
+# minutes rides out roughly a quarter-hour of throttling.
+DRIVE_RETRY_ATTEMPTS = _int("BVG_DRIVE_RETRY_ATTEMPTS", 10)
+DRIVE_RETRY_MAX_SLEEP = _float("BVG_DRIVE_RETRY_MAX_SLEEP", 120.0)
 
 # Pulling CTA clips from a Drive folder instead of uploading them through the
 # browser. The VM's link to Google is an order of magnitude faster than a home

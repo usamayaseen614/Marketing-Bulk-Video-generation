@@ -20,5 +20,4 @@ service-account*.json
 _tmp_*.py
 container_smoke_test.py
 tests/
-tools/
 deploy/
