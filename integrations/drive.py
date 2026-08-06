@@ -369,34 +369,60 @@ def _sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
+# The human-readable message, for bodies that arrive without a structured
+# `reason`. The upload endpoint does not always shape its errors the way the
+# metadata API does, and this phrase is specific to rate/allowance limiting —
+# running out of STORAGE says something else entirely.
+_THROTTLE_TEXT = "rate limit exceeded"
+
+
 def _is_throttled(exc: Exception) -> bool:
     status = getattr(getattr(exc, "resp", None), "status", None)
     if status in _RETRYABLE_STATUS:
         return True
     if status != 403:
         return False
+    text = str(exc)
+    if "storageQuotaExceeded" in text:
+        # Out of STORAGE, not out of allowance — the destination is full, or
+        # is a My Drive a service account cannot write to. Waiting never fixes
+        # that, so it must not be mistaken for throttling.
+        return False
     # The reason lives in the JSON body, which HttpError renders into str().
     # Matching on the text avoids depending on the body's exact shape, which
     # differs between the classic and the newer error formats.
-    return any(reason in str(exc) for reason in _THROTTLE_REASONS)
+    return (any(reason in text for reason in _THROTTLE_REASONS)
+            or _THROTTLE_TEXT in text.lower())
+
+
+QUOTA_HELP = (
+    "Google allows one user — and a service account is a user — to move "
+    "**750 GB into Drive per rolling 24 hours**. Uploads AND server-side "
+    "copies both count against it.\n\n"
+    "Past the allowance, Drive refuses uploads with `403 User rate limit "
+    "exceeded` while everything else — creating folders, listing, renaming — "
+    "keeps working normally. **A tiny file failing while folders can still be "
+    "created is that signature**, and it means the allowance, not permissions "
+    "and not request rate.\n\n"
+    "There is no API for how much is left; the only test is to try again. It "
+    "refills gradually as the previous day's transfers age past 24 hours, so "
+    "capacity comes back over the same hours it was spent.\n\n"
+    "To stay under it, publish one set of names per day — *Publish which "
+    "names?* on the Generate page — which halves what a batch sends."
+)
 
 
 def _throttle_help(what: str, exc: Exception) -> str:
     return (
         f"Google Drive kept refusing the {what} after "
         f"{config.DRIVE_RETRY_ATTEMPTS} attempts.\n\n"
-        "The usual cause is Drive's **750 GB per rolling 24 hours** limit on "
-        "how much data one user may move in. A service account is a user, and "
-        "server-side copies count towards it as well as uploads — so a night "
-        "that puts a terabyte into Drive cannot finish in one day on one "
-        "service account.\n\n"
-        "If it fails immediately every time, that is the daily allowance: wait "
-        "for the window to roll and requeue the job. Nothing local was "
-        "deleted, and folders that were already published are recorded and "
-        "skipped, so it resumes rather than restarting.\n\n"
-        "If it fails only now and then, it is short-term rate limiting — lower "
-        "BVG_DRIVE_UPLOAD_CONCURRENCY, or raise BVG_DRIVE_RETRY_ATTEMPTS so it "
-        f"waits longer.\n\nRaw error: {exc}"
+        + QUOTA_HELP +
+        "\n\nNothing local was deleted, and whatever was already published is "
+        "recorded and skipped — so requeueing the job resumes rather than "
+        "restarting.\n\n"
+        "If instead it fails only now and then, that is short-term rate "
+        "limiting: lower BVG_DRIVE_UPLOAD_CONCURRENCY, or raise "
+        f"BVG_DRIVE_RETRY_ATTEMPTS so it waits longer.\n\nRaw error: {exc}"
     )
 
 
@@ -1089,6 +1115,16 @@ def _check_access_inner() -> tuple[bool, str]:
             fields="id", supportsAllDrives=True).execute()
     except Exception as exc:  # noqa: BLE001
         message = str(exc)
+        # Order matters. Being throttled is ALSO a 403, and the permission
+        # advice below is actively misleading for it: creating the folder
+        # succeeded a moment ago, so access is already proven and sending
+        # someone to check roles wastes their time on the one thing that is
+        # demonstrably fine.
+        if _is_throttled(exc):
+            return False, (
+                f"Folders can be created in “{drive_name}”, so **access is "
+                "fine** — but uploading even a 2-byte test file is being "
+                "refused.\n\n" + QUOTA_HELP + f"\n\nRaw error: {exc}")
         hint = ""
         if "quota" in message.lower():
             hint = ("\n\nA storage-quota error here means the destination is a "
@@ -1106,6 +1142,13 @@ def _check_access_inner() -> tuple[bool, str]:
     try:
         copy = copy_file(probe["id"], "_copy_test.txt", target)
     except Exception as exc:  # noqa: BLE001
+        if _is_throttled(exc) or isinstance(exc, DriveError):
+            # Copies draw on the same 750 GB allowance as uploads, so this is
+            # the same diagnosis even though the upload just worked — the
+            # allowance can run out between the two.
+            return False, (
+                f"Uploading works in “{drive_name}”, but the server-side COPY "
+                "is being refused.\n\n" + QUOTA_HELP + f"\n\nRaw error: {exc}")
         return False, (
             f"Upload works in “{drive_name}”, but the server-side COPY "
             "failed. Every video is published twice using files.copy, so this "

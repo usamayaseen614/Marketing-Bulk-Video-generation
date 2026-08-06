@@ -175,4 +175,53 @@ assert "not a member of that Shared Drive" in message, message
 assert "Point at a folder instead of the drive" in message, message
 print("check_access: root-write refusal explains membership, not Viewer/Editor")
 
+
+# ---- out of upload allowance is NOT a permission problem --------------------
+# The signature: folders can still be created, but a 2-byte file cannot be
+# uploaded. Nothing about roles or request rate can do that — it is the 750 GB
+# per rolling 24 hours being spent. Telling someone to check permissions here
+# sends them to audit the one thing just proven to work.
+def _out_of_quota(detailed: bool):
+    """The two shapes this arrives in. The upload endpoint does not always
+    include the structured `reason` the metadata API does, so the plain
+    message has to be enough on its own."""
+    if detailed:
+        return _HttpError(403, "User rate limit exceeded.\". Details: \"[{'message': "
+                               "'User rate limit exceeded.', 'domain': "
+                               "'usageLimits', 'reason': 'userRateLimitExceeded'}]")
+    return _HttpError(403, "User rate limit exceeded.")
+
+
+for detailed in (True, False):
+    class _FilesOutOfQuota(_Files):
+        def create(self, body=None, media_body=None, _d=detailed, **kw):
+            if media_body is not None:
+                raise _out_of_quota(_d)
+            return super().create(body=body, **kw)
+
+    class _ServiceOutOfQuota(_Service):
+        def files(self):
+            return _FilesOutOfQuota()
+
+    drive.service = _ServiceOutOfQuota
+    drive._local.no_corpus = set()
+    drive._local.target = None
+    ok, message = drive.check_access()
+    assert not ok
+    assert "750 GB" in message and "rolling 24 hours" in message, message
+    assert "**access is fine**" in message, message
+    assert "Content Manager" not in message, \
+        "a spent upload allowance was blamed on permissions"
+    assert "Viewer and Commenter" not in message, message
+print("check_access: an exhausted upload allowance is named, not misread as a "
+      "role — with or without the structured reason")
+
+# Running out of STORAGE is the opposite case: waiting never fixes it, so it
+# must NOT be reported as an allowance to wait out.
+storage_full = _HttpError(403, "The user has exceeded their Drive storage "
+                               "quota\". reason: 'storageQuotaExceeded'")
+assert not drive._is_throttled(storage_full), \
+    "a full destination was mistaken for throttling — it would retry forever"
+print("classification: out of storage is not out of allowance")
+
 print("\nALL DRIVE MEMBERSHIP TESTS PASSED")
