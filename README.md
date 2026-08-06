@@ -493,8 +493,13 @@ platform is still outstanding** — `BVG_UPLOAD_FREE_LOCAL` only takes effect on
 platform has an archive, or the second day would have nothing to build from. Budget disk
 for that: the MP4s stay put overnight.
 
-The other lever is a second service account (`BVG_DRIVE_CREDENTIALS_FILE`) — each account
-gets its own 750 GB.
+The other lever is a **second service account**, since the allowance is charged per
+identity. `BVG_DRIVE_IMPERSONATE=other-sa@PROJECT.iam.gserviceaccount.com` publishes as
+one: the VM mints short-lived tokens for it rather than holding a second key file, so
+there is no long-lived secret on disk. A brand-new account is unspent, which makes this
+the only option that unblocks a run *today* rather than tomorrow. Setup — one IAM binding
+and adding the account to the Shared Drive — is in DEPLOYMENT.md 5b-bis, and *Test Drive
+access* reports which identity it published as so you can see the switch took effect.
 
 Throttling itself is ridden out rather than fatal: every Drive call retries with
 exponential backoff and jitter, and **the retry budget resets each time a chunk lands**,

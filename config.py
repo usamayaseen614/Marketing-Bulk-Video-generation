@@ -144,6 +144,18 @@ DRIVE_ROOT_FOLDER_ID = _str("BVG_DRIVE_ROOT_FOLDER_ID")
 # key file to store, rotate or leak.
 DRIVE_CREDENTIALS_FILE = _str("BVG_DRIVE_CREDENTIALS_FILE")
 
+# Publish as a DIFFERENT service account than the VM runs as, by impersonating
+# it. Full email, e.g. video-uploads-2@PROJECT.iam.gserviceaccount.com.
+#
+# This exists for Drive's 750 GB per rolling 24 hours, which is charged **per
+# user** — and a service account is a user. A second identity has its own
+# untouched allowance, so a night too big for one account can be published by
+# two. Impersonation rather than a second key file: the VM's own service
+# account is granted `roles/iam.serviceAccountTokenCreator` on the target and
+# mints short-lived tokens for it, so there is no long-lived secret sitting on
+# the disk. See DEPLOYMENT.md section 5b.
+DRIVE_IMPERSONATE = _str("BVG_DRIVE_IMPERSONATE")
+
 # How finished videos are published.
 #
 #   zip    one `yt.zip` and one `tk.zip` per output folder (the default). A

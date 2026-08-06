@@ -415,6 +415,70 @@ delete it afterwards rather than fighting for space at 3am.
 Set `BVG_UPLOAD_FREE_LOCAL=false` to keep the MP4s on the VM after publishing
 (the local ZIP fallback then still works, and the disk must hold everything).
 
+### 5b-bis. A second service account, for a second 750 GB allowance
+
+Drive's 750 GB per rolling 24 hours is charged **per identity**, so a second
+service account has its own untouched allowance — and a brand-new one is
+unspent, which is how you publish tonight instead of tomorrow.
+
+Impersonation rather than a second key file: the VM mints short-lived tokens
+for the new account, so no long-lived secret is written to disk and access is
+revoked by deleting one IAM binding.
+
+**Run these in Cloud Shell, NOT over SSH on the VM.** They are project-admin
+operations and need *your* credentials. `gcloud` on the VM authenticates as the
+VM's own service account, which has no permission to create service accounts or
+edit IAM policy — there it fails with `PERMISSION_DENIED`. `gcloud auth list`
+shows which identity you are about to use.
+
+```bash
+PROJECT=companion-app-26947
+VM_SA=$(gcloud compute instances describe video-generator --zone=us-central1-a \
+  --format='value(serviceAccounts[0].email)')
+echo "the VM runs as: $VM_SA"
+
+# 1. The API that mints the tokens.
+gcloud services enable iamcredentials.googleapis.com --project=$PROJECT
+
+# 2. The new identity.
+gcloud iam service-accounts create video-uploads-2 \
+  --project=$PROJECT --display-name="Drive uploads (second allowance)"
+
+# 3. Let the VM act as it. This binding is the ONLY thing granting access.
+gcloud iam service-accounts add-iam-policy-binding \
+  video-uploads-2@$PROJECT.iam.gserviceaccount.com --project=$PROJECT \
+  --member="serviceAccount:$VM_SA" \
+  --role="roles/iam.serviceAccountTokenCreator"
+
+echo "now share the Shared Drive with:"
+echo "  video-uploads-2@$PROJECT.iam.gserviceaccount.com"
+```
+
+**Step 4 is manual and easy to forget:** open the Shared Drive in
+drive.google.com → *Manage members* → add
+`video-uploads-2@PROJECT.iam.gserviceaccount.com` as a **Content Manager**. A
+new service account has no Drive access at all until you do.
+
+Then point the app at it and restart the container:
+
+```
+BVG_DRIVE_IMPERSONATE=video-uploads-2@companion-app-26947.iam.gserviceaccount.com
+```
+
+*Test Drive access* on the Setup page now reports which account it published
+as, so you can confirm the switch took effect — and know whose allowance is
+being spent when uploads are refused.
+
+To go back, unset the variable. To alternate between accounts, change it
+between runs; the app publishes as exactly one identity per run, which keeps it
+predictable about whose allowance a batch is spending.
+
+A note on scale: a couple of identities for a genuinely large pipeline is
+ordinary infrastructure. Spinning up a fleet of accounts specifically to
+sidestep the cap is the kind of thing Google's terms are aimed at, and it is
+also fragile — pair this with the one-platform-per-day option rather than
+treating extra accounts as unlimited headroom.
+
 ### 5e-bis. "Shared drive not found" — membership vs folder access
 
 `404 Shared drive not found: 0A…` means the service account is **not a member

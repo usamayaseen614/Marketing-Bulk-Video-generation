@@ -92,16 +92,67 @@ def _import_google():
     return google.auth, service_account, build, MediaFileUpload
 
 
+# To mint a token for another service account we call the IAM Credentials API,
+# which needs cloud-platform — the Drive scope is what the *resulting* token
+# carries, not what the caller needs to ask for it.
+_IMPERSONATION_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
+
+
+def _impersonate(source, target: str):
+    """Short-lived credentials for another service account.
+
+    Drive's 750 GB per rolling 24 hours is charged per user, so publishing as a
+    second service account gets a second allowance. Impersonation rather than a
+    second key file: nothing long-lived is written to the VM's disk, and access
+    is revoked by removing one IAM binding instead of hunting down a JSON file.
+    """
+    try:
+        from google.auth import impersonated_credentials
+    except ImportError as exc:  # pragma: no cover — ships with google-auth
+        raise DriveError(
+            "google-auth is too old to impersonate a service account. "
+            "Upgrade it, or unset BVG_DRIVE_IMPERSONATE."
+        ) from exc
+    logger.info("Publishing to Drive as %s (impersonated)", target)
+    return impersonated_credentials.Credentials(
+        source_credentials=source,
+        target_principal=target,
+        target_scopes=SCOPES,
+        lifetime=3600,
+    )
+
+
 def _credentials():
     google_auth, service_account, _, _ = _import_google()
+    target = config.DRIVE_IMPERSONATE
+    # When impersonating, the credentials we start from are only used to ASK
+    # for a token, so they need cloud-platform rather than Drive.
+    scopes = _IMPERSONATION_SCOPES if target else SCOPES
+
     if config.DRIVE_CREDENTIALS_FILE:
         path = Path(config.DRIVE_CREDENTIALS_FILE)
         if not path.is_file():
             raise DriveError(f"Service-account key not found: {path}")
-        return service_account.Credentials.from_service_account_file(
-            str(path), scopes=SCOPES)
-    creds, _project = google_auth.default(scopes=SCOPES)
-    return creds
+        source = service_account.Credentials.from_service_account_file(
+            str(path), scopes=scopes)
+    else:
+        source, _project = google_auth.default(scopes=scopes)
+
+    return _impersonate(source, target) if target else source
+
+
+def acting_identity() -> str:
+    """Which account this process publishes as — the thing a 750 GB allowance
+    is charged to, and therefore the first thing worth knowing when uploads
+    start being refused."""
+    if config.DRIVE_IMPERSONATE:
+        return config.DRIVE_IMPERSONATE
+    email = getattr(_credentials(), "service_account_email", "")
+    # Compute Engine credentials report the literal "default" until they have
+    # been refreshed, which says nothing useful.
+    if email and email != "default":
+        return email
+    return "the VM's own service account"
 
 
 def service():
@@ -399,6 +450,10 @@ QUOTA_HELP = (
     "Google allows one user — and a service account is a user — to move "
     "**750 GB into Drive per rolling 24 hours**. Uploads AND server-side "
     "copies both count against it.\n\n"
+    "Because the allowance is **per identity**, publishing as a second service "
+    "account gets a second, untouched one: set BVG_DRIVE_IMPERSONATE to its "
+    "address (see DEPLOYMENT.md 5b). That is also the way to publish tonight "
+    "rather than tomorrow.\n\n"
     "Past the allowance, Drive refuses uploads with `403 User rate limit "
     "exceeded` while everything else — creating folders, listing, renaming — "
     "keeps working normally. **A tiny file failing while folders can still be "
@@ -1190,7 +1245,16 @@ def _check_access_inner() -> tuple[bool, str]:
             "it; it only means the drive's name can't be read, so the id is "
             "shown in its place.)")
 
+    # Which identity did the writing matters as much as whether they worked:
+    # the 750 GB allowance is charged to it, so this is the account to look at
+    # when uploads start being refused.
+    try:
+        who = acting_identity()
+    except Exception:  # noqa: BLE001 — never fail a passing check over a label
+        who = "the VM's own service account"
+
     return True, (
-        f"Connected to Shared Drive “{drive_name}”, writing into {where}. "
-        f"Upload and server-side copy both verified. {folder_link(target)}{note}"
+        f"Connected to Shared Drive “{drive_name}”, writing into {where} as "
+        f"**{who}**. Upload and server-side copy both verified. "
+        f"{folder_link(target)}{note}"
     )
