@@ -556,6 +556,28 @@ sudo docker exec $(sudo docker compose ps -q app) \
   python tools/zip_drive_tk.py --link 'https://drive.google.com/drive/folders/XXXX'
 ```
 
+**Leaving it running overnight.** A plain `docker exec` dies with the SSH
+session — the tool writes a progress line every few seconds, and once stdout is
+a broken pipe the next one kills it. Run it detached inside the container
+instead, which needs nothing installed on the VM:
+
+```bash
+CID=$(sudo docker ps --format '{{.ID}} {{.Image}}' | grep bulk-video-generator | cut -d' ' -f1)
+sudo docker exec -d $CID sh -c \
+  "python tools/zip_drive_tk.py --link 'https://drive.google.com/drive/folders/XXXX' \
+   >> /data/jobs/_repack/run.log 2>&1"
+```
+
+Then close the tab. To check on it later:
+
+```bash
+sudo docker exec $CID tail -20 /data/jobs/_repack/run.log
+```
+
+The log is on the mounted volume, so it also survives the container being
+replaced. The VM itself must stay up — stopping it pauses the work (it resumes
+on re-run, but it will not finish while the machine is off).
+
 **Nothing in Drive is ever deleted.** The `tk/` folder is left exactly as it
 was, so the videos remain their own backup until you decide otherwise. Re-run
 the same command any time: finished folders are recorded in

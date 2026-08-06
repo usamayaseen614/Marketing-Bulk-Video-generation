@@ -53,6 +53,9 @@ SCOPES = ["https://www.googleapis.com/auth/drive"]
 _local = threading.local()
 _folder_lock = threading.Lock()
 
+# Facts announced once per process rather than once per worker thread.
+_announced: set[str] = set()
+
 
 class DriveError(RuntimeError):
     """Raised for configuration problems worth showing the user verbatim."""
@@ -113,7 +116,13 @@ def _impersonate(source, target: str):
             "google-auth is too old to impersonate a service account. "
             "Upgrade it, or unset BVG_DRIVE_IMPERSONATE."
         ) from exc
-    logger.info("Publishing to Drive as %s (impersonated)", target)
+    # Once per process, not once per thread. Every worker thread builds its own
+    # client, so logging on each one buries the progress output under identical
+    # lines — and which account we publish as is a fact about the run, not
+    # about the thread.
+    if target not in _announced:
+        _announced.add(target)
+        logger.info("Publishing to Drive as %s (impersonated)", target)
     return impersonated_credentials.Credentials(
         source_credentials=source,
         target_principal=target,

@@ -257,18 +257,22 @@ def repack_folder(target: dict, platform: str, args, shared_drive_id: str) -> di
     done = moved = 0
     failures: list[str] = []
 
-    with packing.ZipWriter(zip_path) as archive:
+    # ONE pool for the whole folder, not one per chunk. Each worker thread
+    # builds its own Drive client (googleapiclient is not thread-safe), and
+    # with impersonation that means minting an access token — so a fresh pool
+    # per chunk turned 8 tokens into 8 *per chunk*, ~950 for a folder this
+    # size. It worked, but it is a lot of pointless load on the IAM Credentials
+    # API and it is what fills the log with identical lines.
+    with packing.ZipWriter(zip_path) as archive, \
+            ThreadPoolExecutor(max_workers=args.concurrency) as pool:
         # A chunk at a time, so at most `concurrency` videos are ever on disk
         # at once alongside the growing archive.
         for start in range(0, len(files), args.concurrency):
             chunk = list(zip(files[start:start + args.concurrency],
                              names[start:start + args.concurrency]))
-            fetched = []
-            with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
-                futures = [pool.submit(_fetch, entry, work / name, args.verify)
-                           for entry, name in chunk]
-                for future in as_completed(futures):
-                    fetched.append(future.result())
+            futures = [pool.submit(_fetch, entry, work / name, args.verify)
+                       for entry, name in chunk]
+            fetched = [future.result() for future in as_completed(futures)]
 
             # Added in the folder's own order, not the order they happened to
             # arrive, so the archive's listing matches Drive's.
@@ -378,6 +382,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     # The uploader's own chunk logging would drown the progress lines.
     logging.getLogger("googleapiclient").setLevel(logging.WARNING)
+    # "httplib2 transport does not support per-request timeout" — emitted on
+    # every credential refresh, harmless, and there is nothing to act on. It is
+    # a property of the transport google-auth picks, not of this run.
+    logging.getLogger("google_auth_httplib2").setLevel(logging.ERROR)
 
     args.concurrency = max(1, args.concurrency)
     work_root = Path(args.work_dir)
