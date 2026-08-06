@@ -278,7 +278,7 @@ Notes:
    outlines on hover) because a contain-fitted gif is never upscaled — a small gif leaves
    most of its box empty and see-through, so without a visible edge there is nothing to grab.
    The box shows the **first** gif of the sequence and cannot show the rotation.
-   A text with a **fit box** shows it as a blue dashed outline, and its corner handle
+   A text with a **fit box** shows it as a black dashed outline, and its corner handle
    resizes the *box* rather than the font — the type re-fits when you preview again, because
    the wrap-and-shrink search lives in Python and a second copy of it in the browser is how
    the editor and the render start disagreeing. Such a text writes `*_Width`/`*_Height` back

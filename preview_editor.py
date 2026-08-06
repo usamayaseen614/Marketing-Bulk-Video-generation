@@ -119,7 +119,7 @@ _TEMPLATE = r"""
      reason the gif box is: fitted text is usually smaller than the box, and
      the box is the thing being set. */
   .fitbox { position: absolute; pointer-events: none;
-            outline: 1.5px dashed rgba(120,200,255,.55); outline-offset: 1px; }
+            outline: 1.5px dashed rgba(0,0,0,.9); outline-offset: 1px; }
   .fitbox .handle { pointer-events: auto; opacity: 0; }
   .fitbox:hover .handle, .fitbox.drag .handle { opacity: 1; }
   /* Texts are layered (bottom to top): the live CSS background box, the baked
@@ -174,7 +174,7 @@ _TEMPLATE = r"""
   <div id="panel">
     <h3>Excel values</h3>
     <div class="hint">Drag elements to move them, drag the corner handle to resize
-      (texts resize their font size — but a text with a blue <em>fit box</em> resizes
+      (texts resize their font size — but a text with a dashed <em>fit box</em> resizes
       the box instead, and re-fits its type when you preview again), recolor texts
       with the swatches, and give any
       text a background box with the bg swatch (“none” removes it). The opacity
