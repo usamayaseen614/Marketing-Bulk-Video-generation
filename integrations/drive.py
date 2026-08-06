@@ -307,8 +307,23 @@ def unique_names(names: Iterable[str]) -> list[str]:
     return out
 
 
+# Asked for on every write and lookup. `size` is what lets a caller prove the
+# bytes that arrived are the bytes it sent — the only cheap integrity check
+# Drive offers, and the one that matters for a 30 GB archive.
+FILE_FIELDS = "id, name, size, webViewLink"
+
+
+def _run_resumable(request) -> dict:
+    """Drive an upload/update to completion, one chunk at a time."""
+    response = None
+    while response is None:
+        # num_retries gives us exponential backoff on 5xx/429 for free.
+        _status, response = request.next_chunk(num_retries=3)
+    return response
+
+
 def upload_file(path: Path, parent_id: str, name: Optional[str] = None) -> dict:
-    """Resumable upload of one file. Returns {id, name, webViewLink}."""
+    """Resumable upload of one file. Returns {id, name, size, webViewLink}."""
     _, _, _, MediaFileUpload = _import_google()
     path = Path(path)
     if not path.is_file():
@@ -319,13 +334,63 @@ def upload_file(path: Path, parent_id: str, name: Optional[str] = None) -> dict:
     request = service().files().create(
         body={"name": name or path.name, "parents": [parent_id]},
         media_body=media,
-        fields="id, name, webViewLink",
+        fields=FILE_FIELDS,
         supportsAllDrives=True,
     )
-    response = None
-    while response is None:
-        # num_retries gives us exponential backoff on 5xx/429 for free.
-        _status, response = request.next_chunk(num_retries=3)
+    return _run_resumable(request)
+
+
+def upload_or_replace(path: Path, parent_id: str, name: str,
+                      drive_id: Optional[str] = None) -> dict:
+    """Publish one file under a fixed name, **replacing** any file already
+    there under that name rather than adding a second one.
+
+    This is what makes publishing an archive re-runnable. A `tk.zip` upload
+    that died halfway leaves a partial file behind, and a plain files.create on
+    the next attempt would put a second `tk.zip` beside it — Drive allows two
+    files with one name in one folder, and then nobody can tell which is the
+    good one. files.update overwrites the content of the existing file instead,
+    so the folder holds exactly one `tk.zip` however many attempts it took.
+
+    The size of what landed is returned, and callers are expected to check it
+    against the file they sent."""
+    _, _, _, MediaFileUpload = _import_google()
+    path = Path(path)
+    if not path.is_file():
+        raise DriveError(f"File to upload does not exist: {path}")
+
+    existing = find_file(name, parent_id, drive_id=drive_id)
+    media = MediaFileUpload(
+        str(path), chunksize=config.DRIVE_CHUNK_BYTES, resumable=True)
+    if existing:
+        logger.info("Replacing the existing %s in %s", name, parent_id)
+        request = service().files().update(
+            fileId=existing["id"], media_body=media,
+            fields=FILE_FIELDS, supportsAllDrives=True)
+    else:
+        request = service().files().create(
+            body={"name": name, "parents": [parent_id]}, media_body=media,
+            fields=FILE_FIELDS, supportsAllDrives=True)
+    return _run_resumable(request)
+
+
+def upload_verified(path: Path, parent_id: str, name: str,
+                    drive_id: Optional[str] = None) -> dict:
+    """upload_or_replace(), plus the assertion that all the bytes arrived.
+
+    Drive reports the stored size, so a truncated upload is detectable for the
+    cost of reading one field. Silently publishing a 12 GB archive that was
+    meant to be 31 GB is the failure worth spending that on."""
+    path = Path(path)
+    expected = path.stat().st_size
+    response = upload_or_replace(path, parent_id, name, drive_id=drive_id)
+    landed = int(response.get("size") or 0)
+    if landed != expected:
+        raise DriveError(
+            f"{name} uploaded as {landed:,} bytes but {path.name} is "
+            f"{expected:,} bytes on disk — the upload was truncated. Nothing "
+            "has been deleted locally; run it again."
+        )
     return response
 
 
@@ -356,7 +421,7 @@ def copy_file(file_id: str, new_name: str, parent_id: Optional[str] = None) -> d
 def find_file(name: str, parent_id: str,
               drive_id: Optional[str] = None) -> Optional[dict]:
     """First non-trashed file with this exact name under `parent_id`, as
-    {id, name, webViewLink} — or None.
+    {id, name, size, webViewLink} — or None.
 
     Exists for the ambiguous-copy check in the render runner: a files.copy
     whose response was lost may or may not have committed, and the only way to
@@ -369,13 +434,55 @@ def find_file(name: str, parent_id: str,
         f"and mimeType != '{FOLDER_MIME}' and trashed = false"
     )
     response = service().files().list(
-        q=query, spaces="drive", fields="files(id, name, webViewLink)",
+        q=query, spaces="drive", fields=f"files({FILE_FIELDS})",
         corpora="drive", driveId=drive_id,
         includeItemsFromAllDrives=True, supportsAllDrives=True,
         pageSize=1,
     ).execute()
     files = response.get("files", [])
     return files[0] if files else None
+
+
+def list_files(folder_id: str, include_folders: bool = False) -> list[dict]:
+    """Every non-trashed child of one folder, as [{id, name, size, md5, folder}].
+
+    Written for the repack tool, which walks a tree that is already in Drive
+    rather than one it is building. list_videos() is the wrong shape for that:
+    it flattens sub-folders into one pool and filters to things that look like
+    clips, and here the folder boundaries *are* the unit of work.
+
+    No `corpora`/`driveId`, for the same reason `_children` omits them — a tree
+    being repacked may live in a Shared Drive or in a My Drive, and pinning the
+    driveId makes the second case silently return nothing."""
+    svc = service()
+    out: list[dict] = []
+    token = None
+    while True:
+        response = svc.files().list(
+            q=f"'{_escape(folder_id)}' in parents and trashed = false",
+            fields=("nextPageToken, files(id, name, mimeType, size, "
+                    "md5Checksum, shortcutDetails)"),
+            includeItemsFromAllDrives=True, supportsAllDrives=True,
+            pageSize=1000, pageToken=token, orderBy="name",
+        ).execute()
+        for entry in response.get("files", []):
+            entry_id, mime = _resolved(entry)
+            if not entry_id:
+                continue                      # a shortcut to a deleted file
+            is_folder = mime == FOLDER_MIME
+            if is_folder and not include_folders:
+                continue
+            out.append({
+                "id": entry_id,
+                "name": entry.get("name") or entry_id,
+                "size": int(entry.get("size") or 0),
+                "md5": entry.get("md5Checksum") or "",
+                "folder": is_folder,
+            })
+        token = response.get("nextPageToken")
+        if not token:
+            out.sort(key=lambda f: (f["name"], f["id"]))
+            return out
 
 
 def upload_with_copy(path: Path, parent_id: str, primary_name: str,

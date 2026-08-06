@@ -11,13 +11,26 @@ One sheet of N rows becomes `batches x N` videos. The same rows are rendered
 once per batch, each pass using a different promo video and a different
 `variant_salt`, so every pass picks different ASMR clips. The finished videos
 are then **mixed** across the output folders (see batching.py) so no folder is
-just one promo video, and each is uploaded to Drive **twice** — once under a
-short name carrying a single hashtag, once under a longer name carrying up to
-five. Both are capped at 90 characters of name, with ".mp4" outside that count.
+just one promo video, and each is published **twice** — once under a short name
+carrying a single hashtag, once under a longer name carrying up to five. Both
+are capped at 90 characters of name, with ".mp4" outside that count.
 
-The second copy is made with Drive's server-side `files.copy`, so the bytes
-cross the network once. At 10,000 videos that is the difference between ~80 GB
-and ~160 GB of upload.
+## How they are published
+
+`upload_mode: zip` (the default) puts each output folder into two archives —
+`batch_NN/yt.zip` holding the short names, `batch_NN/tk.zip` the long ones. A
+16,000-video night is then ~32 files in Drive instead of ~32,000, which is the
+difference between a folder you can hand to someone and one you cannot.
+
+`upload_mode: files` is the older behaviour: every video as its own Drive file
+under `batch_NN/yt/` and `batch_NN/tk/`, the second made with a server-side
+`files.copy` so the bytes cross the network once.
+
+The archives cost that copy — a ZIP is opaque to files.copy, so the long-named
+archive cannot be cloned from the short-named one and the bytes go up twice.
+Packing happens a folder at a time and each folder's MP4s are deleted once both
+of its archives are verified in Drive, so the disk high-water mark is the
+rendered videos plus two archives, not two copies of everything.
 
 ## Resume
 
@@ -380,14 +393,41 @@ def _drive_root_stamp(job_id: str, params: dict) -> str:
 
 
 def _upload(job: dict, n_rows: int, n_folders: int, placement: dict) -> dict:
+    """Publish the finished videos to Drive, in whichever shape was asked for.
+
+    `zip` (the default) publishes each output folder as two archives —
+    `batch_NN/yt.zip` and `batch_NN/tk.zip`. `files` publishes every video as
+    its own Drive file under `batch_NN/yt/` and `batch_NN/tk/`, which is what
+    every render before this did.
+
+    Both are kept, because they fail differently. Archives are far quicker to
+    move and to hand to someone, and they are what a 16,000-video night should
+    produce; but one video inside an archive cannot be replaced without
+    rebuilding it, and the second archive costs a second trip over the network
+    where a second *file* costs only a server-side copy.
+    """
+    job_id = job["id"]
+    params = job.get("params") or {}
+    job["params"] = params
+    if not config.drive_configured(params.get("drive_folder") or ""):
+        logger.info("Job %s: Drive not configured — videos stay on the VM", job_id)
+        return {}
+
+    mode = str(params.get("upload_mode") or config.UPLOAD_MODE).strip().lower()
+    if mode not in {"zip", "files"}:
+        logger.warning("Job %s: unknown upload mode %r — using zip", job_id, mode)
+        mode = "zip"
+    if mode == "files":
+        return _upload_files(job, n_rows, n_folders, placement)
+    return _upload_zips(job, n_rows, n_folders, placement)
+
+
+def _upload_files(job: dict, n_rows: int, n_folders: int, placement: dict) -> dict:
     """Upload each video twice — short name uploaded, long name server-copied."""
     job_id = job["id"]
     params = job.get("params") or {}
     job["params"] = params
     destination = params.get("drive_folder") or ""
-    if not config.drive_configured(destination):
-        logger.info("Job %s: Drive not configured — videos stay on the VM", job_id)
-        return {}
 
     from integrations import drive
 
@@ -531,10 +571,222 @@ def _upload(job: dict, n_rows: int, n_folders: int, placement: dict) -> dict:
     return {
         "drive_link": link,
         "drive_folder_id": root,
+        "upload_mode": "files",
         "uploaded": counts["uploaded"],
         "drive_files": counts["uploaded"] * 2,
         "upload_failed": counts["upload_failed"],
         "upload_failures": upload_failures,
+    }
+
+
+# --------------------------------------------------------------------------- upload (zip)
+
+# One archive per platform, per output folder. The platform is the ARCHIVE,
+# never the filename — neither name carries a platform tag, because a filename
+# here is a caption meant to be pasted straight into the post.
+PLATFORMS = ("yt", "tk")
+
+
+def _zip_entries(items: list[dict], n_rows: int, videos_root: Path
+                 ) -> list[tuple[dict, Path, dict[str, str]]]:
+    """(item, mp4 path, {platform: its name in that platform's archive}).
+
+    `yt.zip` takes the short name — caption plus a single hashtag — and
+    `tk.zip` the long one carrying up to five. Both fall back to whatever the
+    file was actually written as, so an item whose names were assigned by an
+    older version still ends up in both archives.
+
+    The item is carried alongside because the caller has to be able to say
+    which *rows* went into an archive and which did not."""
+    entries = []
+    for item in sorted(items, key=lambda i: i["idx"]):
+        batch, _row = batching.split_index(item["idx"], n_rows)
+        meta = item.get("meta") or {}
+        name = item.get("name") or ""
+        short = meta.get("short_name") or name
+        src = videos_root / batching.source_folder_name(batch) / name
+        entries.append((item, src, {"yt": short,
+                                    "tk": meta.get("long_name") or short}))
+    return entries
+
+
+def _upload_zips(job: dict, n_rows: int, n_folders: int, placement: dict) -> dict:
+    """Publish each output folder as `yt.zip` + `tk.zip`.
+
+    ## Why a folder at a time
+
+    A 16,000-video render is ~500 GB of MP4s and the same again in archives. If
+    every archive were built before any were uploaded, the VM would need room
+    for both at once. So a folder is packed, uploaded, verified, and only then
+    is its share of the MP4s deleted — peak disk is the rendered videos plus
+    the two archives of the *one* folder currently being packed.
+
+    ## Why the MP4s are only freed after Drive confirms
+
+    The videos are the only thing that cannot be rebuilt without re-rendering.
+    They are therefore deleted last: after both archives are uploaded AND their
+    stored size matches what was sent. A failure anywhere before that leaves
+    every byte where it was, and the next attempt re-packs the folder.
+
+    ## Resume
+
+    Which folders are finished is written to the job's params as each one
+    lands, so a worker killed at folder 11 of 16 re-packs folder 11 and leaves
+    the first ten alone. Uploads go through upload_verified(), which *replaces*
+    a same-named archive rather than adding a second one — so even a folder
+    whose recorded state was lost cannot end up with two `tk.zip`s.
+    """
+    job_id = job["id"]
+    params = job.get("params") or {}
+    job["params"] = params
+    destination = params.get("drive_folder") or ""
+
+    import packing
+    from integrations import drive
+
+    drive.set_target(destination)
+
+    try:
+        label = job.get("label") or job_id
+        root = drive.ensure_path(
+            ["renders", _drive_root_stamp(job_id, params), label])
+        link = drive.folder_link(root)
+        # Resolved on this thread, where set_target's override is visible.
+        shared_drive_id = drive.resolve_target()[0]
+        folder_ids = {
+            f: drive.ensure_path([batching.folder_name(f)], parent_id=root)
+            for f in range(1, n_folders + 1)
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Job %s: could not prepare Drive folders", job_id)
+        return {"drive_error": str(exc)}
+
+    videos_root = store.videos_dir(job_id)
+    pack_root = store.job_dir(job_id) / "packing"
+    free_local = bool(params.get("free_local_videos", config.UPLOAD_FREE_LOCAL))
+
+    # Every rendered item, grouped by the folder it was mixed into. An archive
+    # is all-or-nothing — it has to hold the folder's complete contents — so
+    # this is not filtered to items still pending upload the way the per-file
+    # path is.
+    by_folder: dict[int, list[dict]] = {}
+    for item in store.list_items(job_id):
+        if item["render_status"] != store.ITEM_DONE:
+            continue
+        batch, row_no = batching.split_index(item["idx"], n_rows)
+        by_folder.setdefault(
+            placement.get(Slot(batch=batch, row=row_no), 1), []).append(item)
+
+    state: dict = dict(params.get("zip_uploads") or {})
+    archives: list[dict] = []
+    errors: list[str] = []
+    freed_files = freed_bytes = 0
+    total_folders = len(by_folder)
+
+    for position, folder in enumerate(sorted(by_folder), start=1):
+        items = by_folder[folder]
+        name = batching.folder_name(folder)
+        recorded = dict(state.get(str(folder)) or {})
+
+        if recorded.get("complete"):
+            logger.info("Job %s: %s already published — skipping", job_id, name)
+            archives.extend(recorded.get("archives") or [])
+            store.set_upload_status(job_id, [i["idx"] for i in items],
+                                    store.ITEM_DONE,
+                                    drive_link=recorded.get("link"))
+            continue
+
+        store.set_stage(job_id, f"packing {name} ({position}/{total_folders})")
+        prepared = _zip_entries(items, n_rows, videos_root)
+
+        # Checked here rather than inside the packer, because a video that is
+        # not in the archive must be *reported* as not uploaded. Sweeping it
+        # into a folder marked published is how a missing file stops being
+        # visible to anyone.
+        packed = [(item, src, names) for item, src, names in prepared
+                  if src.is_file()]
+        absent = [item["idx"] for item, src, _n in prepared if not src.is_file()]
+        if absent:
+            store.set_upload_status(job_id, absent, store.ITEM_FAILED,
+                                    error="Rendered file missing on disk",
+                                    count_attempt=True)
+            errors.append(f"{name}: {len(absent)} rendered file(s) were missing "
+                          "on disk and are not in the archives")
+        if not packed:
+            logger.warning("Job %s: %s has no files to pack", job_id, name)
+            continue
+
+        idxs = [item["idx"] for item, _s, _n in packed]
+        entries = [(src, names) for _i, src, names in packed]
+        targets = {p: pack_root / name / f"{p}.zip" for p in PLATFORMS}
+
+        try:
+            built = packing.build_platform_zips(entries, targets)
+            for platform, info in built["platforms"].items():
+                packing.verify(info["path"], expected_files=len(entries))
+                logger.info("Job %s: %s/%s.zip — %d file(s), %.1f GB",
+                            job_id, name, platform, info["files"],
+                            info["size"] / 1024 ** 3)
+
+            store.set_stage(job_id,
+                            f"uploading {name} ({position}/{total_folders})")
+            links = {}
+            for platform in sorted(targets):
+                info = built["platforms"][platform]
+                response = drive.upload_verified(
+                    info["path"], folder_ids[folder], f"{platform}.zip",
+                    drive_id=shared_drive_id)
+                links[platform] = response.get("webViewLink") or ""
+                archives.append({
+                    "folder": name, "platform": platform,
+                    "id": response.get("id"), "files": info["files"],
+                    "bytes": int(response.get("size") or info["size"]),
+                })
+        except Exception as exc:  # noqa: BLE001 — one folder must not lose the rest
+            logger.exception("Job %s: could not publish %s", job_id, name)
+            errors.append(f"{name}: {exc}")
+            store.set_upload_status(job_id, idxs, store.ITEM_FAILED,
+                                    error=str(exc)[:500], count_attempt=True)
+            # The MP4s are untouched, so the next attempt re-packs from them.
+            shutil.rmtree(pack_root / name, ignore_errors=True)
+            continue
+
+        recorded = {"complete": True, "link": links.get("tk") or link,
+                    "archives": [a for a in archives if a["folder"] == name]}
+        state[str(folder)] = recorded
+        # Persisted BEFORE the MP4s are deleted: a crash in the tidy-up below
+        # must not look like a folder that was never published.
+        params = store.merge_job_params(job_id, zip_uploads=state)
+        job["params"] = params
+        store.set_upload_status(job_id, idxs, store.ITEM_DONE,
+                                drive_link=recorded["link"])
+
+        shutil.rmtree(pack_root / name, ignore_errors=True)
+        if free_local:
+            count, size = packing.free_files(src for src, _names in entries)
+            freed_files += count
+            freed_bytes += size
+            logger.info("Job %s: freed %d MP4(s) from %s", job_id, count, name)
+
+    shutil.rmtree(pack_root, ignore_errors=True)
+    counts = store.item_counts(job_id)
+    logger.info("Job %s: %d archive(s) published, %d folder(s) failed; "
+                "freed %.1f GB of MP4s",
+                job_id, len(archives), len(errors), freed_bytes / 1024 ** 3)
+
+    return {
+        "drive_link": link,
+        "drive_folder_id": root,
+        "drive_folder_ids": {str(f): fid for f, fid in folder_ids.items()},
+        "upload_mode": "zip",
+        "uploaded": counts["uploaded"],
+        "drive_files": len(archives),
+        "drive_zips": len(archives),
+        "zip_bytes": sum(a["bytes"] for a in archives),
+        "upload_failed": counts["upload_failed"],
+        "upload_failures": errors[:25],
+        "videos_freed": bool(freed_files),
+        "freed_bytes": freed_bytes,
     }
 
 
@@ -647,7 +899,13 @@ def run(job: dict) -> dict:
     rendered, failed = counts["rendered"], counts["render_failed"]
 
     zip_path = None
-    if params.get("make_zip", True) and rendered:
+    if drive_result.get("videos_freed"):
+        # The MP4s are inside the per-folder archives in Drive and gone from
+        # disk, so there is nothing left here to bundle. Building this anyway
+        # would produce an empty ZIP that looks like the fallback and isn't.
+        logger.info("Job %s: local videos freed after packing — no fallback ZIP",
+                    job_id)
+    elif params.get("make_zip", True) and rendered:
         store.set_stage(job_id, "packaging")
         zip_path = results.package_zip(
             store.job_dir(job_id) / "marketing_videos.zip",
@@ -658,9 +916,24 @@ def run(job: dict) -> dict:
     if drive_result.get("drive_link"):
         try:
             from integrations import drive as drive_mod
+
+            # upload_or_replace, not upload_file: a resumed job runs this block
+            # again, and files.create would leave two render_manifest.xlsx in
+            # one folder with no way to tell which is current.
             for extra in (manifest, log_path, sheet_out):
                 if Path(extra).is_file():
-                    drive_mod.upload_file(Path(extra), drive_result["drive_folder_id"])
+                    drive_mod.upload_or_replace(
+                        Path(extra), drive_result["drive_folder_id"],
+                        Path(extra).name)
+            # The per-folder manifest is what turns an archive back into
+            # something usable: which caption and hashtags belong to which
+            # filename inside it. Kept OUTSIDE the ZIP so it can be read
+            # without downloading 30 GB first.
+            for folder, folder_id in (drive_result.get("drive_folder_ids") or {}).items():
+                sheet = (store.job_dir(job_id)
+                         / f"{batching.folder_name(int(folder))}_manifest.xlsx")
+                if sheet.is_file():
+                    drive_mod.upload_or_replace(sheet, folder_id, sheet.name)
         except Exception:  # noqa: BLE001
             logger.warning("Could not upload manifests to Drive", exc_info=True)
 

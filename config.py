@@ -144,6 +144,25 @@ DRIVE_ROOT_FOLDER_ID = _str("BVG_DRIVE_ROOT_FOLDER_ID")
 # key file to store, rotate or leak.
 DRIVE_CREDENTIALS_FILE = _str("BVG_DRIVE_CREDENTIALS_FILE")
 
+# How finished videos are published.
+#
+#   zip    one `yt.zip` and one `tk.zip` per output folder (the default). A
+#          16,000-video night becomes ~32 archives instead of 32,000 files.
+#   files  every video as its own Drive file under batch_NN/yt/ and
+#          batch_NN/tk/, the second made with a server-side copy.
+#
+# `files` moves the bytes once and `zip` moves them twice: a ZIP is opaque to
+# files.copy, so the archive holding the long names cannot be cloned from the
+# one holding the short names. That is the price of the archives, and it is
+# paid knowingly — see packing.py.
+UPLOAD_MODE = _str("BVG_UPLOAD_MODE", "zip").lower()
+
+# In `zip` mode, delete an output folder's MP4s once BOTH of its archives are
+# verified in Drive. Rendering 16,000 videos needs ~500 GB of disk; this keeps
+# a long run from also needing room for the archives on top of it. Set false to
+# keep the MP4s on the VM (the local ZIP fallback then still works).
+UPLOAD_FREE_LOCAL = _bool("BVG_UPLOAD_FREE_LOCAL", True)
+
 DRIVE_UPLOAD_CONCURRENCY = _int("BVG_DRIVE_UPLOAD_CONCURRENCY", 8)
 DRIVE_UPLOAD_ATTEMPTS = _int("BVG_DRIVE_UPLOAD_ATTEMPTS", 3)
 DRIVE_CHUNK_BYTES = _int("BVG_DRIVE_CHUNK_BYTES", 8 * 1024 * 1024)

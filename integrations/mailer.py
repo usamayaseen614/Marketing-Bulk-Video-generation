@@ -137,7 +137,14 @@ def _render_body(job: dict, status: str, result: dict) -> str:
             f"using {result.get('promo_videos', 1)} promo video(s), "
             f"mixed across {result.get('folders', batches)} folders")
 
-    if uploaded is not None:
+    if uploaded is not None and result.get("upload_mode") == "zip":
+        zips = result.get("drive_zips") or result.get("drive_files") or 0
+        size_gb = (result.get("zip_bytes") or 0) / 1024 ** 3
+        lines.append(
+            f"{uploaded:,} of {rendered:,} uploaded to Google Drive as "
+            f"{zips:,} ZIP(s), {size_gb:,.1f} GB — every output folder holds "
+            f"yt.zip (one hashtag in each name) and tk.zip (all of them)")
+    elif uploaded is not None:
         drive_files = result.get("drive_files", uploaded * 2)
         lines.append(
             f"{uploaded:,} of {rendered:,} uploaded to Google Drive "

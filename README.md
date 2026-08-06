@@ -354,25 +354,58 @@ Your evening routine deserves better than this #skincareroutine #asmrsounds #for
 The exception is a caption too long to fit even beside a single hashtag: it is being
 truncated either way, so the full set is kept rather than losing tags for nothing.
 
-The second copy is made with Drive's **server-side `files.copy`**, so the bytes cross the
-network once — at 10,000 videos that's ~80 GB of upload instead of ~160 GB.
-
-The two names land in **separate subfolders**, so each folder listing shows every video
-exactly once:
+Each output folder is published as **two ZIPs**, one per platform, so a 16,000-video night
+arrives as ~32 archives instead of ~32,000 files:
 
 ```
 <your Drive folder>/renders/2026-08-05_14-23-45.123/<batch label>/
 ├── batch_01/
-│   ├── yt/   ← the short name (one hashtag)
-│   └── tk/   ← the long name (up to five)
+│   ├── yt.zip                  ← the short name (one hashtag)
+│   ├── tk.zip                  ← the long name (up to five)
+│   └── batch_01_manifest.xlsx  ← readable without downloading 30 GB
 ├── batch_02/
-│   ├── yt/
-│   └── tk/
+│   ├── yt.zip
+│   └── tk.zip
 └── …
 ```
 
-The platform is the **folder**, never the filename — nothing is prefixed onto the caption,
-so the name stays paste-ready exactly as shown above.
+The platform is the **archive**, never the filename — nothing is prefixed onto the caption,
+so the name stays paste-ready exactly as shown above. Archives are `ZIP_STORED`: MP4s do
+not deflate, so recompressing them would burn hours to save a percent.
+
+Zipping costs the one shortcut the per-file layout had. Uploading a video once and letting
+Drive clone it with server-side `files.copy` only works while the two names are two
+*files* — inside an archive they are entries in two different ZIPs, so the bytes cross the
+network twice. That's the trade: **~2× the upload** in exchange for folders you can
+actually hand to someone.
+
+Packing runs a folder at a time and each folder's MP4s are deleted **only once both of its
+archives are verified in Drive** (Drive reports the stored size; a short upload is
+refused). So the disk high-water mark is the rendered videos plus the two archives of the
+one folder being packed — and a failure anywhere before that leaves every byte where it
+was, ready for the next attempt.
+
+Set `BVG_UPLOAD_MODE=files` (or `upload_mode: files` in a job's params) for the older
+behaviour: every video as its own Drive file under `batch_NN/yt/` and `batch_NN/tk/`, the
+second made with `files.copy`. Worth it when you need to replace one video without
+rebuilding an archive.
+
+#### Zipping folders that are already in Drive
+
+Renders published before archives existed can be converted in place:
+
+```bash
+python tools/zip_drive_tk.py --link <drive folder url> --dry-run
+python tools/zip_drive_tk.py --link <drive folder url> --platform tk
+```
+
+It walks the tree, and for each `tk/` (or `yt/`) folder it downloads the videos a handful
+at a time, appends each to the archive and deletes it again, then uploads `tk.zip` beside
+the original folder. Peak disk is one folder's archive, not the whole night — which is
+what lets a 200 GB VM repack a terabyte. **Nothing in Drive is ever deleted**: the source
+folder stays exactly as it was, so the videos remain their own backup. Interrupt it and
+re-run whenever; finished folders are recorded and skipped, and an archive that is re-made
+*replaces* the old one instead of becoming a second file with the same name.
 
 That timestamp is **to the millisecond**, and it is stamped once when the job first
 uploads, not re-derived per run. Two batches submitted under the same label never merge

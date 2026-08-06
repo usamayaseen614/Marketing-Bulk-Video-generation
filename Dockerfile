@@ -31,6 +31,10 @@ COPY captions/ captions/
 COPY scrapers/ scrapers/
 COPY pages/ pages/
 COPY fonts/ fonts/
+# Operator scripts, run with `docker exec` — tools/zip_drive_tk.py repacks
+# folders that are already in Drive, which is work done ON the VM (its link to
+# Google is the fast one) but not through the UI.
+COPY tools/ tools/
 # Toolbar settings (hides the Deploy button and options menu).
 COPY .streamlit/ .streamlit/
 COPY supervisord.conf /etc/supervisor/conf.d/app.conf
@@ -47,10 +51,11 @@ RUN mkdir -p static
 # Streamlit page code.
 RUN python -c "\
 import importlib, sys; \
-mods = ['config','workspace','results','batching','video_generator','preview_editor', \
-        'jobs.store','jobs.worker','jobs.runners.render','jobs.runners.scrape', \
-        'jobs.runners.captions','integrations.drive','integrations.mailer', \
-        'captions.naming','captions.pool','captions.assign','scrapers.tiktok']; \
+mods = ['config','workspace','results','batching','packing','video_generator', \
+        'preview_editor','jobs.store','jobs.worker','jobs.runners.render', \
+        'jobs.runners.scrape','jobs.runners.captions','integrations.drive', \
+        'integrations.mailer','captions.naming','captions.pool', \
+        'captions.assign','scrapers.tiktok','tools.zip_drive_tk']; \
 [importlib.import_module(m) for m in mods]; \
 print('import check OK:', len(mods), 'modules')"
 

@@ -395,6 +395,59 @@ theme and press *Generate a new pool*. 2,000 captions × 500 hashtag sets is a
 million unique pairs, roughly a year and a half at 2,000 videos a day, and costs
 about $2 of Gemini usage to build.
 
+### 5e. Disk sizing
+
+Rendering needs room for the MP4s, and publishing them as ZIPs needs room for
+two archives on top of that. Packing runs **one output folder at a time** and
+each folder's MP4s are deleted as soon as both of its archives are verified in
+Drive, so the high-water mark is:
+
+```
+all rendered MP4s  +  two archives of ONE output folder
+```
+
+At ~31 MB a video that is roughly **35 GB per 1,000 videos**, plus about 65 GB
+of headroom for a 1,000-video folder. A 16,000-video night therefore wants a
+**600 GB** data disk. A `pd-balanced` disk is $0.10/GB-month, so 600 GB for the
+twelve hours a render actually takes is about **$1** — size it generously and
+delete it afterwards rather than fighting for space at 3am.
+
+Set `BVG_UPLOAD_FREE_LOCAL=false` to keep the MP4s on the VM after publishing
+(the local ZIP fallback then still works, and the disk must hold everything).
+
+### 5f. Repacking folders already in Drive
+
+Renders published before ZIPs existed left every video as its own Drive file
+under `batch_NN/tk/` and `batch_NN/yt/`. `tools/zip_drive_tk.py` converts them
+in place, and it is built for a VM far smaller than the data: it works one
+folder at a time, and inside a folder it downloads a handful of videos,
+appends them to the archive and deletes them again — so **peak disk is one
+folder's archive**, not the whole night.
+
+```bash
+# Over SSH on the VM. Check the plan first — this touches nothing:
+sudo docker exec $(sudo docker compose ps -q app) \
+  python tools/zip_drive_tk.py --link 'https://drive.google.com/drive/folders/XXXX' --dry-run
+
+# One folder, to see the result in Drive before committing hours:
+sudo docker exec $(sudo docker compose ps -q app) \
+  python tools/zip_drive_tk.py --link 'https://drive.google.com/drive/folders/XXXX' --max-folders 1
+
+# Then the rest. Use `screen`/`tmux`, or nohup, so SSH dropping doesn't kill it:
+sudo docker exec $(sudo docker compose ps -q app) \
+  python tools/zip_drive_tk.py --link 'https://drive.google.com/drive/folders/XXXX'
+```
+
+**Nothing in Drive is ever deleted.** The `tk/` folder is left exactly as it
+was, so the videos remain their own backup until you decide otherwise. Re-run
+the same command any time: finished folders are recorded in
+`/data/jobs/_repack/state.json` and skipped, and an archive that *is* re-made
+replaces the old one rather than becoming a second file with the same name.
+
+Add `--platform yt` to do the other half, and `--verify md5` to check every
+download against Drive's checksum instead of just its size (exact, but it
+re-reads every file).
+
 ## 6. Security — worth doing before this goes further
 
 The firewall rule `video-gen-public` currently allows `tcp:8501` from
