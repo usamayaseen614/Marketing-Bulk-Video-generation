@@ -436,22 +436,52 @@ def main(argv: Optional[list[str]] = None) -> int:
     say("")
 
     if args.dry_run:
-        # One listing call per folder — cheap, and these are the numbers worth
-        # knowing before starting something that runs for hours.
-        sizes = []
+        # Two listing calls per folder — cheap, and these are the numbers worth
+        # knowing before starting something that runs for hours. The existing
+        # archive is checked too, so the report shows what would ACTUALLY be
+        # done rather than what was asked for: after a partial run, most of
+        # this list is usually already finished.
+        remaining, done = [], 0
         for target, platform in plan:
+            key = f"{target['path']}/{platform}"
+            zip_name = args.zip_name or f"{platform}.zip"
             files = [f for f in drive.list_files(target["source_id"])
                      if not f["folder"]]
             size = sum(f["size"] for f in files)
-            sizes.append(size)
-            say(f"  {target['path']}/{platform}: {len(files):,} files, "
-                f"{human(size)}")
-        biggest = max(sizes, default=0)
+            existing = drive.find_file(zip_name, target["parent_id"],
+                                       drive_id=shared_drive_id)
+            landed = int((existing or {}).get("size") or 0)
+
+            if not files:
+                note = "  -> skip (no files)"
+            elif args.force:
+                note = "  -> REBUILD (--force)"
+                remaining.append(size)
+            elif key in state["folders"]:
+                note = "  -> skip (recorded done)"
+            elif existing and landed >= size:
+                note = f"  -> skip ({zip_name} already there, {human(landed)})"
+            elif existing:
+                note = (f"  -> REBUILD ({zip_name} is only {human(landed)} of "
+                        f"{human(size)} — a partial upload)")
+                remaining.append(size)
+            else:
+                note = "  -> to do"
+                remaining.append(size)
+            if note.startswith("  -> skip"):
+                done += 1
+
+            say(f"  {key}: {len(files):,} files, {human(size)}{note}")
+
+        biggest = max(remaining, default=0)
         free = shutil.disk_usage(work_root).free
         say("")
-        say(f"Total to move: {human(sum(sizes))} down, then the same back up.")
+        say(f"{done} of {len(plan)} folder(s) already done; "
+            f"{len(remaining)} left to archive.")
+        say(f"Still to move: {human(sum(remaining))} down, then the same back "
+            f"up. That upload counts against Drive's 750 GB per rolling 24h.")
         say(f"Peak disk needed: about {human(biggest + _HEADROOM_BYTES)} "
-            f"(the largest folder's archive) — {human(free)} free now.")
+            f"(the largest remaining folder's archive) — {human(free)} free now.")
         if biggest + _HEADROOM_BYTES > free:
             say("That does NOT fit. Grow the disk or point --work-dir "
                 "somewhere with room.")

@@ -106,6 +106,42 @@ assert not PUBLISHED and not downloads, "a dry run touched Drive"
 print("dry run: reports the plan, downloads nothing, publishes nothing")
 
 
+# ---- the dry run must report what is LEFT, not what was asked for -----------
+# After a partial run this is the question being asked: which folders still
+# need doing? Reporting all 16 when 15 are finished is worse than useless.
+import io, contextlib
+
+PUBLISHED.setdefault("B1", {})["tk.zip"] = {
+    "id": "zip-B1-tk.zip", "name": "tk.zip",
+    "size": sum(f["size"] for f in FILES["B1TK"]), "entries": []}
+buffer = io.StringIO()
+with contextlib.redirect_stdout(buffer):
+    run("--dry-run")
+report = buffer.getvalue()
+PUBLISHED.pop("B1")
+
+assert "1 of 2 folder(s) already done" in report, report
+assert "already there" in report, report
+assert "-> to do" in report, report
+# The remaining total must exclude the finished folder, or the quota estimate
+# it feeds is wrong in exactly the direction that matters.
+b2_bytes = sum(f["size"] for f in FILES["B2TK"])
+assert f"Still to move: {tool.human(b2_bytes)}" in report, report
+print("dry run: counts only the folders still outstanding")
+
+# A half-uploaded archive is reported as work still to do, not as finished.
+PUBLISHED.setdefault("B1", {})["tk.zip"] = {
+    "id": "zip-B1-tk.zip", "name": "tk.zip", "size": 10, "entries": []}
+buffer = io.StringIO()
+with contextlib.redirect_stdout(buffer):
+    run("--dry-run")
+report = buffer.getvalue()
+PUBLISHED.pop("B1")
+assert "a partial upload" in report, report
+assert "0 of 2 folder(s) already done" in report, report
+print("dry run: an undersized archive is flagged as a rebuild, not a skip")
+
+
 # ---- the real thing ---------------------------------------------------------
 assert run("--concurrency", "2") == 0
 assert set(PUBLISHED) == {"B1", "B2"}, PUBLISHED
