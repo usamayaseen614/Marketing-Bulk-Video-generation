@@ -6,7 +6,9 @@ that does NOT announce itself:
   * the dwell floor is computed from the VIDEO stream's duration, not the
     container header — an mp4 whose audio outlasts its video reports the audio
     length and would silently under-repeat;
-  * contain-fit must never upscale, which no existing preview helper does;
+  * contain-fit must fill the box in BOTH directions (a small gif is enlarged),
+    while the editor payload alone stays capped at the gif's natural size — one
+    helper keeping two rules apart, and no existing preview helper does either;
   * an off-by-one in the FFmpeg input indices renders a DIFFERENT video with
     exit code 0 and empty stderr, so only an explicit invariant catches it.
 """
@@ -82,7 +84,7 @@ assert gif_repeats(stream_dur, 5.0) == 2, "video duration must give 2 repeats"
 print(f"A/V mismatch: header says {container_dur:.1f}s, video is "
       f"{stream_dur:.1f}s -> 2 repeats, not 1")
 
-# ---------- 3. contain-fit never upscales ----------
+# ---------- 3. contain-fit fills the box, up as well as down ----------
 bg_dir = TMP / "bg"
 bg_dir.mkdir()
 Image.new("RGB", (1080, 1920), (255, 0, 255)).save(bg_dir / "b.png")
@@ -114,15 +116,25 @@ for path, (name, _, _) in zip(gif_paths, POOL):
     fitted = gen._contain_content(*BOX, path)
     assert fitted.width <= BOX[0] and fitted.height <= BOX[1], \
         f"{name}: {fitted.size} escapes the box"
-    assert fitted.width <= natural.width and fitted.height <= natural.height, \
-        f"{name}: upscaled {natural.size} -> {fitted.size}"
+    # One side has to TOUCH the box. Falling short on both axes is the old
+    # no-upscale clamp coming back, and it fails silently — the gif just looks
+    # small in a box the operator sized deliberately.
+    assert fitted.width >= BOX[0] - 1 or fitted.height >= BOX[1] - 1, \
+        f"{name}: {fitted.size} stops short of the box on both axes"
     ar_in, ar_out = natural.width / natural.height, fitted.width / fitted.height
     assert abs(ar_in - ar_out) / ar_in < 0.03, f"{name}: aspect ratio distorted"
     print(f"   contain-fit {name:5s} {natural.size} -> {fitted.size}")
-# the specific rule the user asked for
+# the specific rule the user asked for: a gif SMALLER than the box grows into it
 tiny_fit = gen._contain_content(*BOX, gif_dir / "tiny.mp4")
-assert tiny_fit.size == (100, 80), tiny_fit.size
-print("contain-fit: a 100x80 gif stays 100x80 in a 400x400 box (never upscaled)")
+assert tiny_fit.size == (400, 320), tiny_fit.size
+print("contain-fit: a 100x80 gif is enlarged to 400x320 in a 400x400 box")
+
+# The editor payload is the ONE caller that still caps at natural size: the
+# browser enlarges in CSS, so a pre-enlarged raster would be base64 weight with
+# no extra detail. This is a bandwidth rule, not a fit rule.
+capped = gen._contain_content(*BOX, gif_dir / "tiny.mp4", allow_upscale=False)
+assert capped.size == (100, 80), capped.size
+print("editor payload raster stays at the gif's natural size (CSS does the fit)")
 
 # the padded tile must be genuinely transparent around the content
 tile = gen._contain_frame(*BOX, gif_dir / "tiny.mp4")
@@ -172,6 +184,15 @@ n_inputs = sum(1 for a in cmd if a == "-i")
 fc = cmd[cmd.index("-filter_complex") + 1]
 VideoGenerator._check_filter_inputs(fc, n_inputs)          # must not raise
 print(f"real command: {n_inputs} inputs, every one referenced exactly once")
+
+# The filter has to fit the box in both directions too — a bare box-sized scale
+# with force_original_aspect_ratio=decrease. The old 'min(GW,iw)' form capped it
+# at the source size and would leave a small gif small in the OUTPUT only.
+assert (f"scale={spec.gif_w}:{spec.gif_h}:force_original_aspect_ratio=decrease"
+        in fc), "the gif chain no longer scales to the box"
+assert f"min({spec.gif_w},iw)" not in fc, "the no-upscale clamp is back in the filter"
+print(f"gif filter scales to the box in both directions "
+      f"({spec.gif_w}x{spec.gif_h}, aspect preserved, padded transparent)")
 
 # -stream_loop must accompany the gifs, and its count must be repeats-1
 loops = [int(cmd[i + 1]) for i, a in enumerate(cmd) if a == "-stream_loop"]

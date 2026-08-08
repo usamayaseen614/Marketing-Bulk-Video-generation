@@ -52,6 +52,7 @@ RUN mkdir -p static
 RUN python -c "\
 import importlib, sys; \
 mods = ['config','workspace','results','batching','packing','video_generator', \
+        'text_grids', \
         'preview_editor','jobs.store','jobs.worker','jobs.runners.render', \
         'jobs.runners.scrape','jobs.runners.captions','integrations.drive', \
         'integrations.mailer','captions.naming','captions.pool', \

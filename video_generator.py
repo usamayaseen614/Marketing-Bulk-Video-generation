@@ -123,10 +123,12 @@ CTA_MAX_TOTAL_CLIPS = 40
 #   * Dwell time. Every gif holds its box for at least gif_min_seconds by
 #     repeating ITSELF a whole number of times — a 3s gif plays twice (6s), it
 #     is never cut at 5s. See _resolve_gif_sequence.
-#   * Fit. Each gif is CONTAIN-fitted: scaled down to sit entirely inside its
-#     box, never cropped, never distorted, and never upscaled (a gif smaller
-#     than the box keeps its own size). The leftover box area is transparent,
-#     so the box is a fit guide rather than a visible plate.
+#   * Fit. Each gif is CONTAIN-fitted: scaled to sit entirely inside its box,
+#     never cropped and never distorted, but always as large as the box allows
+#     — a gif smaller than the box is enlarged until one of its sides touches
+#     the edge, a bigger one is shrunk. The leftover box area (on the axis the
+#     aspect ratio leaves short) is transparent, so the box is a fit guide
+#     rather than a visible plate.
 #
 # The pool is FLAT, not slotted: gifs have no position semantics, and with a
 # dwell floor the sequence length is derived from the promo's duration rather
@@ -290,6 +292,21 @@ def find_ffmpeg() -> str:
     return imageio_ffmpeg.get_ffmpeg_exe()
 
 
+# Capture kwargs for every FFmpeg call. FFmpeg echoes a container's metadata
+# tags (title, comment, artist, …) into its stderr verbatim, and nothing
+# requires those tags to be UTF-8 — a single stock GIPHY MP4 carrying one
+# Latin-1 byte in its `comment` is enough. A bare text=True decodes with the
+# locale encoding, which on any Linux deploy is UTF-8 and raises
+# UnicodeDecodeError from subprocess's reader thread, i.e. NOT inside the try
+# below and not catchable as OSError — it kills the probe (and with it the whole
+# render) before a frame is drawn. cp1252 on Windows swallows the same byte, so
+# this only ever reproduces in production. Decode explicitly and replace what
+# won't decode: this output is only regex-matched or pasted into an error
+# message, never interpreted byte for byte.
+_FF_CAPTURE = dict(capture_output=True, text=True,
+                   encoding="utf-8", errors="replace")
+
+
 # Whether a media file actually contains a video stream, cached by
 # (filename, size) so re-uploads of the same files across generator instances
 # (every Preview/Render click rebuilds the workspace) are only probed once.
@@ -314,7 +331,7 @@ def _has_video_stream(ffmpeg: str, path: Path) -> bool:
         # ffmpeg -i with no output exits non-zero by design; the stream listing
         # is on stderr regardless (same trick as _probe_duration).
         proc = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)],
-                              capture_output=True, text=True, timeout=60)
+                              **_FF_CAPTURE, timeout=60)
         ok = _VIDEO_STREAM_RE.search(proc.stderr or "") is not None
     except (subprocess.TimeoutExpired, OSError):
         ok = False
@@ -370,7 +387,7 @@ def _probe_video_duration(ffmpeg: str, path: Path) -> Optional[float]:
         proc = subprocess.run(
             [ffmpeg, "-hide_banner", "-i", str(path),
              "-map", "0:v:0", "-c", "copy", "-f", "null", "-"],
-            capture_output=True, text=True, timeout=120,
+            **_FF_CAPTURE, timeout=120,
         )
         err = proc.stderr or ""
         frames = _FRAME_COUNT_RE.findall(err)
@@ -2108,8 +2125,9 @@ class VideoGenerator:
             if self._has_gifs and spec.gif_clips:
                 # Contain-fit the first gif of this row's sequence. Pasted WITH
                 # its alpha as the mask, unlike the cover-filled CTA frame
-                # below: this tile is mostly transparent, and a maskless paste
-                # would punch an opaque hole through everything under the box.
+                # below: whatever the aspect ratio leaves over is transparent,
+                # and a maskless paste would punch an opaque hole through
+                # everything under the box.
                 tile = self._contain_frame(spec.gif_w, spec.gif_h,
                                            self._lead_gif_path(spec))
                 canvas.paste(tile, (spec.gif_x, spec.gif_y), tile)
@@ -2476,13 +2494,14 @@ class VideoGenerator:
                 `loop` video filter would do the same thing by buffering decoded
                 frames — measured at ~740MB peak against ~75MB for -stream_loop,
                 and it silently appends a frozen tail when placed before `fps=`.
-              * Fit. `scale='min(W,iw)':'min(H,ih)':decrease` fits the gif INSIDE
-                the box without ever upscaling it — the min() is what a bare
-                force_original_aspect_ratio=decrease gets wrong, since that
-                enlarges anything smaller than the box. `pad` then centres the
-                result on the box at an even offset with a fully transparent
-                colour, so whatever sits below shows through the leftover area
-                instead of black bars.
+              * Fit. `scale=W:H:force_original_aspect_ratio=decrease` fits the
+                gif INSIDE the box at the largest size the box allows, in both
+                directions: oversized gifs shrink, undersized ones are enlarged
+                until one side touches the edge. Nothing is cropped or
+                distorted. `pad` then centres the result on the box at an even
+                offset with a fully transparent colour, so whatever sits below
+                shows through the area the aspect ratio leaves over instead of
+                black bars.
 
               The pad is not cosmetic: concat REJECTS inputs of differing sizes
               ("Input link parameters do not match"), and contain-fitting gifs of
@@ -2631,7 +2650,7 @@ class VideoGenerator:
             for k, idx in enumerate(gif_ix):
                 parts.append(
                     f"[{idx}:v]fps={fps},format=rgba,"
-                    f"scale='min({gw},iw)':'min({gh},ih)'"
+                    f"scale={gw}:{gh}"
                     f":force_original_aspect_ratio=decrease:force_divisible_by=2,"
                     f"pad={gw}:{gh}:'trunc(({gw}-iw)/4)*2':'trunc(({gh}-ih)/4)*2'"
                     f":color=0x00000000,setsar=1[gv{k}];"
@@ -2796,7 +2815,7 @@ class VideoGenerator:
             cmd = self.build_ffmpeg_command(spec, base_png, overlay_png, cta_png,
                                             out_path, sub_layers)
             proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=self.config.ffmpeg_timeout
+                cmd, **_FF_CAPTURE, timeout=self.config.ffmpeg_timeout
             )
             if proc.returncode != 0:
                 tail = "\n".join(proc.stderr.strip().splitlines()[-30:])
@@ -2843,7 +2862,7 @@ class VideoGenerator:
             try:
                 proc = subprocess.run(
                     [self.ffmpeg, "-hide_banner", "-i", str(path)],
-                    capture_output=True, text=True, timeout=120,
+                    **_FF_CAPTURE, timeout=120,
                 )
                 # ffmpeg prints info to stderr; exit code is non-zero (no output
                 # file) but that's expected here — parse regardless.
@@ -2872,7 +2891,7 @@ class VideoGenerator:
                     "-i", str(path),
                     "-frames:v", "1", "-update", "1", str(frame_png),
                 ]
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                proc = subprocess.run(cmd, **_FF_CAPTURE, timeout=120)
                 if proc.returncode != 0 or not frame_png.is_file():
                     raise RuntimeError(f"Could not extract preview frame:\n{proc.stderr[-2000:]}")
                 with Image.open(frame_png) as img:
@@ -2897,17 +2916,25 @@ class VideoGenerator:
         up edge to edge in the box."""
         return ImageOps.fit(self._first_video_frame(path), (box_w, box_h), Image.LANCZOS)
 
-    def _contain_content(self, box_w: int, box_h: int, path: Path) -> Image.Image:
-        """A gif's first frame scaled to fit INSIDE the box without upscaling —
-        the visible content only, no padding.
+    def _contain_content(self, box_w: int, box_h: int, path: Path,
+                         allow_upscale: bool = True) -> Image.Image:
+        """A gif's first frame scaled to fill the box as far as its aspect ratio
+        allows without escaping it — the visible content only, no padding. Small
+        gifs are enlarged, big ones shrunk; nothing is cropped or distorted.
 
-        Neither existing helper can stand in: _fit_frame deliberately UPSCALES
-        small sources (it mirrors an unbounded force_original_aspect_ratio=
-        decrease) and _cover_frame crops. The `1.0` in the ratio is the
-        no-upscale rule, the Pillow counterpart of the filter's
-        scale='min(W,iw)':'min(H,ih)'."""
+        This is the Pillow counterpart of the filter's
+        scale=W:H:force_original_aspect_ratio=decrease. _cover_frame can't stand
+        in (it crops), and _fit_frame reads the promo video by default, so the
+        gif layer keeps its own helper.
+
+        allow_upscale=False caps the result at the source's natural size. That
+        is NOT a fit rule — it exists only for the editor payload, where the
+        browser does the fitting in CSS and enlarging the raster before base64
+        would inflate the payload without adding a pixel of detail."""
         frame = self._first_video_frame(path)
-        ratio = min(box_w / frame.width, box_h / frame.height, 1.0)
+        ratio = min(box_w / frame.width, box_h / frame.height)
+        if not allow_upscale:
+            ratio = min(ratio, 1.0)
         size = (max(2, round(frame.width * ratio)), max(2, round(frame.height * ratio)))
         return frame.resize(size, Image.LANCZOS)
 
@@ -3056,10 +3083,14 @@ class VideoGenerator:
             natural = self._first_video_frame(lead)
             # Ship the content WITHOUT the transparent padding, plus the gif's
             # true natural size. The editor's box is resizable, so it has to
-            # apply the no-upscale rule itself — growing the box must not grow
-            # the gif, which is what the render does. Baking a box-sized padded
-            # tile instead would stretch on resize and quietly lie.
-            shown = self._contain_content(spec.gif_w, spec.gif_h, lead)
+            # re-derive the contain-fit itself on every drag — growing the box
+            # grows the gif, exactly as the render does. Baking a box-sized
+            # padded tile instead would stretch on resize and quietly lie.
+            # allow_upscale=False keeps the shipped raster at natural size at
+            # most: the CSS does the enlarging, so extra pixels here would only
+            # be base64 weight (see _contain_content).
+            shown = self._contain_content(spec.gif_w, spec.gif_h, lead,
+                                          allow_upscale=False)
             payload["gif"] = {
                 "x": spec.gif_x, "y": spec.gif_y,
                 "w": spec.gif_w, "h": spec.gif_h,

@@ -206,6 +206,14 @@ def find_ffmpeg() -> str:
     return _find()
 
 
+def _ff_capture() -> dict:
+    """Same reason as the renderer's: scraped MP4s carry arbitrary metadata
+    bytes that FFmpeg replays into stderr, and a bare text=True turns one of
+    them into an uncatchable UnicodeDecodeError on a UTF-8 locale."""
+    from video_generator import _FF_CAPTURE
+    return dict(_FF_CAPTURE)
+
+
 def split_clip(src: Path, dest_dir: Path, stem: str, start: float,
                duration: float, ffmpeg: Optional[str] = None,
                min_fraction: float = 0.5) -> list[Path]:
@@ -290,7 +298,7 @@ def trim_clip(src: Path, dest: Path, start: float, duration: float,
         "-movflags", "+faststart",
         str(dest),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    proc = subprocess.run(cmd, **_ff_capture(), timeout=180)
     if proc.returncode != 0 or not dest.is_file() or dest.stat().st_size == 0:
         tail = "\n".join((proc.stderr or "").strip().splitlines()[-10:])
         raise ScrapeError(f"Trim failed for {src.name}: {tail}")
@@ -304,7 +312,7 @@ def probe_duration(path: Path, ffmpeg: Optional[str] = None) -> Optional[float]:
     ffmpeg = ffmpeg or find_ffmpeg()
     try:
         proc = subprocess.run([ffmpeg, "-i", str(path)],
-                              capture_output=True, text=True, timeout=60)
+                              **_ff_capture(), timeout=60)
     except (subprocess.SubprocessError, OSError):
         return None
     match = _DURATION_RE.search(proc.stderr or "")

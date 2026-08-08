@@ -18,6 +18,7 @@ from openpyxl import load_workbook
 
 # Aliased: this module already binds `config` to the per-batch RenderConfig.
 import config as settings
+import text_grids
 import ui_common
 from jobs import store
 from preview_editor import preview_editor
@@ -90,6 +91,19 @@ def hashtag_template_bytes() -> bytes:
         pd.DataFrame({"Hashtags": rows}).to_excel(
             writer, sheet_name="Hashtags", index=False)
     return buf.getvalue()
+
+
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+@st.cache_data(show_spinner=False)
+def read_text_grid(data: bytes, role: str) -> text_grids.Grid:
+    """Parse one per-promo text grid, cached on the uploaded bytes.
+
+    Streamlit re-runs this whole script on every widget touch, and openpyxl
+    costs tens of milliseconds per workbook — three of them on every slider
+    drag is a page that feels broken."""
+    return text_grids.read_grid(data, role)
 
 
 def apply_saved_edits(df: pd.DataFrame, edits: dict[int, dict]) -> pd.DataFrame:
@@ -335,10 +349,11 @@ with st.sidebar:
         "pool is the variety across videos, not within one."
     )
     st.caption(
-        "The box is an invisible fit guide, not a visible panel. A gif bigger "
-        "than the box is scaled down to sit inside it (never cropped, never "
-        "stretched); a smaller one keeps its own size. Whatever is behind shows "
-        "through the space around it."
+        "The box is an invisible fit guide, not a visible panel. Every gif is "
+        "scaled to the largest size that still sits inside it — bigger gifs "
+        "shrink, smaller ones are enlarged — never cropped and never stretched, "
+        "so the box sets the size whatever the source resolution. Whatever is "
+        "behind shows through the space left over."
     )
     gif_x = st.number_input("GIF box X", 0, CANVAS_W, 60)
     gif_y = st.number_input("GIF box Y", 0, CANVAS_H, 560)
@@ -656,6 +671,112 @@ if excel_file is not None:
                 )
             with st.expander("Preview spreadsheet data"):
                 st.dataframe(df, hide_index=True, width="stretch")
+
+# ---- optional per-promo text
+#
+# One grid workbook per role, each column headed with a promo video's filename.
+# Uploading one makes that role's text come from the grid instead of the sheet;
+# everything else about the row — size, font, colour, position, background box
+# — is untouched, which is the whole point. See text_grids.py.
+promo_names = [f.name for f in (promo_files or [])]
+sheet_rows = len(df) if df is not None else 0
+grid_keys = {role: f"text_grid_{role}" for role in TEXT_ROLES}
+grid_uploads: dict[str, object] = {}
+
+with st.expander(
+    "Per-promo heading, subheading and footer text (optional)",
+    # Opened once something is in it, so a blocking error is never hidden
+    # behind a collapsed panel.
+    expanded=any(st.session_state.get(k) is not None for k in grid_keys.values()),
+):
+    st.caption(
+        "Upload a sheet whose **column headers are your promo video filenames** "
+        "and whose rows are the text for each row of the main Excel — so the "
+        "same row can say something different on every promo. Row 1 here is "
+        "row 1 there. A sheet you upload replaces **only** that text: size, "
+        "font, colour, position and background box still come from the main "
+        "Excel and the sidebar. Leave a cell blank to keep the main Excel's "
+        "text for that one."
+    )
+    for column, role in zip(st.columns(len(TEXT_ROLES)), TEXT_ROLES):
+        grid_uploads[role] = column.file_uploader(
+            f"{role} by promo (.xlsx)", type=["xlsx"], key=grid_keys[role],
+            help=f"One column per promo video, one row per row of the main "
+                 f"Excel. Overrides the main sheet's `{role}` column.",
+        )
+    if promo_names and sheet_rows:
+        st.caption("Templates below already carry the right headers and row "
+                   "count — fill one in and upload it back.")
+        for column, role in zip(st.columns(len(TEXT_ROLES)), TEXT_ROLES):
+            column.download_button(
+                f"⬇️ {role} template",
+                data=text_grids.template_bytes(role, promo_names, sheet_rows),
+                file_name=f"{role.lower()}_by_promo.xlsx", mime=XLSX_MIME,
+                key=f"text_grid_template_{role}", width="stretch",
+            )
+    else:
+        st.caption("Upload the main Excel and your promo video(s) first to get "
+                   "templates with the headers already filled in.")
+
+    grid_reports, grid_overrides, grid_errors = text_grids.check_uploads(
+        grid_uploads, promo_names, sheet_rows, reader=read_text_grid)
+
+    if any(u is not None for u in grid_uploads.values()):
+        if not promo_names:
+            st.info("Upload your promo video(s) — the column headers are "
+                    "checked against their filenames.")
+        checked = st.button(
+            "🔍 Check promo names against these sheets", width="stretch",
+            help="Shows which column of each sheet feeds which promo video.",
+        )
+        # Shown on demand, but forced whenever something is wrong: an error
+        # here refuses the batch, so it cannot be behind a button nobody pressed.
+        if (checked or grid_errors) and promo_names:
+            matched = {role: {i: column for i, _n, column in report.pairs}
+                       for role, report in grid_reports.items()}
+            pairing = []
+            for index, name in enumerate(promo_names):
+                entry = {"#": index + 1, "Promo video": name}
+                for role in TEXT_ROLES:
+                    if role not in grid_reports:
+                        entry[role] = "— not uploaded"
+                        continue
+                    column = matched[role].get(index)
+                    entry[role] = (f"✅ column “{column}”" if column
+                                   else "⚠️ falls back to the main Excel")
+                pairing.append(entry)
+            st.dataframe(pd.DataFrame(pairing), hide_index=True, width="stretch")
+            if grid_reports:
+                st.caption(" · ".join(
+                    f"**{role}**: {r.grid_rows} row(s) vs the main Excel's "
+                    f"{r.sheet_rows}, {r.matched}/{len(promo_names)} promo(s) "
+                    "matched" for role, r in grid_reports.items()))
+        for message in grid_errors:
+            st.error(message)
+        if checked or grid_errors:
+            for report in grid_reports.values():
+                for message in report.warnings:
+                    st.warning(message)
+        if checked and grid_overrides and not grid_errors:
+            st.success(
+                "Every column matches a promo video — "
+                + ", ".join(f"{role} ✓" for role in sorted(grid_overrides))
+                + ". These sheets will be used instead of the main Excel's "
+                  "text.")
+
+# A grid swap changes what every row says, so a preview rendered from the
+# previous one is a picture of something that will never be generated. Saved
+# editor edits are deliberately kept: they are geometry and colour, which a
+# text change does not invalidate.
+grid_key = "|".join(
+    f"{role}:{u.name}:{u.size}" if u is not None else f"{role}:-"
+    for role, u in sorted(grid_uploads.items())
+)
+if st.session_state.get("text_grid_key", grid_key) != grid_key:
+    for stale in ("preview_payload", "preview_nonce", "preview_baseline_edits",
+                  "row_render"):
+        st.session_state.pop(stale, None)
+st.session_state["text_grid_key"] = grid_key
 
 ready = df is not None and video_file is not None
 if not ready:
@@ -1171,8 +1292,11 @@ if preview_clicked and ready:
                                      font_file, cta_video_slot_files, gif_files)
                 generator = make_generator(ws, config, Path(tmp) / "out")
                 # Same deterministic background assignment as the real batch,
-                # so the preview shows the row's actual background.
-                df_preview, _ = generator.assign_backgrounds(df)
+                # so the preview shows the row's actual background — and the
+                # same per-promo text, or the editor would offer no Headline at
+                # all for a row whose only Headline comes from a grid.
+                df_preview, _ = generator.assign_backgrounds(
+                    text_grids.apply_overrides(df, grid_overrides, promo_choice))
                 payload = generator.build_editor_payload(
                     df_preview.iloc[int(preview_row) - 1], int(preview_row))
                 st.session_state["preview_payload"] = payload
@@ -1204,8 +1328,11 @@ if render_row_clicked and ready:
                 generator = make_generator(ws, config, Path(tmp) / "out")
                 # Same deterministic background assignment as the real batch, so
                 # this row renders with its actual background. df already carries
-                # the saved editor edits (apply_saved_edits above).
-                df_render, bg_warnings = generator.assign_backgrounds(df)
+                # the saved editor edits (apply_saved_edits above), and the grids
+                # are applied for the selected promo so this really is the
+                # pairing the batch would produce.
+                df_render, bg_warnings = generator.assign_backgrounds(
+                    text_grids.apply_overrides(df, grid_overrides, promo_choice))
                 for message in bg_warnings:
                     st.warning(message)
                 res = generator.render_row(
@@ -1259,6 +1386,15 @@ if "preview_payload" in st.session_state and not generate_clicked:
         "texts, and add a background box; click “Save to Excel” in the panel to apply the "
         "changed values to that row for previews, generation, and the Excel download below."
     )
+    if grid_overrides:
+        st.caption(
+            "The "
+            + ", ".join(f"**{role}**" for role in sorted(grid_overrides))
+            + " wording above is this promo's, from your per-promo sheet. What "
+              "you change here — position, size, colour, background box — is "
+              "saved against the row and so applies to every promo, which is "
+              "the point: one design, different words."
+        )
     saved = preview_editor(
         st.session_state["preview_payload"], st.session_state["preview_nonce"]
     )
@@ -1315,6 +1451,17 @@ if generate_clicked and ready and clip_source == "drive_folder" and not any(
              "clips, or choose a different clip source.")
     generate_clicked = False
 
+if generate_clicked and ready and grid_errors:
+    # A grid whose headers do not resolve would render the wrong promo's words
+    # onto thousands of videos and look entirely successful doing it. There is
+    # no safe way to guess past it, so the batch does not start.
+    st.error(
+        f"Not queued — {len(grid_errors)} problem(s) with the per-promo text "
+        "sheet(s). Fix them in the “Per-promo heading, subheading and footer "
+        "text” panel above, or remove the sheets to use the main Excel's text."
+    )
+    generate_clicked = False
+
 if generate_clicked and ready:
     # Submitting is a two-step dance: reserve an id, stage the uploads into its
     # folder, then insert the job row. Doing it the other way round would let
@@ -1345,6 +1492,12 @@ if generate_clicked and ready:
         if hashtag_file is not None:
             (assets / "hashtags.xlsx").write_bytes(hashtag_file.getvalue())
 
+        # Resolved to promo INDICES here, not staged as sheets: stage_uploads
+        # renames every promo to input_N.mp4, so the filenames the columns were
+        # matched on do not exist by the time the worker runs. Writes nothing
+        # when no grids were uploaded.
+        text_grids.write_overrides(assets, grid_overrides)
+
         (assets / "input.xlsx").write_bytes(
             updated_excel_bytes(excel_file.getvalue(),
                                 st.session_state.get("row_edits") or {})
@@ -1365,6 +1518,11 @@ if generate_clicked and ready:
                 "make_zip": True,
                 "upload_platforms": upload_platforms.split(","),
                 "excel_name": excel_file.name,
+                # Recorded because nothing else keeps them: the promos are
+                # staged as input.mp4 / input_N.mp4, so this list is the only
+                # way to read a job's per-promo text back against real names.
+                "promo_names": promo_names,
+                "text_grids": sorted(grid_overrides),
                 "clip_source": clip_source,
                 "gif_source": gif_source,
                 "drive_folder": drive_folder.strip(),

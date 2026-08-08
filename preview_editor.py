@@ -108,10 +108,10 @@ _TEMPLATE = r"""
   .el > img { width: 100%; height: 100%; display: block; pointer-events: none; }
   #videoBox > img.frame, #ctaVideoBox > img.frame, #gifBox > img.frame { position: absolute; width: auto; height: auto; }
   /* The gif box keeps a permanent outline, unlike every other element, which
-     only outlines on hover. A contain-fitted gif is never upscaled, so a small
-     gif in a large box leaves most of the box empty and see-through — without a
-     visible edge there is nothing to grab and no way to judge the box you are
-     actually setting. */
+     only outlines on hover. A contain-fitted gif fills the box on one axis
+     only, so unless its aspect ratio matches exactly the rest of the box is
+     empty and see-through — without a visible edge there is nothing to grab
+     along those sides and no way to judge the box you are actually setting. */
   #gifBox { outline: 1.5px dashed rgba(255,255,255,.45); outline-offset: 1px; }
   /* A text's optional fit box, drawn as its own outline behind the text. It is
      click-through except for its resize handle, so the text stays the drag
@@ -520,9 +520,9 @@ _TEMPLATE = r"""
     }
 
     // --- GIF box (optional). Same drag/resize behaviour as the boxes above,
-    //     with one rule of its own: the gif is contain-fitted and NEVER
-    //     upscaled, so growing the box must not grow the gif. That is the
-    //     Math.min(..., 1) in place(), and it is why the payload ships the
+    //     with one rule of its own: the gif is contain-fitted, so resizing the
+    //     box resizes the gif with it — up as well as down. That is the
+    //     re-derived ratio in place(), and it is why the payload ships the
     //     gif's natural size rather than a pre-fitted tile. ---
     if (DATA.gif) {
       const g = DATA.gif;
@@ -555,10 +555,11 @@ _TEMPLATE = r"""
           gEl.style.top = px(this.y);
           gEl.style.width = px(this.w);
           gEl.style.height = px(this.h);
-          // The 1 is the no-upscale clamp — the CSS twin of the render's
-          // scale='min(W,iw)':'min(H,ih)'. Without it a gif smaller than its
-          // box would be blown up here and not in the output.
-          const r = Math.min(this.w / g.nat_w, this.h / g.nat_h, 1);
+          // The CSS twin of the render's scale=W:H:decrease — the largest the
+          // gif goes without escaping the box, enlarging it when the box is
+          // bigger than the source. Clamping this at 1 would show a small gif
+          // at natural size here and box-filling in the output.
+          const r = Math.min(this.w / g.nat_w, this.h / g.nat_h);
           const fw = g.nat_w * r, fh = g.nat_h * r;
           gFrame.style.width = px(fw);
           gFrame.style.height = px(fh);

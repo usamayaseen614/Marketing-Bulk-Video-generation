@@ -564,15 +564,24 @@ instead, which needs nothing installed on the VM:
 ```bash
 CID=$(sudo docker ps --format '{{.ID}} {{.Image}}' | grep bulk-video-generator | cut -d' ' -f1)
 sudo docker exec -d $CID sh -c \
-  "python tools/zip_drive_tk.py --link 'https://drive.google.com/drive/folders/XXXX' \
+  "mkdir -p /data/jobs/_repack && \
+   python tools/zip_drive_tk.py --link 'https://drive.google.com/drive/folders/XXXX' \
    >> /data/jobs/_repack/run.log 2>&1"
 ```
 
-Then close the tab. To check on it later:
+The `mkdir` matters: the redirect is evaluated by the shell *before* Python
+starts, so a missing log directory means nothing runs at all — and `-d`
+swallows the error.
+
+**Always confirm it started**, because `-d` prints nothing either way. Wait a
+few seconds, then:
 
 ```bash
 sudo docker exec $CID tail -20 /data/jobs/_repack/run.log
 ```
+
+Advancing timestamps mean it is alive. An empty or missing log means the
+command never ran — re-run it without `-d` to see the error.
 
 The log is on the mounted volume, so it also survives the container being
 replaced. The VM itself must stay up — stopping it pauses the work (it resumes

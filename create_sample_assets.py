@@ -6,10 +6,17 @@ Produces in ./sample_assets:
                        to demonstrate per-row error handling)
     backgrounds.zip  — two gradient background images (1080x1920)
     promo.mp4        — 5-second 16:9 test video with a tone (FFmpeg testsrc)
+    promo_2.mp4 / promo_3.mp4 — two more promos, visibly different, so a
+                       multi-batch render and the per-promo text sheets below
+                       have something to rotate through
     cta.png          — a "SHOP NOW" call-to-action button with transparency
                        (the CTA image is optional — omit it to skip that layer)
     cta_video_1..5.mp4 — five short clips to try as the optional CTA videos
                        (they play back-to-back in a shuffled order)
+    headline_by_promo.xlsx / subheading_by_promo.xlsx / footer_by_promo.xlsx
+                     — the optional per-promo text sheets: one column per promo
+                       above, one row per row of data.xlsx, so the same row says
+                       something different on each promo
 
 Usage:  python create_sample_assets.py
 """
@@ -48,16 +55,25 @@ def make_cta(path: Path) -> None:
     img.save(path)
 
 
-def make_video(path: Path) -> None:
+def make_video(path: Path, source: str = "testsrc", tone: int = 440) -> None:
     ffmpeg = find_ffmpeg()
     cmd = [
         ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
-        "-f", "lavfi", "-i", "testsrc=size=1280x720:rate=30:duration=5",
-        "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
+        "-f", "lavfi", "-i", f"{source}=size=1280x720:rate=30:duration=5",
+        "-f", "lavfi", "-i", f"sine=frequency={tone}:duration=5",
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
         str(path),
     ]
     subprocess.run(cmd, check=True)
+
+
+# The promo videos, in upload order. `promo.mp4` keeps its name and its source
+# so everything that already refers to it is unaffected; the other two exist so
+# a multi-batch render has something to rotate, and so the per-promo text
+# sheets have more than one column to be interesting.
+PROMOS = [("promo.mp4", "testsrc", 440),
+          ("promo_2.mp4", "smptebars", 330),
+          ("promo_3.mp4", "rgbtestsrc", 550)]
 
 
 def make_cta_videos(out_dir: Path, count: int = 5) -> None:
@@ -76,6 +92,79 @@ def make_cta_videos(out_dir: Path, count: int = 5) -> None:
         subprocess.run(cmd, check=True)
 
 
+# The optional per-promo text sheets, one per role. A column header is a promo
+# video's filename and a row lines up with a row of the main sheet, so the video
+# made from row 3 on promo_2.mp4 reads "Just dropped" rather than whatever the
+# main sheet's row 3 says.
+#
+# Only the words live here. Size, font, colour, position and background box all
+# still come from the main sheet, which is the point: one design, different
+# wording per promo. Each column is written in a different voice so the effect
+# is obvious the moment you watch two videos from the same row.
+#
+# Row 4 of promo.mp4 in the Headline sheet is BLANK on purpose: a blank cell
+# falls back to the main Excel, so you can override only the cells you care
+# about. Everything is deliberately generic, because these five rows have to
+# read sensibly against whichever 5-row sheet you pair them with.
+TEXT_BY_PROMO = {
+    "Headline": {
+        # Voice: plain and direct.
+        "promo.mp4": [
+            "Summer Mega Sale", "New Arrivals", "Flash Deal Today", "",
+            "These deals are unreal this weekend"],
+        # Voice: loud and urgent.
+        "promo_2.mp4": [
+            "Biggest Summer Blowout", "Just Dropped", "Today Only",
+            "Big Weekend Savings", "You are not ready for this drop"],
+        # Voice: calm and premium.
+        "promo_3.mp4": [
+            "Summer Clearance Is Live", "Fresh In This Week", "While It Lasts",
+            "The Weekend Edit", "Everyone is talking about these deals"],
+    },
+    "Subheading": {
+        "promo.mp4": [
+            "Up to 50% off everything", "Fresh styles every week",
+            "While stocks last", "Everything must go",
+            "Tap through and see the full range"],
+        "promo_2.mp4": [
+            "Half price, this week only", "New in every Thursday",
+            "Gone by tonight", "Nothing is staying on the shelf",
+            "Grab yours before every size sells out"],
+        "promo_3.mp4": [
+            "Selected lines reduced", "Restocked and ready",
+            "Limited quantities", "Final reductions now on",
+            "Take a look before the weekend is out"],
+    },
+    "Footer": {
+        "promo.mp4": [
+            "Offer ends June 30", "www.example.com", "Limited time only",
+            "Shop now before it ends", "Follow us for daily drops"],
+        "promo_2.mp4": [
+            "Ends Sunday at midnight", "shop.example.com", "Today only",
+            "Last chance this weekend", "New videos every single day"],
+        "promo_3.mp4": [
+            "While stocks last", "example.com/sale", "Until sold out",
+            "Closing soon", "Hit follow so you don't miss one"],
+    },
+}
+
+
+def make_text_grids(out_dir: Path, n_rows: int) -> list[tuple[str, Path]]:
+    """Write one per-promo text sheet per role, trimmed to the sheet's rows.
+
+    The row count has to match data.xlsx exactly — the app refuses a sheet that
+    disagrees, because row 1 here is row 1 there and a silent off-by-one would
+    put every video's text on the wrong video."""
+    written = []
+    for role, columns in TEXT_BY_PROMO.items():
+        frame = pd.DataFrame({name: texts[:n_rows]
+                              for name, texts in columns.items()})
+        path = out_dir / f"{role.lower()}_by_promo.xlsx"
+        frame.to_excel(path, sheet_name=role, index=False)
+        written.append((role, path))
+    return written
+
+
 def main() -> None:
     bg1 = OUT / "bg_blue.png"
     bg2 = OUT / "bg_sunset.png"
@@ -89,7 +178,8 @@ def main() -> None:
     bg2.unlink()
 
     make_cta(OUT / "cta.png")
-    make_video(OUT / "promo.mp4")
+    for name, source, tone in PROMOS:
+        make_video(OUT / name, source=source, tone=tone)
     make_cta_videos(OUT, count=5)
 
     rows = [
@@ -198,7 +288,25 @@ def main() -> None:
     ])
     auto.to_excel(OUT / "data_auto.xlsx", index=False)
 
+    grids = make_text_grids(OUT, len(df))
+
+    # Written and then checked with the app's own rules, so a sample that the
+    # Check button would reject can never be shipped: the demo of a strict
+    # feature has to survive the strictness.
+    import text_grids
+
+    promo_names = [name for name, _s, _t in PROMOS]
+    for role, path in grids:
+        report = text_grids.check_grid(
+            text_grids.read_grid(path, role), promo_names, len(df))
+        if report.errors:
+            raise SystemExit(f"{path.name} would be rejected by the app:\n  "
+                             + "\n  ".join(report.errors))
+
     print(f"Sample assets written to {OUT}")
+    print(f"  promos: {', '.join(promo_names)}")
+    print(f"  per-promo text: {', '.join(p.name for _r, p in grids)} "
+          f"({len(df)} rows x {len(PROMOS)} promos each)")
 
 
 if __name__ == "__main__":

@@ -63,6 +63,7 @@ import pandas as pd
 import batching
 import config
 import results
+import text_grids
 from batching import Slot
 from jobs import store
 from video_generator import RenderConfig, VideoGenerator
@@ -132,7 +133,9 @@ def _hashtag_override(job_id: str, params: dict) -> Optional[list[str]]:
 
 
 def _assign_names(job_id: str, slots: list[Slot], n_rows: int,
-                  df: pd.DataFrame, params: Optional[dict] = None) -> dict:
+                  df: pd.DataFrame, params: Optional[dict] = None,
+                  overrides: Optional[dict] = None,
+                  promo_for: Optional[dict] = None) -> dict:
     """Give every (batch, row) its own caption, hashtags and two filenames.
 
     A caption identifies one *video*, not one sheet row — ten batches of the
@@ -151,10 +154,17 @@ def _assign_names(job_id: str, slots: list[Slot], n_rows: int,
       3. the row's `Headline`, which is how files were named before captions
          existed — without this fallback a batch run with no pool would name
          every single video `video.mp4`
+
+    When a Headline grid was uploaded, step 3 reads the text that promo will
+    actually render rather than the main sheet's. Both would work — names are
+    de-duplicated either way — but a file called `001_main_two.mp4` whose video
+    says something else is a trap for whoever posts it.
     """
     from captions import naming
     from video_generator import _clean_str
 
+    overrides = overrides or {}
+    promo_for = promo_for or {}
     existing = {i["idx"]: i for i in store.list_items(job_id)}
     needed = [s for s in slots
               if not (existing.get(batching.item_index(s.batch, s.row, n_rows), {})
@@ -166,6 +176,13 @@ def _assign_names(job_id: str, slots: list[Slot], n_rows: int,
         if column not in df.columns:
             return ""
         return _clean_str(df.iloc[row_no - 1].get(column))
+
+    def _headline(slot: Slot) -> str:
+        """The Headline this particular video will show — the grid's when one
+        covers its promo, the sheet's otherwise."""
+        return text_grids.override_text(
+            overrides, "Headline", promo_for.get(slot, 0), slot.row
+        ) or _cell(slot.row, "Headline")
 
     # Only rows without a hand-written caption consume pool combinations —
     # drawing for all of them would burn the pool on captions never used.
@@ -203,7 +220,7 @@ def _assign_names(job_id: str, slots: list[Slot], n_rows: int,
             used_pool += 1
         else:
             # No pool: fall back to the pre-caption naming source.
-            caption, hashtags = _cell(slot.row, "Headline"), ""
+            caption, hashtags = _headline(slot), ""
             used_headline += 1
         if override is not None and not from_sheet[slot]:
             # Cycled rather than random so the spread is even and reproducible.
@@ -240,9 +257,12 @@ def _assign_names(job_id: str, slots: list[Slot], n_rows: int,
 # --------------------------------------------------------------------------- render
 
 def _render_batches(job: dict, df: pd.DataFrame, ws, n_batches: int,
-                    n_rows: int, workers: int) -> list[str]:
+                    n_rows: int, workers: int,
+                    overrides: Optional[dict] = None,
+                    promo_for: Optional[dict] = None) -> list[str]:
     """Render every outstanding item, one batch at a time."""
     job_id = job["id"]
+    overrides = overrides or {}
     params = job.get("params") or {}
     base_config = params.get("render_config") or {}
     batch_warnings: list[str] = []
@@ -263,9 +283,11 @@ def _render_batches(job: dict, df: pd.DataFrame, ws, n_batches: int,
 
     # Every video gets its own promo, spread evenly inside each batch — so a
     # batch is a mix of all of them rather than 1,000 variations of one.
-    all_slots = batching.plan_render(n_batches, n_rows)
-    promo_for = batching.assign_promos(all_slots, len(ws.video_paths) or 1,
-                                       seed=f"promo-{job_id}")
+    # Passed in by run(), which needs the same mapping to name the files.
+    if promo_for is None:
+        promo_for = batching.assign_promos(
+            batching.plan_render(n_batches, n_rows),
+            len(ws.video_paths) or 1, seed=f"promo-{job_id}")
 
     for batch in sorted(by_batch):
         items = by_batch[batch]
@@ -304,13 +326,19 @@ def _render_batches(job: dict, df: pd.DataFrame, ws, n_batches: int,
                 if message not in batch_warnings:
                     batch_warnings.append(message)
 
-            df_run, bg_warnings = generator.assign_backgrounds(df)
+            # The one place per-promo text enters the render. Applied before
+            # assign_backgrounds so the frame handed to render_row is a normal
+            # sheet — RowSpec.from_row reads row['Headline'] and has no idea a
+            # grid was involved, which is why nothing downstream changed.
+            df_promo = text_grids.apply_overrides(df, overrides, promo_idx)
+            df_run, bg_warnings = generator.assign_backgrounds(df_promo)
             for message in bg_warnings:
                 if message not in batch_warnings:
                     batch_warnings.append(message)
 
-            logger.info("Job %s: batch %d/%d — %d row(s) on promo %s",
-                        job_id, batch, n_batches, len(group), promo.name)
+            logger.info("Job %s: batch %d/%d — %d row(s) on promo %s%s",
+                        job_id, batch, n_batches, len(group), promo.name,
+                        " (per-promo text)" if df_promo is not df else "")
 
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = {}
@@ -871,23 +899,46 @@ def _upload_zips(job: dict, n_rows: int, n_folders: int, placement: dict) -> dic
 # --------------------------------------------------------------------------- manifests
 
 def _write_manifests(job_id: str, n_rows: int, n_folders: int,
-                     placement: dict) -> Path:
+                     placement: dict, df: Optional[pd.DataFrame] = None,
+                     overrides: Optional[dict] = None,
+                     promo_for: Optional[dict] = None) -> Path:
     """One sheet per output folder listing what actually landed in it.
 
     After mixing, the input sheet no longer describes any single folder, so the
     useful artifact is a per-folder manifest: what to post, with which caption,
-    under which filename."""
+    under which filename.
+
+    With per-promo text grids in play the input sheet no longer describes any
+    single *video* either — one row renders three different headlines — so the
+    text each one actually showed is recorded here as well. Only for the roles
+    that have a grid: on a run without them the columns would just repeat the
+    sheet."""
+    from video_generator import _clean_str
+
     root = store.job_dir(job_id)
     items = {i["idx"]: i for i in store.list_items(job_id)}
+    overrides = overrides or {}
+    promo_for = promo_for or {}
+
+    def _rendered_text(role: str, slot: Slot) -> str:
+        """What this video actually showed — the same grid-then-sheet
+        precedence apply_overrides uses, so a blank grid cell reports the main
+        sheet's text rather than an empty string it never rendered."""
+        text = text_grids.override_text(overrides, role,
+                                        promo_for.get(slot, 0), slot.row)
+        if text or df is None or role not in df.columns:
+            return text
+        return _clean_str(df.iloc[slot.row - 1].get(role))
 
     rows_by_folder: dict[int, list[dict]] = {}
     for idx, item in items.items():
         if item["render_status"] != store.ITEM_DONE:
             continue
         batch, row_no = batching.split_index(idx, n_rows)
-        folder = placement.get(Slot(batch=batch, row=row_no), 1)
+        slot = Slot(batch=batch, row=row_no)
+        folder = placement.get(slot, 1)
         meta = item.get("meta") or {}
-        rows_by_folder.setdefault(folder, []).append({
+        entry = {
             "Folder": batching.folder_name(folder),
             "Source_Batch": batch,
             "Sheet_Row": row_no,
@@ -897,7 +948,11 @@ def _write_manifests(job_id: str, n_rows: int, n_folders: int,
             "Long_Filename": meta.get("long_name", ""),
             "Promo": meta.get("promo", ""),
             "Drive_Uploaded": item.get("upload_status") == store.ITEM_DONE,
-        })
+        }
+        for role in text_grids.ROLES:
+            if overrides.get(role):
+                entry[role] = _rendered_text(role, slot)
+        rows_by_folder.setdefault(folder, []).append(entry)
 
     combined: list[dict] = []
     for folder in sorted(rows_by_folder):
@@ -936,6 +991,20 @@ def run(job: dict) -> dict:
     ws = workspace_from_dir(assets, work)
     slots = batching.plan_render(n_batches, n_rows)
 
+    # Which promo each video uses. Derived once and shared, because naming and
+    # rendering must agree about it — a file named from promo 2's headline and
+    # rendered with promo 1's would be worse than having no grids at all.
+    promo_for = batching.assign_promos(slots, len(ws.video_paths) or 1,
+                                       seed=f"promo-{job_id}")
+    # Per-promo Headline/Subheading/Footer text, resolved to promo indices at
+    # submit time — the uploaded promo filenames the columns were matched on do
+    # not survive staging. {} when no grids were uploaded.
+    overrides = text_grids.read_overrides(assets)
+    if overrides:
+        logger.info("Job %s: per-promo text for %s", job_id,
+                    ", ".join(f"{role} ({len(table)} promo(s))"
+                              for role, table in sorted(overrides.items())))
+
     # Register one item per (batch, row) — this is what makes resume work.
     store.add_items(job_id, [
         {"idx": batching.item_index(s.batch, s.row, n_rows), "name": "",
@@ -943,13 +1012,15 @@ def run(job: dict) -> dict:
         for s in slots
     ])
 
-    caption_info = _assign_names(job_id, slots, n_rows, df, params)
+    caption_info = _assign_names(job_id, slots, n_rows, df, params,
+                                 overrides=overrides, promo_for=promo_for)
     logger.info("Job %s: %d rows x %d batches = %d videos; names assigned: %s",
                 job_id, n_rows, n_batches, len(slots), caption_info.get("applied"))
 
     # The sheet keeps its Caption/Hashtags columns for the first batch, so it
     # still opens as a recognisable version of what was submitted.
-    batch_warnings = _render_batches(job, df, ws, n_batches, n_rows, workers)
+    batch_warnings = _render_batches(job, df, ws, n_batches, n_rows, workers,
+                                     overrides=overrides, promo_for=promo_for)
 
     placement = batching.mix_into_folders(slots, n_folders)
 
@@ -965,7 +1036,8 @@ def run(job: dict) -> dict:
     drive_result = _upload(job, n_rows, n_folders, placement)
 
     store.set_stage(job_id, "building manifests")
-    manifest = _write_manifests(job_id, n_rows, n_folders, placement)
+    manifest = _write_manifests(job_id, n_rows, n_folders, placement, df=df,
+                                overrides=overrides, promo_for=promo_for)
 
     items = store.list_items(job_id)
     records = [results.record_from_item(i) for i in items]

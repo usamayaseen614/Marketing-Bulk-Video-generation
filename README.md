@@ -14,7 +14,10 @@ Each output video is composed of:
    styles** (outline, drop shadow, neon glow) à la TikTok. Each text can optionally be given
    a **fixed fit box**: the text then re-wraps to the box's width and its font size is chosen
    so the whole block fills the box — line breaks added *and removed*, size grown *and*
-   shrunk — so headlines of wildly different lengths come out optically consistent
+   shrunk — so headlines of wildly different lengths come out optically consistent.
+   Upload several promo videos and each can be given **its own wording** for the same row
+   via an optional per-promo text sheet — same design, different words (see
+   *Different text per promo video*)
 4. An **optional CTA image** (PNG with transparency supported) at a configurable position and
    size, overridable **per row** via the `CTA_*` Excel columns, with a **configurable fade-in**.
    Leave the upload empty to skip the CTA-image layer entirely
@@ -27,8 +30,9 @@ Each output video is composed of:
    **dwell time** (5s by default), repeating **itself** a whole number of times to get
    there — a 3-second gif plays twice, for 6 seconds; it is never cut short. The sequence
    keeps drawing fresh gifs until the promo video ends. Gifs are **contain-fitted**: scaled
-   down to sit inside the box, never cropped or stretched, and **never upscaled**, with
-   whatever is behind showing through the space around them
+   to the largest size that sits inside the box — **enlarged** when smaller than it, shrunk
+   when bigger — never cropped or stretched, with whatever is behind showing through the
+   space the aspect ratio leaves over
 
 Output: H.264 MP4, 30 fps, `yuv420p`, AAC audio, `+faststart` — upload-ready for social platforms.
 
@@ -63,11 +67,26 @@ python create_sample_assets.py
 ```
 
 This creates a `sample_assets/` folder with a demo `data.xlsx`, `backgrounds.zip`,
-`promo.mp4`, `cta.png`, and five `cta_video_*.mp4` clips you can upload straight into the app. (Row 2
+three promo videos (`promo.mp4`, `promo_2.mp4`, `promo_3.mp4`), `cta.png`, and five
+`cta_video_*.mp4` clips you can upload straight into the app. (Row 2
 intentionally references a missing background to demonstrate per-row error handling; other
 rows show off custom fonts, background boxes, and the outline/shadow/neon styles.) There is
 also `data_auto.xlsx` — just the three text columns, nothing else — to try the fully
 automatic mode: random backgrounds, sizes, colors, positions, fonts, and styles.
+
+> ⚠️ It **overwrites** `data.xlsx`, `data_auto.xlsx` and `backgrounds.zip` in that folder.
+> Move your own sheet somewhere else first if one is sitting there.
+
+To try **per-promo text**, it also writes `headline_by_promo.xlsx`,
+`subheading_by_promo.xlsx` and `footer_by_promo.xlsx` — one column per promo video above,
+five rows to line up with the five-row demo sheet (`data.xlsx`, or the `sample_5_videos.xlsx`
+already in the folder). Upload all three promo videos, the main sheet, and these three
+sheets, then hit **🔍 Check promo names against these sheets**: every column resolves, and
+the same row comes out reading *Summer Mega Sale* / *Biggest Summer Blowout* /
+*Summer Clearance Is Live* depending on which promo it landed on. Row 4 of `promo.mp4` in the
+Headline sheet is blank on purpose, to show a cell falling back to the main Excel. If your own
+sheet has a different number of rows, use the **template** buttons in the app instead — they
+size themselves to your sheet and your promo filenames.
 
 ## Excel format
 
@@ -90,7 +109,7 @@ rows alone determines how many videos are generated:
 | `CTA_Video_Speed` | Playback speed for **every** clip in the row at once — a shortcut for setting all of `CTA_Video_Speed_<n>`. A specific `CTA_Video_Speed_<n>` cell overrides it. Also the speed used by fill clips (see *Keep clips playing to fill the whole video*). **Blank/absent = normal / the sidebar per-clip defaults** | `1.5` |
 | `CTA_Clip_1` … `CTA_Clip_10` | Pin which sample plays in clip position 1…N for this video, by file name (with or without extension). **Blank/absent = a random sample from that position's pool** | `intro_a.mp4` |
 | `GIF_X` / `GIF_Y` | **Top-left corner** of the gif box, per row. Rounded down to an even pixel so the chroma planes stay aligned. **Blank/absent = the sidebar default** | `60` / `560` |
-| `GIF_Width` / `GIF_Height` | Size of the gif box. Each gif is **contain-fitted** into it — scaled down to fit, never cropped, never stretched, and never upscaled, so a gif smaller than the box keeps its own size. **Blank/absent = the sidebar default** | `360` / `360` |
+| `GIF_Width` / `GIF_Height` | Size of the gif box. Each gif is **contain-fitted** into it — scaled up or down until one side touches the edge, never cropped and never stretched, so the box sets the gif's size whatever the source resolution. **Blank/absent = the sidebar default** | `360` / `360` |
 | `GIF_Fade_Start` / `GIF_Fade_Duration` | Fade-in timing for the gif layer, in **seconds**. Applies to the first gif only. **Blank/absent = the sidebar default (0/0 = visible immediately)** | `0.5` / `0.5` |
 | `Headline` | Headline text (empty = skipped) | `Summer Mega Sale` |
 | `Headline_Width` / `Headline_Height` | Optional **fit box**, in canvas pixels, **centred on `Headline_X`/`Headline_Y`**. Set both and the box drives the type: the text re-wraps to the width and the font size is chosen so the painted block (glyphs *plus* any outline/shadow/glow) fills the box. `Headline_Size` is then ignored — the box computes it. **Blank/absent, or either one alone = the sidebar default, else the classic behaviour** (`Headline_Size`, wrapped to the canvas). Same columns exist for Subheading and Footer | `800` / `300` |
@@ -237,6 +256,50 @@ Notes:
   Leave either dimension blank and that text behaves exactly as it always has.
 - Output files are named `001_Headline_Text.mp4` (row number + sanitized headline).
 
+### Different text per promo video
+
+A row's `Headline` is one cell, so every promo video rendered from that row says the
+same thing. Upload a **per-promo text sheet** to change that: 5 rows × 3 promos becomes
+15 videos with 15 different headlines instead of 5 repeated three times.
+
+Under *1. Upload assets* → **Per-promo heading, subheading and footer text (optional)**
+there are three separate uploaders, one each for Headline, Subheading and Footer. Each
+takes a workbook in this shape — **column headers are your promo video filenames**, rows
+line up with the rows of the main Excel:
+
+| video 1.mp4 | video 2.mp4 | video 3.mp4 |
+|---|---|---|
+| pov | omsdhajkl | askfjnan |
+| awsdlan | salfjnal | sakfjn |
+
+So the video made from **row 2** on **video 3.mp4** reads `sakfjn`.
+
+- **Only the words change.** Size, font, colour, opacity, position, background box, fit
+  box and every other `<Role>_*` column still come from the main Excel and the sidebar —
+  one design, different text. That is the whole point of keeping them in separate sheets.
+  (Cells you leave *blank* in the main Excel are randomized per video as they always have
+  been — a blank `Headline_Color` still draws a different colour on each promo, because
+  every render pass reseeds. Set the value in the main Excel to pin it across all of them.)
+  Backgrounds are unaffected: a row keeps the same background image on every promo.
+- **Upload only what you need.** A Headline sheet on its own leaves Subheading and Footer
+  coming from the main Excel as before.
+- **Name matching is forgiving**: case, spaces, separators and the `.mp4` extension are
+  all ignored, so `video 1`, `Video_1` and `video-1.mp4` all name `video 1.mp4`.
+- **🔍 Check promo names against these sheets** shows a table of which column feeds which
+  promo before you commit to a render. A column matching no uploaded promo, two columns
+  naming the same promo, or a row count that differs from the main Excel are **errors and
+  refuse the batch** — the alternative is thousands of videos carrying the wrong words and
+  looking perfectly successful. A promo with *no* column is only a warning: it falls back
+  to the main Excel.
+- **A blank cell falls back** to the main Excel's text for that row, so you can override
+  just the ones you care about.
+- **Download a template** (buttons under the uploaders) to get a workbook already headed
+  with your uploaded promo filenames and the right number of rows. For a filled-in example
+  to look at, run `python create_sample_assets.py` — see *Try it with sample data*.
+- Previews and **🎬 Render Row** show the text for the promo picked in *Promo video*, so
+  what you see is the pairing the batch will actually produce. `render_manifest.xlsx`
+  gains a column per overridden role recording what each finished video actually said.
+
 ## Sidebar settings
 
 | Setting | Purpose |
@@ -272,11 +335,17 @@ Notes:
 1. Upload the Excel sheet and a promo video (background ZIP and CTA image are optional —
    without backgrounds, videos render on the sidebar's background color).
    The Excel is validated immediately — missing columns are listed.
+   Optionally open **Per-promo heading, subheading and footer text** and upload a sheet
+   per role to give each promo video its own wording, then click **🔍 Check promo names
+   against these sheets** to confirm every column lines up with an uploaded promo
+   (see *Different text per promo video*).
 2. Pick a row number and click **👁️ Preview Row** — an interactive preview opens.
    **Drag** the video box, the CTA image, the CTA video box, the GIF box, or any text to
    reposition it. The GIF box keeps a permanent dashed outline (every other element only
-   outlines on hover) because a contain-fitted gif is never upscaled — a small gif leaves
-   most of its box empty and see-through, so without a visible edge there is nothing to grab.
+   outlines on hover) because a contain-fitted gif fills the box on one axis only — unless
+   its aspect ratio matches the box exactly, the rest stays empty and see-through, so along
+   those sides there is nothing to grab. Resizing the box resizes the gif with it, up as
+   well as down.
    The box shows the **first** gif of the sequence and cannot show the rotation.
    A text with a **fit box** shows it as a black dashed outline, and its corner handle
    resizes the *box* rather than the font — the type re-fits when you preview again, because
@@ -608,7 +677,7 @@ everything in a single pass per row:
 [txt][ctav]overlay=CVX:CVY[txtv]
 # optional GIFs — each claimed with `-stream_loop <repeats-1>` so it replays whole before the
 # graph sees it, then contain-fitted and padded transparent to a common size for concat:
-[N:v]fps=F,format=rgba,scale='min(GW,iw)':'min(GH,ih)':decrease:force_divisible_by=2,
+[N:v]fps=F,format=rgba,scale=GW:GH:force_original_aspect_ratio=decrease:force_divisible_by=2,
      pad=GW:GH:'trunc((GW-iw)/4)*2':'trunc((GH-ih)/4)*2':color=0x00000000,setsar=1[gv0]; ...
 [gv0][gv1]...concat=n=N:v=1:a=0[gseq] ; [gseq]fade=...:alpha=1[gifl]
 [txtv][gifl]overlay=GX:GY[withgifs]
@@ -622,8 +691,11 @@ Layers are stacked in ascending z-index order, so the actual chain depends on th
 
 Three things about the gif layer are load-bearing and easy to undo by accident:
 
-- **`min(GW,iw)` is the no-upscale rule.** A bare `force_original_aspect_ratio=decrease`
-  *enlarges* anything smaller than the box, which is the opposite of what this layer promises.
+- **`force_original_aspect_ratio=decrease` is what makes the box authoritative.** It fits the
+  gif inside `GW x GH` in *both* directions — shrinking a big gif and enlarging a small one —
+  so the box sets the on-screen size regardless of the source resolution. Wrapping the
+  dimensions in `min(GW,iw)`/`min(GH,ih)` caps the fit at the source size and silently leaves
+  low-res gifs small; that was the old behaviour and it is not what this layer promises.
 - **The `pad` is not cosmetic.** `concat` rejects inputs of differing sizes, and contain-fitting
   gifs of assorted shapes produces exactly that. `format=rgba` must come *before* the pad, or
   the transparent colour flattens to opaque black and the box becomes a visible plate.
