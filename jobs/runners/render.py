@@ -467,6 +467,9 @@ def _upload_files(job: dict, n_rows: int, n_folders: int, placement: dict) -> di
     # A job may carry its own destination, since the VM's .env cannot be edited
     # per batch. Blank falls back to the configured default.
     drive.set_target(destination)
+    # Clears last run's "everything is spent" flag, and returns to the first
+    # identity if the last switch is more than a rolling window old.
+    drive.begin_run()
 
     try:
         label = job.get("label") or job_id
@@ -630,6 +633,21 @@ def _upload_files(job: dict, n_rows: int, n_folders: int, placement: dict) -> di
 PLATFORMS = ("yt", "tk")
 
 
+def _zip_folder_record(published: dict, fallback_link: str) -> dict:
+    """The zip_uploads entry for one output folder.
+
+    Shared by the in-loop persist and the end-of-folder one so the two cannot
+    drift. `complete` means every platform, not just the ones asked for today —
+    it is what tells a later run there is nothing left to publish here."""
+    return {
+        "complete": all(p in published for p in PLATFORMS),
+        "platforms": published,
+        "link": (published.get("tk") or published.get("yt") or {}).get("link")
+                or fallback_link,
+        "archives": list(published.values()),
+    }
+
+
 def _selected_platforms(params: dict) -> tuple[str, ...]:
     """Which of the two names this run publishes, in publishing order.
 
@@ -710,6 +728,9 @@ def _upload_zips(job: dict, n_rows: int, n_folders: int, placement: dict) -> dic
     from integrations import drive
 
     drive.set_target(destination)
+    # Clears last run's "everything is spent" flag, and returns to the first
+    # identity if the last switch is more than a rolling window old.
+    drive.begin_run()
 
     try:
         label = job.get("label") or job_id
@@ -776,6 +797,20 @@ def _upload_zips(job: dict, n_rows: int, n_folders: int, placement: dict) -> dic
                                     drive_link=recorded.get("link"))
             continue
 
+        if drive.identities_spent():
+            # Every configured identity has been confirmed out of allowance.
+            # Without this the remaining folders each burn a fresh ~8-minute
+            # retry budget on refusals that cannot succeed — hours of a night
+            # spent waiting for a known answer.
+            errors.append(
+                "Every Drive upload account is out of its 750 GB/24h "
+                f"allowance — {total_folders - position + 1} folder(s) were not "
+                "published. Requeue the job once the allowance has rolled over; "
+                "what already landed is recorded and will be skipped.")
+            logger.warning("Job %s: all Drive identities are spent — stopping "
+                           "the upload phase at %s", job_id, name)
+            break
+
         store.set_stage(job_id, f"packing {name} ({position}/{total_folders})")
         prepared = _zip_entries(items, n_rows, videos_root)
 
@@ -815,8 +850,9 @@ def _upload_zips(job: dict, n_rows: int, n_folders: int, placement: dict) -> dic
                 response = drive.upload_verified(
                     info["path"], folder_ids[folder], f"{platform}.zip",
                     drive_id=shared_drive_id)
-                # Recorded per platform the moment it lands, so a run that dies
-                # after tk.zip and before yt.zip does not re-send tk.zip.
+                # Recorded and PERSISTED per platform the moment it lands, so a
+                # run that dies — or runs out of allowance — after tk.zip and
+                # before yt.zip does not re-send tk.zip.
                 published[platform] = {
                     "folder": name, "platform": platform,
                     "id": response.get("id"), "files": info["files"],
@@ -824,6 +860,16 @@ def _upload_zips(job: dict, n_rows: int, n_folders: int, placement: dict) -> dic
                     "link": response.get("webViewLink") or "",
                 }
                 archives.append(published[platform])
+                # Persisted HERE, per platform, not only after the loop. The
+                # 750 GB ceiling is hit mid-folder by definition, and the except
+                # below `continue`s past the end-of-folder persist — so writing
+                # only there means a landed tk.zip is forgotten when yt.zip is
+                # refused, and the next run re-sends 15-30 GB the previous
+                # identity already delivered. The comment above promised this
+                # behaviour; this is what makes it true.
+                state[str(folder)] = _zip_folder_record(published, link)
+                params = store.merge_job_params(job_id, zip_uploads=state)
+                job["params"] = params
         except Exception as exc:  # noqa: BLE001 — one folder must not lose the rest
             logger.exception("Job %s: could not publish %s", job_id, name)
             errors.append(f"{name}: {exc}")
@@ -833,15 +879,8 @@ def _upload_zips(job: dict, n_rows: int, n_folders: int, placement: dict) -> dic
             shutil.rmtree(pack_root / name, ignore_errors=True)
             continue
 
-        # `complete` means every platform, not just the ones asked for today —
-        # it is what tells a later run there is nothing left to publish here.
-        every = all(p in published for p in PLATFORMS)
-        recorded = {
-            "complete": every,
-            "platforms": published,
-            "link": (published.get("tk") or published.get("yt") or {}).get("link") or link,
-            "archives": list(published.values()),
-        }
+        recorded = _zip_folder_record(published, link)
+        every = recorded["complete"]
         state[str(folder)] = recorded
         # Persisted BEFORE the MP4s are deleted: a crash in the tidy-up below
         # must not look like a folder that was never published.

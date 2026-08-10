@@ -180,7 +180,11 @@ print("upload failure: that folder's videos kept, the other folder still freed")
 fail_on["name"] = None
 uploads.clear()
 render._upload(store.get_job(job2), N_ROWS, N_FOLDERS, PLACEMENT)
-assert {u["name"] for u in uploads} == {"yt.zip", "tk.zip"}
+# Only tk.zip. yt.zip landed before the failure and was persisted the moment it
+# did, so the retry does not re-send it — at 15-30 GB an archive that is the
+# difference between resuming and starting the night again, and the reason the
+# per-platform record is written inside the upload loop rather than after it.
+assert {u["name"] for u in uploads} == {"tk.zip"}, uploads
 assert {u["parent"].rsplit("/", 1)[-1] for u in uploads} == {"batch_01"}, \
     "the retry re-uploaded the folder that was already published"
 assert all(i["upload_status"] == store.ITEM_DONE for i in store.list_items(job2))

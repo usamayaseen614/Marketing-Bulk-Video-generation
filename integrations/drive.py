@@ -56,9 +56,44 @@ _folder_lock = threading.Lock()
 # Facts announced once per process rather than once per worker thread.
 _announced: set[str] = set()
 
+# Which identity is publishing right now, and a counter that invalidates every
+# thread's cached client when that changes.
+#
+# A generation counter rather than a registry of live threads: threads cannot be
+# reached to have their cache cleared for them, and the upload pool's workers
+# stay alive for the whole upload phase, so each one would otherwise pin the
+# spent identity's client until the run ended. Stamping the client with the
+# generation it was built under makes the check a lazy, allocation-free integer
+# compare on the hot path.
+_identity_lock = threading.Lock()
+_identity_index = 0
+_identity_generation = 0
+_identity_switched_at = 0.0
+_identities_spent = False
+
+# After a full rolling window, assume the head of the list has capacity again
+# and start the next run on it. Costs one rediscovery (~8 minutes, once) if it
+# does not, and is what stops a worker that has run for a week staying pinned to
+# the shadow long after the primary refilled.
+_IDENTITY_RESET_SECONDS = 24 * 3600
+
 
 class DriveError(RuntimeError):
     """Raised for configuration problems worth showing the user verbatim."""
+
+
+class QuotaExhausted(DriveError):
+    """Drive refused a transfer with 403 for the entire retry budget.
+
+    A subclass, so every existing `except DriveError` keeps catching it and
+    nothing downstream changes. It exists because the failover has to tell this
+    apart from upload_verified()'s truncation error, which is also a DriveError
+    and must never be retried on another account.
+
+    Only 403 gets this class. A 5xx or 429 exhausting the same budget is Drive
+    being unwell, and a second service account would be refused by it in exactly
+    the same way — switching there spends the shadow's allowance on nothing.
+    """
 
 
 def _no_credentials_help(what: str) -> str:
@@ -131,9 +166,69 @@ def _impersonate(source, target: str):
     )
 
 
+def identity_ring() -> list[str]:
+    """Who publishes, in order. "" means the VM's own account.
+
+    Rebuilt from config on every call rather than captured at import, because
+    that is what lets a test assign config.DRIVE_IMPERSONATE and have the next
+    credential build see it."""
+    ring = [config.DRIVE_IMPERSONATE]
+    for entry in config.DRIVE_IMPERSONATE_FALLBACKS:
+        if entry not in ring:
+            ring.append(entry)
+    return ring
+
+
+def current_identity() -> str:
+    """The entry in force for the next credential build. No I/O."""
+    ring = identity_ring()
+    return ring[_identity_index] if _identity_index < len(ring) else ring[-1]
+
+
+def _identity_label(email: str) -> str:
+    return email or "the VM's own service account"
+
+
+def _use_identity(index: int) -> None:
+    """Point every thread at ring entry `index` on its next Drive call.
+
+    Bumping the generation is what makes that true: the client each thread is
+    holding was built from the old credentials and would keep using them.
+    Callers hold _identity_lock."""
+    global _identity_index, _identity_generation
+    _identity_index = index
+    _identity_generation += 1
+
+
+def identities_spent() -> bool:
+    """True once every identity has been confirmed out of allowance this run.
+
+    Callers use it to stop early instead of paying a fresh ~8-minute retry
+    budget per remaining file for refusals that cannot succeed."""
+    return _identities_spent
+
+
+def begin_run() -> None:
+    """Called once at the start of an upload phase.
+
+    Clears the spent flag — it is a fact about one run, and this process may
+    serve jobs for days — and returns to the head of the list if the last switch
+    is older than a full rolling window, since by then the account we moved off
+    has probably refilled and is the one we would rather spend."""
+    global _identities_spent, _identity_switched_at
+    with _identity_lock:
+        _identities_spent = False
+        if _identity_index and (time.time() - _identity_switched_at) > _IDENTITY_RESET_SECONDS:
+            _use_identity(0)
+            _identity_switched_at = 0.0
+            logger.info("Over 24h since the last Drive identity switch — "
+                        "starting this run as %s again.",
+                        _identity_label(current_identity()))
+
+
 def _credentials():
     google_auth, service_account, _, _ = _import_google()
-    target = config.DRIVE_IMPERSONATE
+    target = current_identity()
     # When impersonating, the credentials we start from are only used to ASK
     # for a token, so they need cloud-platform rather than Drive.
     scopes = _IMPERSONATION_SCOPES if target else SCOPES
@@ -154,8 +249,12 @@ def acting_identity() -> str:
     """Which account this process publishes as — the thing a 750 GB allowance
     is charged to, and therefore the first thing worth knowing when uploads
     start being refused."""
-    if config.DRIVE_IMPERSONATE:
-        return config.DRIVE_IMPERSONATE
+    # current_identity(), not the configured value: after a failover this must
+    # name the account actually spending allowance right now, not the one in
+    # .env. It is the operator's only window into that.
+    target = current_identity()
+    if target:
+        return target
     email = getattr(_credentials(), "service_account_email", "")
     # Compute Engine credentials report the literal "default" until they have
     # been refreshed, which says nothing useful.
@@ -166,12 +265,24 @@ def acting_identity() -> str:
 
 def service():
     """The Drive client for the calling thread."""
-    existing = getattr(_local, "service", None)
-    if existing is not None:
-        return existing
+    cached = getattr(_local, "service", None)
+    if cached is not None and cached[0] == _identity_generation:
+        return cached[1]
+    # Read BEFORE building: a switch landing while these credentials are minted
+    # must leave this client marked stale rather than silently adopted. An int
+    # read needs no lock, and a stale read costs one call on the old client,
+    # which simply fails over again.
+    generation = _identity_generation
+    # Both of these are facts about the OLD account, not about the ids. A
+    # different service account may be a MEMBER of the Shared Drive where the
+    # last one was only a folder grantee, or the reverse: _local.target caches
+    # which branch resolve_target() took and _local.no_corpus caches which
+    # drives 404 as a search corpus — and corpus queries require membership.
+    _local.target = None
+    _local.no_corpus = set()
     _, _, build, _ = _import_google()
     built = build("drive", "v3", credentials=_credentials(), cache_discovery=False)
-    _local.service = built
+    _local.service = (generation, built)
     return built
 
 
@@ -233,11 +344,16 @@ def resolve_target() -> tuple[str, str]:
             "you can paste the folder URL straight from your browser."
         )
 
+    # service() first, deliberately: it is what notices the publishing identity
+    # changed and drops this thread's caches. Whether a destination resolves as
+    # a Shared Drive or as a folder inside one is a fact about the ACCOUNT
+    # asking, so a resolution made by the spent identity must not be handed to
+    # its replacement. Warm, this is a getattr and an int compare.
+    svc = service()
     cached = getattr(_local, "target", None)
     if cached and cached[0] == configured:
         return cached[1], cached[2]
 
-    svc = service()
     drive_id = parent_id = ""
 
     # Is it a Shared Drive itself?
@@ -460,9 +576,11 @@ QUOTA_HELP = (
     "**750 GB into Drive per rolling 24 hours**. Uploads AND server-side "
     "copies both count against it.\n\n"
     "Because the allowance is **per identity**, publishing as a second service "
-    "account gets a second, untouched one: set BVG_DRIVE_IMPERSONATE to its "
-    "address (see DEPLOYMENT.md 5b). That is also the way to publish tonight "
-    "rather than tomorrow.\n\n"
+    "account gets a second, untouched one. Set BVG_DRIVE_IMPERSONATE_FALLBACKS "
+    "to its address and the app moves to it automatically the moment this one "
+    "is refused for a full retry budget — see DEPLOYMENT.md 5b-bis. If you are "
+    "reading this WITH fallbacks configured, every account in the list has "
+    "already been tried.\n\n"
     "Past the allowance, Drive refuses uploads with `403 User rate limit "
     "exceeded` while everything else — creating folders, listing, renaming — "
     "keeps working normally. **A tiny file failing while folders can still be "
@@ -490,6 +608,24 @@ def _throttle_help(what: str, exc: Exception) -> str:
     )
 
 
+def _exhausted(what: str, exc: Exception) -> DriveError:
+    """The give-up error, typed by whether it can mean the allowance is gone.
+
+    Drive returns the SAME `403 userRateLimitExceeded` for "you are going too
+    fast right now" and "your 750 GB for the last 24 hours is spent" — there is
+    no field separating them and no API for how much is left (see QUOTA_HELP).
+    What separates them is time, and the loop above has just spent its whole
+    budget, which a burst limit does not survive. A 5xx or 429 exhausting the
+    same budget means something else entirely, so it keeps the plain DriveError
+    it raises today and can never move the identity.
+
+    The message is unchanged either way.
+    """
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    kind = QuotaExhausted if status == 403 else DriveError
+    return kind(_throttle_help(what, exc))
+
+
 def _retry_call(operation: Callable[[], object], what: str):
     """Run one Drive call, riding out throttling.
 
@@ -509,7 +645,7 @@ def _retry_call(operation: Callable[[], object], what: str):
                 raise
             tries += 1
             if tries >= attempts:
-                raise DriveError(_throttle_help(what, exc)) from exc
+                raise _exhausted(what, exc) from exc
             # Exponential, capped, with jitter — several uploads backing off in
             # lockstep would retry in lockstep and be throttled together.
             delay = min(config.DRIVE_RETRY_MAX_SLEEP, 2 ** tries)
@@ -538,7 +674,7 @@ def _retry_call_refused(operation: Callable[[], object], what: str):
             tries += 1
             if not refused or tries >= attempts:
                 if refused:
-                    raise DriveError(_throttle_help(what, exc)) from exc
+                    raise _exhausted(what, exc) from exc
                 raise
             delay = min(config.DRIVE_RETRY_MAX_SLEEP, 2 ** tries)
             delay += random.uniform(0, min(1.0, delay / 4))
@@ -562,6 +698,105 @@ def _run_resumable(request, what: str = "upload") -> dict:
     return response
 
 
+def _allowance_probe(parent_id: str) -> bool:
+    """True when even 2 bytes is refused — the signature of a spent allowance.
+
+    This is the second half of the failover trigger and the only discriminator
+    that exists. Past the 750 GB/24h ceiling Drive refuses uploads while folder
+    creation, listing and renaming keep working, so a tiny file failing is the
+    signature (QUOTA_HELP, above; check_access uses exactly this probe). A burst
+    limit caps THROUGHPUT, so 2 bytes goes straight through and we stay put.
+
+    Honest about the edge: a burst severe enough to survive the whole ~8-minute
+    retry budget AND to refuse 2 bytes right now reads as exhaustion and
+    switches early. That trade is taken deliberately — an early switch costs
+    some of the shadow's allowance and is undone by a restart, while a missed
+    switch is the dead 3am run this whole thing exists to prevent.
+
+    A refusal that is not a 403 means Drive is unwell rather than out of
+    allowance, and a second account fares no better, so it counts as "fine".
+    """
+    if not parent_id:
+        # Nothing to write into (copy_file without an explicit parent). The
+        # spent retry budget stands on its own.
+        return True
+    import io as _io
+
+    from googleapiclient.http import MediaIoBaseUpload
+
+    try:
+        probe = service().files().create(
+            body={"name": "_allowance_probe.txt", "parents": [parent_id]},
+            media_body=MediaIoBaseUpload(_io.BytesIO(b"ok"), mimetype="text/plain"),
+            fields="id", supportsAllDrives=True).execute()
+    except Exception as exc:  # noqa: BLE001
+        status = getattr(getattr(exc, "resp", None), "status", None)
+        if status == 403 and _is_throttled(exc):
+            return True
+        logger.warning("The 2-byte allowance probe in %s failed for a reason "
+                       "that is not the allowance — staying as %s. Raw error: %s",
+                       parent_id, _identity_label(current_identity()), exc)
+        return False
+    # Litter, not evidence. Best effort, exactly like check_access's cleanup.
+    try:
+        service().files().delete(fileId=probe["id"],
+                                 supportsAllDrives=True).execute()
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
+def _with_failover(attempt: Callable[[], object], what: str, parent_id: str = ""):
+    """Run one whole Drive write, moving to the next identity when this one's
+    750 GB allowance is gone.
+
+    Whole-operation and REBUILT, never resumed: a resumable upload session
+    belongs to the credentials that opened it, so the next identity cannot
+    continue a transfer the last one started and the file goes again from byte
+    zero. Affordable only because the switch is sticky — it happens once per
+    identity per process, not once per file.
+
+    Restarting is safe because of what the callers already do. upload_or_replace
+    overwrites a same-named file rather than adding a second one, so the partial
+    the spent identity left behind is replaced. copy_file is non-idempotent, but
+    the only error that reaches here is one Drive explicitly REFUSED with a
+    403 — it stated it did not act, which is the same reasoning that lets
+    _retry_call_refused retry it at all.
+    """
+    global _identities_spent, _identity_switched_at
+    while True:
+        # Captured before the attempt so a switch another thread made while we
+        # were uploading is recognised as theirs rather than counted as ours.
+        index = _identity_index
+        try:
+            return attempt()
+        except QuotaExhausted:
+            # Serialised, because the upload pool runs eight wide and all eight
+            # workers reach the wall within a minute of each other. Whoever gets
+            # here second finds the switch already made and just retries, so one
+            # wall costs one step, not eight.
+            with _identity_lock:
+                if index < _identity_index:
+                    continue
+                ring = identity_ring()
+                if len(ring) < 2:
+                    raise  # nothing configured to fail over to
+                if not _allowance_probe(parent_id):
+                    raise  # a tiny write still lands: throttling, not the ceiling
+                if _identity_index + 1 >= len(ring):
+                    _identities_spent = True
+                    raise
+                spent = current_identity()
+                _use_identity(_identity_index + 1)
+                _identity_switched_at = time.time()
+                logger.warning(
+                    "Drive refused the %s as %s for the full retry budget and "
+                    "refuses a 2-byte test file too — its 750 GB/24h allowance "
+                    "is spent. Publishing as %s from now on.",
+                    what, _identity_label(spent),
+                    _identity_label(current_identity()))
+
+
 def upload_file(path: Path, parent_id: str, name: Optional[str] = None) -> dict:
     """Resumable upload of one file. Returns {id, name, size, webViewLink}."""
     _, _, _, MediaFileUpload = _import_google()
@@ -569,15 +804,23 @@ def upload_file(path: Path, parent_id: str, name: Optional[str] = None) -> dict:
     if not path.is_file():
         raise DriveError(f"File to upload does not exist: {path}")
 
-    media = MediaFileUpload(
-        str(path), chunksize=config.DRIVE_UPLOAD_CHUNK_BYTES, resumable=True)
-    request = service().files().create(
-        body={"name": name or path.name, "parents": [parent_id]},
-        media_body=media,
-        fields=FILE_FIELDS,
-        supportsAllDrives=True,
-    )
-    return _run_resumable(request, f"upload of {name or path.name}")
+    label = f"upload of {name or path.name}"
+
+    def _attempt():
+        # Both rebuilt per attempt: MediaFileUpload holds a file handle at an
+        # offset and the request holds a resumable session URI, and neither
+        # survives a change of identity.
+        media = MediaFileUpload(
+            str(path), chunksize=config.DRIVE_UPLOAD_CHUNK_BYTES, resumable=True)
+        request = service().files().create(
+            body={"name": name or path.name, "parents": [parent_id]},
+            media_body=media,
+            fields=FILE_FIELDS,
+            supportsAllDrives=True,
+        )
+        return _run_resumable(request, label)
+
+    return _with_failover(_attempt, label, parent_id)
 
 
 def upload_or_replace(path: Path, parent_id: str, name: str,
@@ -599,20 +842,30 @@ def upload_or_replace(path: Path, parent_id: str, name: str,
     if not path.is_file():
         raise DriveError(f"File to upload does not exist: {path}")
 
-    existing = _retry_call(lambda: find_file(name, parent_id, drive_id=drive_id),
-                           f"lookup of {name}")
-    media = MediaFileUpload(
-        str(path), chunksize=config.DRIVE_UPLOAD_CHUNK_BYTES, resumable=True)
-    if existing:
-        logger.info("Replacing the existing %s in %s", name, parent_id)
-        request = service().files().update(
-            fileId=existing["id"], media_body=media,
-            fields=FILE_FIELDS, supportsAllDrives=True)
-    else:
-        request = service().files().create(
-            body={"name": name, "parents": [parent_id]}, media_body=media,
-            fields=FILE_FIELDS, supportsAllDrives=True)
-    return _run_resumable(request, f"upload of {name}")
+    label = f"upload of {name}"
+
+    def _attempt():
+        # The lookup is INSIDE the retry, not hoisted: after a failover it has
+        # to be redone by the new identity — both because the spent one may
+        # have left a partial file under this name, and because _search's
+        # corpus fallback is a per-account fact (membership, not the id).
+        existing = _retry_call(
+            lambda: find_file(name, parent_id, drive_id=drive_id),
+            f"lookup of {name}")
+        media = MediaFileUpload(
+            str(path), chunksize=config.DRIVE_UPLOAD_CHUNK_BYTES, resumable=True)
+        if existing:
+            logger.info("Replacing the existing %s in %s", name, parent_id)
+            request = service().files().update(
+                fileId=existing["id"], media_body=media,
+                fields=FILE_FIELDS, supportsAllDrives=True)
+        else:
+            request = service().files().create(
+                body={"name": name, "parents": [parent_id]}, media_body=media,
+                fields=FILE_FIELDS, supportsAllDrives=True)
+        return _run_resumable(request, label)
+
+    return _with_failover(_attempt, label, parent_id)
 
 
 def upload_verified(path: Path, parent_id: str, name: str,
@@ -658,12 +911,22 @@ def copy_file(file_id: str, new_name: str, parent_id: Optional[str] = None) -> d
     # there is no possibility the copy happened anyway. Worth separating,
     # because copies count against the same 750 GB/24h allowance as uploads and
     # are therefore exactly what gets throttled on a large night.
-    request = service().files().copy(
-        fileId=file_id, body=body,
-        fields="id, name, size, webViewLink",
-        supportsAllDrives=True,
-    )
-    return _retry_call_refused(lambda: request.execute(), f"copy to {new_name}")
+    #
+    # A failover only ever re-issues a copy Drive answered with a 403, which is
+    # the same "it stated it did not act" reasoning as above — a 5xx or a
+    # dropped connection raises a plain DriveError, never QuotaExhausted, and
+    # still surfaces to the item-level retry behind find_file().
+    label = f"copy to {new_name}"
+
+    def _attempt():
+        request = service().files().copy(
+            fileId=file_id, body=body,
+            fields="id, name, size, webViewLink",
+            supportsAllDrives=True,
+        )
+        return _retry_call_refused(lambda: request.execute(), label)
+
+    return _with_failover(_attempt, label, parent_id or "")
 
 
 def find_file(name: str, parent_id: str,
@@ -1084,7 +1347,37 @@ def check_access(target: Optional[str] = None) -> tuple[bool, str]:
     if target is not None:
         set_target(target)
     try:
-        return _check_access_inner()
+        ring = identity_ring()
+        if len(ring) < 2:
+            return _check_access_inner()
+        # Every identity, not just the one in force. A fallback's Shared Drive
+        # membership is a MANUAL setup step and the one people forget.
+        # Unverified, failover turns a survivable "wait for the window to roll"
+        # into an immediate hard 403 on an account that was never added — and
+        # _is_throttled correctly refuses to retry that, so the run dies FASTER
+        # than with no failover at all. This button is the only place that
+        # catches it before a 12-hour night.
+        was = _identity_index
+        blocks: list[str] = []
+        every_ok = True
+        try:
+            for index, who in enumerate(ring):
+                with _identity_lock:
+                    _use_identity(index)
+                try:
+                    ok, message = _check_access_inner()
+                except Exception as exc:  # noqa: BLE001
+                    ok, message = False, f"Drive check failed: {exc}"
+                every_ok = every_ok and ok
+                head = ("Publishes first" if index == 0
+                        else f"Fallback {index} (used when the one above runs out)")
+                blocks.append(f"**{head} — `{_identity_label(who)}`**\n\n{message}")
+        finally:
+            # Back to whatever was in force, not to zero: this button may well
+            # be clicked after a run has already switched.
+            with _identity_lock:
+                _use_identity(was)
+        return every_ok, "\n\n---\n\n".join(blocks)
     finally:
         if target is not None:
             set_target(None)

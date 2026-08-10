@@ -178,6 +178,18 @@ DRIVE_CREDENTIALS_FILE = _str("BVG_DRIVE_CREDENTIALS_FILE")
 # the disk. See DEPLOYMENT.md section 5b.
 DRIVE_IMPERSONATE = _str("BVG_DRIVE_IMPERSONATE")
 
+# Where publishing continues when the account above runs out of allowance.
+# Comma-separated, tried in order. Blank = no failover, which is what every
+# deployment does today.
+#
+# The app starts on DRIVE_IMPERSONATE (blank = the VM's own account) and only
+# moves to the next address once Drive has refused a transfer for the FULL
+# retry budget AND a 2-byte test upload is refused too — see
+# drive._with_failover. Every address here needs the same setup as
+# DRIVE_IMPERSONATE: the token-creator binding, and Content Manager on the
+# Shared Drive. See DEPLOYMENT.md section 5b-bis.
+DRIVE_IMPERSONATE_FALLBACKS = _list("BVG_DRIVE_IMPERSONATE_FALLBACKS")
+
 # How finished videos are published.
 #
 #   zip    one `yt.zip` and one `tk.zip` per output folder (the default). A
@@ -230,7 +242,12 @@ DRIVE_UPLOAD_CHUNK_BYTES = _int("BVG_DRIVE_UPLOAD_CHUNK_BYTES", 64 * 1024 * 1024
 # userRateLimitExceeded — a *retryable* 403 that reads like a permission error
 # and is not one. The budget is per chunk, so a transfer that keeps making
 # progress is never abandoned for being slow. Ten attempts backing off to two
-# minutes rides out roughly a quarter-hour of throttling.
+# minutes rides out about eight minutes of throttling (the nine sleeps sum to
+# 486s).
+#
+# Reaching the end of that budget is also what starts an identity failover when
+# BVG_DRIVE_IMPERSONATE_FALLBACKS is set, so raising this delays the switch by
+# the same amount.
 DRIVE_RETRY_ATTEMPTS = _int("BVG_DRIVE_RETRY_ATTEMPTS", 10)
 DRIVE_RETRY_MAX_SLEEP = _float("BVG_DRIVE_RETRY_MAX_SLEEP", 120.0)
 
