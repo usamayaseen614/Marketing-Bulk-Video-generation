@@ -83,6 +83,28 @@ DB_PATH = Path(_str("BVG_DB_PATH") or (JOBS_ROOT / "jobs.db"))
 # Outputs are in Drive by then; this only reclaims local disk.
 JOB_RETENTION_DAYS = _int("BVG_JOB_RETENTION_DAYS", 7)
 
+# Delete a job's folder the moment its output is confirmed in Drive, instead of
+# letting it sit until the retention window above expires.
+#
+# This is the difference between a VM that needs enough disk for a week of
+# nights and one that needs enough for a single night. It is a switch rather
+# than a constant only because the deletion is irreversible: an operator who
+# suspects the purge took something it should not have can set this false in
+# .env and restart, with no image rebuild. store.outputs_published() decides
+# what "confirmed" means, and refuses to confirm anything it cannot prove.
+JOB_PURGE_ON_FINISH = _bool("BVG_JOB_PURGE_ON_FINISH", True)
+
+# The one place the app writes bulk data OUTSIDE JOBS_ROOT: the Jobs page moves
+# a result ZIP over 5 GB here so Tornado can stream it from disk rather than
+# buffering it in Python memory.
+#
+# Named here rather than in ui_common because the headless worker has to delete
+# these and ui_common imports streamlit. Worth stating plainly: every reaper in
+# this codebase has only ever walked JOBS_ROOT/<job_id>, so a ZIP that moved
+# here was immortal — and under Docker it lands on the container's writable
+# layer, filling the VM's boot disk rather than the mounted data volume.
+STATIC_DOWNLOADS = Path(__file__).parent / "static" / "downloads"
+
 
 # --------------------------------------------------------------------------- worker
 
@@ -183,6 +205,11 @@ UPLOAD_PLATFORMS = _list("BVG_UPLOAD_PLATFORMS", "yt,tk")
 # verified in Drive. Rendering 16,000 videos needs ~500 GB of disk; this keeps
 # a long run from also needing room for the archives on top of it. Set false to
 # keep the MP4s on the VM (the local ZIP fallback then still works).
+#
+# Setting this false also suppresses JOB_PURGE_ON_FINISH for that job, so it
+# means "keep this job's bytes on this machine" in both senses. Without that,
+# the MP4s would survive packing and then be deleted thirty seconds later by a
+# different mechanism, which is the opposite of what the name promises.
 UPLOAD_FREE_LOCAL = _bool("BVG_UPLOAD_FREE_LOCAL", True)
 
 DRIVE_UPLOAD_CONCURRENCY = _int("BVG_DRIVE_UPLOAD_CONCURRENCY", 8)

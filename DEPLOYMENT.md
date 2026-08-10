@@ -650,9 +650,21 @@ batch in ~20–40 minutes.
   VM restart — the job is requeued on the next start and picks up from
   per-item state. A crash at video 250 of 300 costs the one video in flight,
   not the 250 already finished.
-- **Disk:** 100 GB covers temp + outputs comfortably. Finished job folders are
-  reaped after `BVG_JOB_RETENTION_DAYS` (default 7). Uploaded assets are deleted
-  as soon as a job finishes; only the videos linger.
+- **Disk: a job's folder is deleted the moment its output is confirmed in
+  Drive.** Staged uploads, scratch, the rendered MP4s, the archives and the
+  local ZIP all go; only a few kilobytes of manifests and the render log stay
+  behind, so the disk needs room for one night rather than a week of them.
+  `BVG_JOB_RETENTION_DAYS` (default 7) now governs only the jobs that could
+  *not* be published — Drive unconfigured, an upload that failed, or one of
+  `yt`/`tk` still outstanding — plus folders stranded by a submit that never
+  created a job row. Oversized ZIPs published under `./static/downloads/` are
+  removed along with their job; nothing had ever cleaned those up before.
+  Set `BVG_JOB_PURGE_ON_FINISH=false` to go back to keeping everything for the
+  retention window. To reclaim disk by hand right now:
+
+  ```bash
+  docker exec <container> python -c "from jobs import store; print(store.reap_old_jobs(0))"
+  ```
 - **Outputs now leave the container.** With Drive configured, videos are
   uploaded as they finish and the email carries a Drive link that never
   expires. The ZIP is still produced as a fallback, but it lives on the `/data`

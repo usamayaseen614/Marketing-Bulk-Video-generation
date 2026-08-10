@@ -278,8 +278,15 @@ def run(job: dict) -> dict:
     frame.to_excel(sheet_path, index=False, engine="openpyxl")
 
     # ---- 6. package, so the clips are reachable even without Drive
+    #
+    # Skipped when this scrape is a pipeline's internal stage: that path reads
+    # the clips straight off disk and its result lands nested under
+    # result["scrape"], while the Jobs page only ever reads the top-level
+    # zip_path. So this was writing a full uncompressed second copy of clips/
+    # that no code path could reach — mirrors the condition on _upload below.
     store.set_stage(job_id, "packaging")
-    zip_path = _package_clips(job_id, plan, clips_dir, sheet_path, mode)
+    zip_path = (None if params.get("upload") is False
+                else _package_clips(job_id, plan, clips_dir, sheet_path, mode))
 
     # ---- 7. upload
     drive_result = ({} if params.get("upload") is False else

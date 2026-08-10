@@ -155,4 +155,100 @@ assert render_runner._drive_stamp() != first
 assert len(first) == len("2026-08-05_14-23-45.123"), first
 print("drive stamp pinned across resume:", first)
 
+
+# --- cleanup_job_dir: the keep branch vs the purge branch -------------------
+# This is the regression test for the bug that made the whole feature
+# necessary: the old cleanup's allow-list was literally ["assets", "work"], so
+# every directory a later runner invented outlived the job by a week.
+def _populate(jid):
+    root = store.job_dir(jid)
+    for rel in ("assets/x.mp4", "work/y.png", "packing/batch_01/yt.zip.part",
+                "videos/source_01/a.mp4", "clips/c.mp4",
+                "marketing_videos.zip", "render_manifest.xlsx",
+                "batch_01_manifest.xlsx", "render_log.txt"):
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x")
+    return root
+
+
+j4 = store.create_job(kind=store.KIND_RENDER, label="cleanup")
+root = _populate(j4)
+store.cleanup_job_dir(j4, keep_outputs=True)
+assert not (root / "assets").exists(), "staged uploads must go"
+assert not (root / "work").exists(), "scratch must go"
+assert not (root / "packing").exists(), "half-written archives must go"
+assert (root / "videos/source_01/a.mp4").is_file(), "unpublished videos must stay"
+assert (root / "clips/c.mp4").is_file(), "unpublished clips must stay"
+assert (root / "marketing_videos.zip").is_file(), "the fallback ZIP must stay"
+assert (root / "render_manifest.xlsx").is_file()
+print("cleanup keep branch ok: only reproducible scratch removed")
+
+# The purge branch takes everything but the kilobytes of reports, including a
+# ZIP the Jobs page had moved outside JOBS_ROOT.
+moved = config.STATIC_DOWNLOADS / j4 / "big.zip"
+moved.parent.mkdir(parents=True, exist_ok=True)
+moved.write_bytes(b"x")
+store.cleanup_job_dir(j4)
+assert root.is_dir(), "the job folder itself stays, holding the reports"
+left = sorted(p.name for p in root.iterdir())
+assert left == ["batch_01_manifest.xlsx", "render_log.txt",
+                "render_manifest.xlsx"], left
+assert not moved.parent.exists(), "the relocated ZIP must go with its job"
+print("cleanup purge branch ok, kept only:", left)
+
+# --- cancel_job cleans up the staged upload a queued job never used ---------
+j5 = store.create_job(kind=store.KIND_RENDER, label="cancel-cleanup")
+_populate(j5)
+assert store.cancel_job(j5) is True
+assert not (store.job_dir(j5) / "assets").exists(), "cancelled staging must go"
+
+# A cancel that changes no row must not delete that job's folder.
+j6 = store.create_job(kind=store.KIND_RENDER, label="already-finished")
+store.finish_job(j6, store.STATUS_SUCCEEDED, result={})
+_populate(j6)
+assert store.cancel_job(j6) is False
+assert (store.job_dir(j6) / "videos/source_01/a.mp4").is_file(), \
+    "the rmtree must not escape the rowcount check"
+print("cancel_job cleanup ok, and guarded by rowcount")
+
+# --- an abandoned job loses its scratch but keeps unpublished videos --------
+# Drain the queue first: claim_next_job takes the oldest queued job, so
+# anything left over from the tests above would soak up the attempts below and
+# j7 would never reach the cap.
+while True:
+    _left = store.claim_next_job()
+    if _left is None:
+        break
+    store.finish_job(_left["id"], store.STATUS_SUCCEEDED, result={})
+
+j7 = store.create_job(kind=store.KIND_RENDER, label="abandoned",
+                      items=[{"idx": 1, "name": "a.mp4"}])
+_populate(j7)
+for _ in range(5):
+    if store.claim_next_job() is None:
+        break
+    store.requeue_stale_jobs(stale_seconds=-1, max_attempts=3)
+assert store.get_job(j7)["status"] == store.STATUS_FAILED
+assert not (store.job_dir(j7) / "assets").exists(), "abandoned staging must go"
+assert not (store.job_dir(j7) / "work").exists()
+assert (store.job_dir(j7) / "videos/source_01/a.mp4").is_file(), \
+    "an abandoned job's unpublished renders must survive"
+print("abandoned job cleaned to scratch only")
+
+# --- the reaper sweeps folders that never got a database row ---------------
+orphan = config.JOBS_ROOT / "deadbeefdeadbeef"
+(orphan / "assets").mkdir(parents=True, exist_ok=True)
+(orphan / "assets" / "input.mp4").write_bytes(b"x")
+repack = config.JOBS_ROOT / "_repack"
+repack.mkdir(parents=True, exist_ok=True)
+(repack / "scratch.zip").write_bytes(b"x")
+os.utime(orphan, (0, 0))
+
+removed = store.reap_old_jobs(retention_days=0)
+assert "deadbeefdeadbeef" in removed and not orphan.exists(), removed
+assert repack.is_dir(), "_-prefixed scratch is the operator's, not the reaper's"
+assert config.DB_PATH.is_file(), "the reaper must not touch the database"
+print("orphan sweep ok, left _repack and jobs.db alone:", removed)
+
 print("\nALL STORE TESTS PASSED")

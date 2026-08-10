@@ -272,7 +272,11 @@ def render_job(job: dict, expanded: bool = False) -> None:
             ui_common.offer_zip_download(Path(zip_path), slug=job["id"], label=label)
         elif (job["kind"] == store.KIND_SCRAPE
               and job["status"] == store.STATUS_SUCCEEDED
-              and result.get("clips_dir")):
+              and result.get("clips_dir")
+              # Guarded on the directory, not just on the string being set:
+              # once an uploaded scrape is purged the path is gone, and this
+              # would send someone SSH-ing after a folder that no longer exists.
+              and Path(result["clips_dir"]).is_dir()):
             st.info(
                 "Clips are on the machine that ran the job, at "
                 f"`{result['clips_dir']}`. Configure Google Drive on the Setup "
@@ -304,10 +308,16 @@ def render_job(job: dict, expanded: bool = False) -> None:
                     + " and ".join(f"*{p}*" for p in pending)
                     + " selected; anything already uploaded is skipped."
                 )
+        elif drive_link and job["status"] == store.STATUS_SUCCEEDED:
+            st.caption(
+                "The outputs are in Google Drive and the local copies have "
+                "been removed from this server."
+            )
         elif job["status"] == store.STATUS_SUCCEEDED and counts["rendered"]:
             st.caption(
-                "The ZIP has been cleaned up (job folders are kept for "
-                f"{settings.JOB_RETENTION_DAYS} days)."
+                "The local ZIP has been cleaned up. Job folders whose output "
+                "could not be published are kept for "
+                f"{settings.JOB_RETENTION_DAYS} days."
             )
 
         # ---- a caption-pool job's whole output lives in the database

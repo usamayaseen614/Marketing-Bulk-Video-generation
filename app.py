@@ -919,9 +919,12 @@ if clip_source == "drive_folder":
 elif clip_source == "scrape_job":
     if not available:
         st.warning(
-            "No finished scrape has clips on this machine. Run one from the "
-            "TikTok Scraper page, or pick another option. (Job folders are "
-            f"kept for {settings.JOB_RETENTION_DAYS} days.)"
+            "No finished scrape has clips on this machine. Scrapes are "
+            "removed from the server once their clips are safely in Google "
+            "Drive, so this list only holds ones that have not been uploaded "
+            "yet. To reuse clips that are already in Drive, choose "
+            "**Google Drive folder** above and paste that scrape's folder "
+            "link — no re-scraping needed."
         )
     else:
         pick = st.selectbox(

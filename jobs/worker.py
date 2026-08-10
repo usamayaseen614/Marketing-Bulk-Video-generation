@@ -120,13 +120,27 @@ def run_job(job: dict) -> None:
 
     _notify(job, status, result, error)
 
-    # Staged uploads are large (a promo video plus a background ZIP per job,
-    # since batches don't reuse assets) and are dead weight once rendering is
-    # done. Videos stay until the retention reaper so the ZIP fallback works.
+    # The job's bytes leave the machine here. The default is to take the whole
+    # folder — staged uploads, scratch, rendered MP4s, archives and the local
+    # ZIP — keeping only a few kilobytes of manifests; the keep branch exists
+    # for the job whose output could not be proven to be anywhere else.
+    #
+    # This must stay AFTER _notify: the notification reads result["sheet_path"]
+    # straight off disk to attach it. _KEEP_AFTER_PURGE retains that file
+    # anyway, but the ordering should not be the thing that is relied on.
+    published, reason = store.outputs_published(job, result)
     try:
-        store.cleanup_job_dir(job_id, keep_videos=True)
+        store.cleanup_job_dir(job_id, keep_outputs=not published)
     except Exception:  # noqa: BLE001
         logger.warning("Cleanup failed for job %s", job_id, exc_info=True)
+    else:
+        if published:
+            logger.info("Job %s: folder purged — %s", job_id, reason)
+        else:
+            logger.info(
+                "Job %s: keeping this job's videos and reports on the VM — %s "
+                "(the retention reaper takes them after %d days)",
+                job_id, reason, config.JOB_RETENTION_DAYS)
 
 
 def main(argv: Optional[list[str]] = None) -> int:

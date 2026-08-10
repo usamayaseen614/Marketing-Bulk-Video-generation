@@ -138,9 +138,11 @@ def _clips_stage(job: dict, params: dict) -> dict:
     clips = _gather_clips(job, params)
     if not clips:
         raise RuntimeError(
-            "No clips available. The scrape produced nothing usable, or the "
-            "chosen scrape job's clips have been cleaned up "
-            f"(job folders are kept for {config.JOB_RETENTION_DAYS} days)."
+            "No clips available. The scrape produced nothing usable, or its "
+            "clips have been removed from this machine — that happens as soon "
+            "as they are safely in Drive. To reuse them without scraping "
+            "again, switch the clip source to Google Drive folder and paste "
+            "that scrape's Drive folder link."
         )
 
     strategy = params.get("clip_strategy", "top_views")

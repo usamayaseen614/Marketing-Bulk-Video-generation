@@ -2828,6 +2828,12 @@ class VideoGenerator:
         except subprocess.TimeoutExpired:
             error = f"Render timed out after {self.config.ffmpeg_timeout}s"
             logger.error("Row %d FAILED: %s", row_number, error)
+            # A killed FFmpeg leaves a truncated MP4 behind. The item is marked
+            # failed, so the packer excludes it from its folder and free_files
+            # — which walks item metadata, not the directory — can never see
+            # it. On the path where the videos are kept, that orphan is kept
+            # too. Matches the generic handler just below.
+            out_path.unlink(missing_ok=True)
             return RowResult(row_number, False, error=error, warnings=spec.warnings)
         except Exception as exc:  # noqa: BLE001 — per-row isolation is the point
             logger.error("Row %d FAILED: %s", row_number, exc)

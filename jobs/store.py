@@ -384,7 +384,15 @@ def cancel_job(job_id: str) -> bool:
             "UPDATE jobs SET status=?, finished_at=? WHERE id=? AND status=?",
             (STATUS_CANCELLED, time.time(), job_id, STATUS_QUEUED),
         )
-        return cur.rowcount > 0
+        cancelled = cur.rowcount > 0
+    # The one terminal transition that never reaches worker.run_job, which is
+    # why nothing has ever cleaned up after it. A queued job produced nothing
+    # here — its folder is pure staged upload, a promo video plus an extracted
+    # background ZIP, often gigabytes — and claim_next_job only ever takes
+    # `queued`, so there is nothing left to resume.
+    if cancelled:
+        cleanup_job_dir(job_id)
+    return cancelled
 
 
 def requeue_stale_jobs(stale_seconds: Optional[float] = None,
@@ -397,6 +405,7 @@ def requeue_stale_jobs(stale_seconds: Optional[float] = None,
     cap = config.JOB_MAX_ATTEMPTS if max_attempts is None else max_attempts
     cutoff = time.time() - stale
     requeued: list[str] = []
+    abandoned: list[str] = []
     with _conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -414,6 +423,7 @@ def requeue_stale_jobs(stale_seconds: Optional[float] = None,
                          "stopped responding each time.",
                          time.time(), row["id"]),
                     )
+                    abandoned.append(row["id"])
                 else:
                     conn.execute("UPDATE jobs SET status=? WHERE id=?",
                                  (STATUS_QUEUED, row["id"]))
@@ -422,6 +432,13 @@ def requeue_stale_jobs(stale_seconds: Optional[float] = None,
         except Exception:
             conn.execute("ROLLBACK")
             raise
+    # Done after COMMIT so a slow rmtree never holds BEGIN IMMEDIATE open.
+    # This branch was pure SQL, so three attempts' worth of staged assets and
+    # render scratch used to sit here until the 7-day reaper. keep_outputs is
+    # deliberate: an abandoned job may hold rendered videos that were never
+    # published, and those are precisely what must not be deleted.
+    for job_id in abandoned:
+        cleanup_job_dir(job_id, keep_outputs=True)
     return requeued
 
 
@@ -841,16 +858,125 @@ def make_job_dirs(job_id: str) -> Path:
     return root
 
 
-def cleanup_job_dir(job_id: str, keep_videos: bool = False) -> None:
-    """Drop a job's working files. Assets and scratch go as soon as the job
-    finishes; videos stay until the retention reaper takes them, so the ZIP
-    fallback still works if Drive was unconfigured."""
+def outputs_published(job: dict, result: Optional[dict]) -> tuple[bool, str]:
+    """Is every byte this job produced also sitting somewhere off this VM?
+
+    Returns (ok, reason) — the reason is logged either way, so an operator
+    looking at a full disk can see exactly why a folder was spared.
+
+    The asymmetry here is the whole design. Being wrong towards "keep" costs
+    disk that the retention reaper reclaims in a week. Being wrong towards
+    "delete" destroys a night of rendering that exists nowhere else. So every
+    check below is a reason to KEEP, and the only way out is the final
+    `return True`: anything unrecognised falls through to keeping the files.
+    """
+    if not config.JOB_PURGE_ON_FINISH:
+        return False, "BVG_JOB_PURGE_ON_FINISH is off"
+
+    # A caption job writes no files at all — the pool it produces is rows in
+    # this database. There is nothing to prove and nothing worth keeping.
+    if job.get("kind") == KIND_CAPTIONS:
+        return True, "caption pools live in the database"
+
+    # The runner raised, so worker.run_job never got a result dict. Whatever is
+    # on disk is all there is.
+    if not result:
+        return False, "the job did not report a result"
+
+    # One check covering three separate ways nothing reached Drive: Drive not
+    # configured at all, Drive folder preparation failing, and the pipeline's
+    # internal scrape stage (which is deliberately run with upload disabled
+    # because the render stage consumes the clips locally).
+    if not result.get("drive_link"):
+        return False, "nothing was published to Drive"
+    if result.get("upload_failed") or result.get("upload_failures"):
+        return False, "some files did not reach Drive"
+
+    # Publishing tk today and yt tomorrow is a supported way to stay under
+    # Drive's 750 GB per 24 hours, and tomorrow's yt.zip is built out of
+    # tonight's MP4s. Deleting them now would leave nothing to build it from.
+    if result.get("videos_kept") or result.get("platforms_pending"):
+        return False, "another set of names is still to be published"
+    selected = result.get("upload_platforms")
+    if selected is not None and set(selected) != {"yt", "tk"}:
+        # The belt to that braces: `platforms_pending` is only populated when
+        # the MP4s were actually kept, which itself requires free_local — so a
+        # single-platform run with free_local off reports nothing pending.
+        return False, "only one set of names was published"
+
+    # Read with the identical expression the packer uses, so an operator who
+    # asked for the MP4s to stay does not get them deleted by another route.
+    params = job.get("params") or {}
+    if not bool(params.get("free_local_videos", config.UPLOAD_FREE_LOCAL)):
+        return False, "BVG_UPLOAD_FREE_LOCAL asks for the videos to stay here"
+
+    rendered = result.get("rendered")
+    if rendered is not None:
+        if int(rendered) > int(result.get("uploaded") or 0):
+            return False, "not every rendered video has a Drive record"
+    elif int(result.get("trimmed") or 0) and not int(result.get("uploaded") or 0):
+        return False, "the clips were not uploaded"
+
+    return True, "published to Drive"
+
+
+# The few kilobytes worth keeping when a job folder is purged: they are the
+# only local record of which caption went with which filename, the Jobs page
+# reads render_manifest.xlsx back as result["sheet_path"], and they weigh
+# nothing against the hundreds of GB the purge reclaims. The retention reaper
+# takes them in the end anyway.
+_KEEP_AFTER_PURGE = {"render_manifest.xlsx", "render_log.txt",
+                     "batch_sheet.xlsx", "metadata.xlsx"}
+_KEEP_SUFFIX = "_manifest.xlsx"          # batch_NN_manifest.xlsx, one per folder
+# So that a pathological file cannot defeat the purge by being named like a
+# manifest.
+_KEEP_MAX_BYTES = 64 * 1024 * 1024
+
+
+def cleanup_job_dir(job_id: str, keep_outputs: bool = False) -> None:
+    """Remove a finished job's files from this machine.
+
+    keep_outputs=False — the output was confirmed off this VM, so everything
+    goes except the handful of report files named above.
+    keep_outputs=True — the output could NOT be confirmed anywhere else, so
+    only reproducible scratch goes; videos/, clips/ and the local ZIP fallback
+    stay behind for the retention reaper.
+    """
     root = job_dir(job_id)
-    if not root.is_dir():
+
+    if keep_outputs:
+        if root.is_dir():
+            # `packing` is in this list even though nothing was published: a
+            # worker killed mid-pack leaves batch_NN/*.zip.part behind, and an
+            # archive is rebuildable from the MP4s by definition.
+            for sub in ("assets", "work", "packing"):
+                shutil.rmtree(root / sub, ignore_errors=True)
         return
-    targets = ["assets", "work"] if keep_videos else ["assets", "work", "videos"]
-    for sub in targets:
-        shutil.rmtree(root / sub, ignore_errors=True)
+
+    # A KEEP-list rather than a delete-list, on purpose. The allow-list this
+    # replaces was literally ["assets", "work"], which is exactly how videos/,
+    # clips/, packing/, marketing_videos.zip, clips.zip and four manifests all
+    # came to outlive every job by a week: each was added by a later runner and
+    # nobody pointed the cleanup at it. Anything a future runner invents is now
+    # deleted by default.
+    if root.is_dir():
+        for child in root.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+                continue
+            keep = (child.name in _KEEP_AFTER_PURGE
+                    or child.name.endswith(_KEEP_SUFFIX))
+            try:
+                if keep and child.stat().st_size <= _KEEP_MAX_BYTES:
+                    continue
+            except OSError:
+                pass
+            child.unlink(missing_ok=True)
+
+    # The Jobs page MOVES a result ZIP over 5 GB out of the job folder so
+    # Tornado can stream it. That copy lives outside JOBS_ROOT where no reaper
+    # has ever looked, so it has to travel with the job it belongs to.
+    shutil.rmtree(config.STATIC_DOWNLOADS / job_id, ignore_errors=True)
 
 
 def reap_old_jobs(retention_days: Optional[int] = None) -> list[str]:
@@ -864,9 +990,36 @@ def reap_old_jobs(retention_days: Optional[int] = None) -> list[str]:
         rows = conn.execute(
             "SELECT id FROM jobs WHERE status IN (?,?,?) AND COALESCE(finished_at, created_at) < ?",
             (STATUS_SUCCEEDED, STATUS_FAILED, STATUS_CANCELLED, cutoff)).fetchall()
+        known = {r["id"] for r in conn.execute("SELECT id FROM jobs").fetchall()}
     for row in rows:
         root = job_dir(row["id"])
         if root.is_dir():
             shutil.rmtree(root, ignore_errors=True)
             removed.append(row["id"])
+        # Same reason cleanup_job_dir does this: an oversized ZIP the Jobs page
+        # moved under ./static is outside JOBS_ROOT, and nothing else can see it.
+        shutil.rmtree(config.STATIC_DOWNLOADS / row["id"], ignore_errors=True)
+
+    # Folders with no database row at all. The query above is row-driven and
+    # never lists JOBS_ROOT — but make_job_dirs runs BEFORE create_job on all
+    # three submit paths, with the entire multi-GB upload staged inside that
+    # window, so a bad ZIP or a Streamlit rerun mid-submit strands gigabytes
+    # behind a folder this function could otherwise never see.
+    #
+    # `_`-prefixed names are skipped because tools/zip_drive_tk.py puts its
+    # scratch in JOBS_ROOT/_repack, and a repack in progress must not be pulled
+    # out from under the operator. jobs.db and its -wal/-shm are files, so
+    # is_dir() already excludes them.
+    if config.JOBS_ROOT.is_dir():
+        for entry in config.JOBS_ROOT.iterdir():
+            if (not entry.is_dir() or entry.name in known
+                    or entry.name.startswith("_")):
+                continue
+            try:
+                if entry.stat().st_mtime >= cutoff:
+                    continue
+            except OSError:
+                continue
+            shutil.rmtree(entry, ignore_errors=True)
+            removed.append(entry.name)
     return removed

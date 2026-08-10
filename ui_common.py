@@ -14,11 +14,15 @@ from pathlib import Path
 import streamlit as st
 from streamlit import config as st_config
 
+import config
+
 # When static serving is enabled (production/Docker), oversized ZIPs are
 # published here and streamed from disk by Tornado instead of being buffered in
 # Python memory by st.download_button.
-STATIC_ROOT = Path(__file__).parent / "static"
-STATIC_DOWNLOADS = STATIC_ROOT / "downloads"
+#
+# The path itself lives in config so the headless worker can clean these up
+# when it purges the job they belong to — it cannot import this module.
+STATIC_DOWNLOADS = config.STATIC_DOWNLOADS
 
 # Above this size the ZIP is not loaded into memory for the download button.
 MAX_DOWNLOAD_BYTES = 5 * 1024 * 1024 * 1024

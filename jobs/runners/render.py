@@ -1049,11 +1049,26 @@ def run(job: dict) -> dict:
     rendered, failed = counts["rendered"], counts["render_failed"]
 
     zip_path = None
+    # marketing_videos.zip is a byte-for-byte uncompressed second copy of
+    # everything under videos/, on the same disk. It earns that space only
+    # while this VM might still hold the only copy — once Drive has the bytes
+    # it doubles the job's footprint and buys no durability. This matters most
+    # in upload_mode=files, where the return dict carries no `videos_freed`
+    # key, so the ZIP used to be built on every single run.
+    #
+    # Deliberately the same predicate the worker purges on, so setting
+    # BVG_JOB_PURGE_ON_FINISH=false restores the old behaviour here too rather
+    # than needing a second switch.
+    published, _reason = store.outputs_published(
+        job, {**drive_result, "rendered": rendered})
     if drive_result.get("videos_freed"):
         # The MP4s are inside the per-folder archives in Drive and gone from
         # disk, so there is nothing left here to bundle. Building this anyway
         # would produce an empty ZIP that looks like the fallback and isn't.
         logger.info("Job %s: local videos freed after packing — no fallback ZIP",
+                    job_id)
+    elif published:
+        logger.info("Job %s: outputs are confirmed in Drive — no fallback ZIP",
                     job_id)
     elif params.get("make_zip", True) and rendered:
         store.set_stage(job_id, "packaging")
