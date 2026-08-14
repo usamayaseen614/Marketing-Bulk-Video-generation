@@ -63,6 +63,10 @@ def _metadata_frame(clips: dict[str, tiktok.ClipInfo],
             "Reposts": clip.repost_count,
             "Original_Duration_s": clip.duration,
             "Trimmed_Duration_s": meta.get("trimmed_duration"),
+            # Blank for clips that never downloaded — "no" would read as a
+            # verdict on a file that does not exist.
+            "Audio": ("" if "has_audio" not in meta
+                      else ("yes" if meta.get("has_audio") else "NO")),
             "Posted": clip.posted_date(),
             "Title": clip.title,
             "URL": clip.url,
@@ -181,7 +185,7 @@ def run(job: dict) -> dict:
     ffmpeg = tiktok.find_ffmpeg()
     seen_hashes = store.known_content_hashes(account) if skip_known else set()
 
-    downloaded = trimmed = skipped = 0
+    downloaded = trimmed = skipped = silent = 0
     pending = store.pending_render_items(job_id, stage=store.STAGE_SCRAPE)
     logger.info("Job %s: %d clip(s) to fetch (%d already done)",
                 job_id, len(pending), len(fresh) - len(pending))
@@ -217,12 +221,21 @@ def run(job: dict) -> dict:
             raw.unlink(missing_ok=True)
             trimmed += len(segments)
 
+            # Checked on the trimmed output, not the download: this is the file
+            # that actually reaches the clip bank, and for ASMR a silent clip is
+            # a defect worth seeing in the sheet rather than discovering later.
+            audible = tiktok.has_audio(segments[0], ffmpeg)
+            if not audible:
+                silent += 1
+                logger.info("Job %s: %s has no audio", job_id, clip.video_id)
+
             store.update_item(
                 job_id, item["idx"], name=segments[0].name,
                 render_status=store.ITEM_DONE, render_error=None,
                 meta={**(item.get("meta") or {}),
                       "content_hash": digest,
                       "segments": [p.name for p in segments],
+                      "has_audio": audible,
                       "trimmed_duration": tiktok.probe_duration(segments[0], ffmpeg)},
             )
             if len(segments) > 1:
@@ -230,9 +243,7 @@ def run(job: dict) -> dict:
                             job_id, clip.video_id, len(segments))
         except Exception as exc:  # noqa: BLE001 — photo posts land here, by design
             skipped += 1
-            message = str(exc)
-            if "rehydration" in message or "Unable to extract" in message:
-                message = "Not a downloadable video (photo carousel or removed post)"
+            message = tiktok.explain_failure(str(exc))
             store.update_item(job_id, item["idx"], render_status=store.ITEM_FAILED,
                               render_error=message[:400])
             logger.info("Job %s: skipped %s — %s", job_id, video_id, message[:120])
@@ -305,6 +316,7 @@ def run(job: dict) -> dict:
         "duplicates": len(duplicates),
         "downloaded": downloaded,
         "trimmed": trimmed,
+        "silent": silent,
         "batches": batches_built,
         "clips_dir": str(clips_dir),
         "sheet_path": str(sheet_path),

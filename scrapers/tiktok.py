@@ -32,6 +32,11 @@ design and are not obvious:
   * **Datacenter IPs are the real risk.** All of the above was measured from a
     residential connection. TikTok blocks cloud egress far more aggressively,
     so a cookies file may be needed on the VM (BVG_SCRAPE_COOKIES_FILE).
+
+There is also a single-link path (`fetch_single_video`) for grabbing one video
+on its own. It shares the trimming and naming code with the profile scrape but
+none of its machinery: no job row, no dedup ledger, no Drive upload, no rate
+limiting — one link is one request, and there is nothing to pace.
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ import hashlib
 import logging
 import random
 import re
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -51,6 +57,14 @@ import config
 logger = logging.getLogger(__name__)
 
 _ACCOUNT_RE = re.compile(r"@([A-Za-z0-9_.]+)")
+
+# /video/ and /photo/ are the two post types; /v/ is the old m.tiktok.com form.
+_VIDEO_PATH_RE = re.compile(r"/(?:video|photo|v)/(\d+)")
+# Share links carry no id at all — only TikTok's redirect knows what they are.
+_SHORT_LINK_RE = re.compile(
+    r"^https?://(?:v[mt]\.tiktok\.com/[A-Za-z0-9]+"
+    r"|(?:www\.)?tiktok\.com/t/[A-Za-z0-9]+)", re.I)
+_BARE_ID_RE = re.compile(r"^\d{8,}$")
 
 
 class ScrapeError(RuntimeError):
@@ -70,6 +84,67 @@ def profile_url(url_or_handle: str) -> str:
     if raw.startswith("http"):
         return raw.split("?")[0]
     return f"https://www.tiktok.com/@{account_name(raw)}"
+
+
+# --------------------------------------------------------------------- one link
+
+def video_url(raw: str) -> str:
+    """Normalise a single-post link.
+
+    The query string goes because TikTok's share button appends a tracking
+    blob (`?is_from_webapp=1&sender_device=…`) that makes two links to the same
+    video look different.
+
+    A bare numeric id is accepted because that is what comes out of the
+    metadata sheet's Video_ID column. `@_` stands in for the handle the
+    canonical form wants: the id is what actually resolves the post."""
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    if _BARE_ID_RE.match(text):
+        return f"https://www.tiktok.com/@_/video/{text}"
+    if not text.lower().startswith(("http://", "https://")):
+        text = "https://" + text.lstrip("/")
+    return text.split("?")[0].split("#")[0].rstrip("/")
+
+
+def is_video_url(raw: str) -> bool:
+    """Does this point at ONE post rather than a whole profile?
+
+    This is a guard, not a nicety. yt-dlp handed a profile URL happily walks
+    the entire account, so without it a mis-paste would download hundreds of
+    videos synchronously inside a page render."""
+    text = (raw or "").strip()
+    if not text:
+        return False
+    if _BARE_ID_RE.match(text):
+        return True
+    url = video_url(text)
+    return bool(_SHORT_LINK_RE.match(url) or _VIDEO_PATH_RE.search(url))
+
+
+def is_photo_url(raw: str) -> bool:
+    """Photo carousels are not videos — see the module docstring. Worth
+    catching from the URL when we can, so the user gets told why instead of
+    watching an extraction fail."""
+    return "/photo/" in video_url(raw).lower()
+
+
+def video_id_from_url(raw: str) -> str:
+    """The post id, or "" for a share link that only TikTok can resolve."""
+    match = _VIDEO_PATH_RE.search(video_url(raw))
+    return match.group(1) if match else ""
+
+
+def explain_failure(message: str) -> str:
+    """Turn yt-dlp's internals into something an operator can act on.
+
+    "Unable to extract universal data for rehydration" is what a photo
+    carousel looks like from the outside — see the module docstring."""
+    text = str(message or "")
+    if "rehydration" in text or "Unable to extract" in text:
+        return "Not a downloadable video (photo carousel or removed post)"
+    return text
 
 
 @dataclass
@@ -95,6 +170,39 @@ class ClipInfo:
         if not self.timestamp:
             return ""
         return time.strftime("%Y-%m-%d", time.localtime(self.timestamp))
+
+
+def _clip_from_info(info: dict, url: str, uploader_fallback: str = "") -> ClipInfo:
+    """Map one yt-dlp info dict onto a ClipInfo.
+
+    `url` is passed in rather than read here because the field to trust
+    differs by extraction mode: a flat playlist entry puts the webpage link in
+    `url`, while a full extraction puts the raw CDN media link there and the
+    webpage link in `webpage_url`. Reading the wrong one gives a metadata sheet
+    full of expiring CDN URLs."""
+    return ClipInfo(
+        video_id=str(info.get("id") or "").strip(),
+        url=url,
+        title=info.get("title") or "",
+        duration=info.get("duration"),
+        view_count=info.get("view_count"),
+        like_count=info.get("like_count"),
+        comment_count=info.get("comment_count"),
+        repost_count=info.get("repost_count"),
+        timestamp=info.get("timestamp"),
+        uploader=info.get("uploader") or uploader_fallback,
+    )
+
+
+def clip_stem(clip: ClipInfo) -> str:
+    """`someaccount_7231234567890123456` — a filename that says what it is.
+
+    The profile scrape names files by bare video id because the folder they
+    land in already carries the account. A single fetch lands in the user's
+    Downloads next to everything else they have ever downloaded, so the handle
+    has to be in the name."""
+    handle = re.sub(r"[^A-Za-z0-9_.-]", "", clip.uploader or "").strip("._-")
+    return f"{handle}_{clip.video_id}" if handle else (clip.video_id or "tiktok")
 
 
 class ClipSource(Protocol):
@@ -160,17 +268,10 @@ class YtDlpSource:
             video_id = str(entry.get("id") or "").strip()
             if not video_id:
                 continue
-            clips.append(ClipInfo(
-                video_id=video_id,
+            clips.append(_clip_from_info(
+                entry,
                 url=entry.get("url") or entry.get("webpage_url") or "",
-                title=entry.get("title") or "",
-                duration=entry.get("duration"),
-                view_count=entry.get("view_count"),
-                like_count=entry.get("like_count"),
-                comment_count=entry.get("comment_count"),
-                repost_count=entry.get("repost_count"),
-                timestamp=entry.get("timestamp"),
-                uploader=entry.get("uploader") or account_name(url),
+                uploader_fallback=account_name(url),
             ))
 
         logger.info("Enumerated %d entries from %s in %.0fs",
@@ -182,19 +283,119 @@ class YtDlpSource:
         the caller counts those as skips."""
         dest_dir = Path(dest_dir)
         dest_dir.mkdir(parents=True, exist_ok=True)
-        template = str(dest_dir / f"{clip.video_id}.%(ext)s")
 
         # ignoreerrors must be OFF here: a silent failure would look like a
         # successful download of nothing.
-        with self._ydl({"outtmpl": template, "format": "mp4/best",
+        with self._ydl({"outtmpl": str(dest_dir / f"{clip.video_id}.%(ext)s"),
+                        "format": config.SCRAPE_FORMAT,
                         "ignoreerrors": False}) as ydl:
             ydl.download([clip.url])
 
-        produced = sorted(dest_dir.glob(f"{clip.video_id}.*"))
-        produced = [p for p in produced if p.suffix.lower() != ".part"]
-        if not produced:
-            raise ScrapeError(f"No file produced for {clip.video_id}")
-        return produced[0]
+        return self._recover_audio(clip.url, _produced_file(dest_dir, clip.video_id),
+                                   clip.video_id)
+
+    def _recover_audio(self, url: str, path: Path, video_id: str) -> Path:
+        """Re-fetch without H.265 if what landed has no audio track.
+
+        TikTok's bytevc1 renditions sometimes arrive mute while advertising
+        AAC, and nothing in the format metadata distinguishes those from the
+        real thing — see config.SCRAPE_FORMAT. So the check has to happen on
+        the bytes, after the fact.
+
+        Costs a second download only for clips that came back silent. A post
+        that is *genuinely* silent keeps its original, higher-quality file:
+        the fallback is for TikTok's broken renditions, not for creators who
+        posted without sound."""
+        if not config.SCRAPE_REQUIRE_AUDIO or has_audio(path):
+            return path
+
+        logger.info("Clip %s came back with no audio — retrying without H.265",
+                    video_id)
+        alt_dir = path.parent / "_alt"
+        shutil.rmtree(alt_dir, ignore_errors=True)
+        alt_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with self._ydl({"outtmpl": str(alt_dir / f"{video_id}.%(ext)s"),
+                            "format": config.SCRAPE_FORMAT_WITH_AUDIO,
+                            "ignoreerrors": False}) as ydl:
+                ydl.download([url])
+            alt = _produced_file(alt_dir, video_id)
+            if not has_audio(alt):
+                # The post really has no sound. Keep the better original.
+                logger.info("Clip %s has no audio in any rendition", video_id)
+                return path
+            path.unlink(missing_ok=True)
+            recovered = path.parent / alt.name
+            recovered.unlink(missing_ok=True)
+            shutil.move(str(alt), recovered)
+            logger.info("Clip %s: audio recovered via the H.264 rendition", video_id)
+            return recovered
+        except Exception:  # noqa: BLE001 — a failed rescue must not lose the clip
+            logger.warning("Clip %s: audio recovery failed, keeping the silent file",
+                           video_id, exc_info=True)
+            return path
+        finally:
+            shutil.rmtree(alt_dir, ignore_errors=True)
+
+    def fetch_one(self, url: str, dest_dir: Path) -> tuple[ClipInfo, Path]:
+        """Resolve *and* download a single post in one extraction.
+
+        The profile path keeps those two steps apart for a reason: enumeration
+        is one request covering hundreds of posts, and the downloads that
+        follow are paced over the next hour. A single link has nothing to pace
+        and nothing to enumerate, so splitting it would only mean asking TikTok
+        about the same video twice.
+
+        `playlist_items` is the safety net under `is_video_url`: a share link
+        is opaque until TikTok redirects it, so if one ever resolves to a
+        profile this caps the damage at one video instead of the whole
+        account."""
+        target = video_url(url)
+        if not target:
+            raise ScrapeError("No link given.")
+        dest_dir = Path(dest_dir)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        # ignoreerrors OFF for the same reason as download(): this request IS
+        # the one video, so a silent None is a failure the caller must hear.
+        opts = {
+            "outtmpl": str(dest_dir / "%(id)s.%(ext)s"),
+            "format": config.SCRAPE_FORMAT,
+            "ignoreerrors": False,
+            "noplaylist": True,
+            "playlist_items": "1",
+        }
+        with self._ydl(opts) as ydl:
+            info = ydl.extract_info(target, download=True)
+
+        if info and info.get("_type") == "playlist":
+            entries = [e for e in (info.get("entries") or []) if e]
+            info = entries[0] if entries else None
+        if not info:
+            raise ScrapeError(
+                f"Could not read {target}. The post may be private or deleted, "
+                "or TikTok may be blocking this server's IP — try supplying a "
+                "cookies file (BVG_SCRAPE_COOKIES_FILE)."
+            )
+
+        clip = _clip_from_info(
+            info,
+            url=info.get("webpage_url") or info.get("original_url") or target,
+            uploader_fallback=account_name(target),
+        )
+        if not clip.video_id:
+            raise ScrapeError(f"TikTok returned no video id for {target}.")
+        produced = _produced_file(dest_dir, clip.video_id)
+        return clip, self._recover_audio(clip.url or target, produced, clip.video_id)
+
+
+def _produced_file(dest_dir: Path, video_id: str) -> Path:
+    """The file yt-dlp just wrote, ignoring any abandoned `.part` beside it."""
+    produced = [p for p in sorted(Path(dest_dir).glob(f"{video_id}.*"))
+                if p.suffix.lower() != ".part"]
+    if not produced:
+        raise ScrapeError(f"No file produced for {video_id}")
+    return produced[0]
 
 
 # --------------------------------------------------------------------------- trim
@@ -306,20 +507,36 @@ def trim_clip(src: Path, dest: Path, start: float, duration: float,
 
 
 _DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
+_AUDIO_STREAM_RE = re.compile(r"^\s*Stream #.*: Audio:", re.M)
 
 
-def probe_duration(path: Path, ffmpeg: Optional[str] = None) -> Optional[float]:
+def _probe_text(path: Path, ffmpeg: Optional[str] = None) -> str:
+    """FFmpeg's description of a file. `ffmpeg -i` with no output is an error
+    by design — everything interesting is on stderr either way."""
     ffmpeg = ffmpeg or find_ffmpeg()
     try:
         proc = subprocess.run([ffmpeg, "-i", str(path)],
                               **_ff_capture(), timeout=60)
     except (subprocess.SubprocessError, OSError):
-        return None
-    match = _DURATION_RE.search(proc.stderr or "")
+        return ""
+    return proc.stderr or ""
+
+
+def probe_duration(path: Path, ffmpeg: Optional[str] = None) -> Optional[float]:
+    match = _DURATION_RE.search(_probe_text(path, ffmpeg))
     if not match:
         return None
     hours, minutes, seconds = match.groups()
     return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def has_audio(path: Path, ffmpeg: Optional[str] = None) -> bool:
+    """Does this file carry an actual audio stream?
+
+    The only trustworthy answer about a TikTok download. The format metadata
+    says `acodec: aac` on renditions that arrive with no audio stream at all,
+    so believing it is how a clip bank ends up full of silent ASMR."""
+    return bool(_AUDIO_STREAM_RE.search(_probe_text(path, ffmpeg)))
 
 
 def content_hash(path: Path, chunk: int = 1 << 20) -> str:
@@ -331,6 +548,135 @@ def content_hash(path: Path, chunk: int = 1 << 20) -> str:
     with path.open("rb") as handle:
         digest.update(handle.read(chunk))
     return digest.hexdigest()
+
+
+# --------------------------------------------------------------------- one video
+
+@dataclass
+class SingleFetch:
+    """The result of grabbing one link: metadata plus files on disk."""
+    clip: ClipInfo
+    files: list[Path] = field(default_factory=list)
+    trimmed: bool = False
+
+    @property
+    def total_bytes(self) -> int:
+        return sum(p.stat().st_size for p in self.files if p.is_file())
+
+
+def fetch_single_video(url: str, dest_dir: Path,
+                       trim_start: Optional[float] = None,
+                       trim_duration: Optional[float] = None,
+                       source: Optional[YtDlpSource] = None,
+                       attempts: Optional[int] = None,
+                       retry_delay: Optional[float] = None) -> SingleFetch:
+    """Download one TikTok post into `dest_dir`, optionally trimmed.
+
+    Deliberately none of the profile scrape's machinery: no job row, no dedup
+    ledger (grabbing the same video twice on purpose is the whole point of a
+    one-off fetch), no Drive upload, no rate limiting.
+
+    `trim_duration=None` keeps the original untouched — the common case is
+    wanting the video, not a slot-sized clip. When a window IS given the same
+    `split_clip` the scrape uses runs, so a 40s post yields four clips here
+    exactly as it would in a batch.
+
+    `dest_dir` is emptied first: each fetch replaces the last, which is what
+    keeps a session from accumulating videos nobody asked to keep.
+
+    Retries where the profile scrape does not, and the asymmetry is the point.
+    Extraction really is flaky: measured live, a link downloaded fine and then
+    failed "Unable to extract universal data for rehydration" seconds later on
+    the very next request. A scrape shrugs that off because failures are never
+    remembered, so the next run over the account picks the clip up. One link
+    gets exactly one chance, and the failure it reports — "photo carousel or
+    removed post" — is a confident lie about a video that plainly exists."""
+    if not is_video_url(url):
+        raise ScrapeError(
+            "That does not look like a link to a single video. Paste the URL "
+            "of one post (…/@handle/video/1234…, or a vm.tiktok.com share "
+            "link) — a profile link belongs in the account scraper."
+        )
+    if is_photo_url(url):
+        raise ScrapeError(
+            "That is a photo carousel, not a video — there is no video file "
+            "on it to download."
+        )
+
+    dest_dir = Path(dest_dir)
+    shutil.rmtree(dest_dir, ignore_errors=True)
+    raw_dir = dest_dir / "raw"
+
+    source = source or YtDlpSource()
+    tries = max(1, int(config.SINGLE_FETCH_ATTEMPTS if attempts is None else attempts))
+    pause = (config.SINGLE_FETCH_RETRY_DELAY if retry_delay is None
+             else float(retry_delay))
+    failure: Optional[Exception] = None
+
+    for attempt in range(1, tries + 1):
+        # Cleared each time so a half-written file from the previous attempt
+        # cannot be mistaken for this one's download.
+        shutil.rmtree(raw_dir, ignore_errors=True)
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            clip, raw = source.fetch_one(url, raw_dir)
+            break
+        except Exception as exc:  # noqa: BLE001 — photo posts and dead links too
+            failure = exc
+            logger.info("Single fetch %s attempt %d/%d failed: %s",
+                        url, attempt, tries, str(exc)[:160])
+            if attempt < tries and pause > 0:
+                time.sleep(pause * attempt)
+    else:
+        reason = (explain_failure(str(failure)) or "TikTok refused the link").rstrip(". ")
+        if tries > 1:
+            reason += (f". Gave up after {tries} tries — TikTok's extraction is "
+                       "flaky, so the same link may well work in a minute")
+        raise ScrapeError(reason + ".") from failure
+
+    stem = clip_stem(clip)
+
+    if trim_duration is None:
+        # Keep the original bytes, just under a name worth having in Downloads.
+        final = dest_dir / f"{stem}{raw.suffix or '.mp4'}"
+        shutil.move(str(raw), final)
+        files = [final]
+        trimmed = False
+    else:
+        files = split_clip(raw, dest_dir, stem,
+                           float(trim_start or 0.0), float(trim_duration))
+        raw.unlink(missing_ok=True)
+        trimmed = True
+
+    shutil.rmtree(raw_dir, ignore_errors=True)
+    logger.info("Single fetch %s -> %d file(s)%s",
+                clip.video_id, len(files), " (trimmed)" if trimmed else "")
+    return SingleFetch(clip=clip, files=files, trimmed=trimmed)
+
+
+def prune_fetch_dirs(root: Path, max_age_hours: float) -> int:
+    """Delete single-fetch folders nobody has touched in a while.
+
+    These live under a `_`-prefixed path so store.reap_old_jobs() leaves them
+    alone (it deletes any folder in JOBS_ROOT without a matching job row, which
+    would otherwise yank a video out from under someone mid-download). That
+    exemption is also why they need their own reaper: no other one looks here."""
+    root = Path(root)
+    if not root.is_dir():
+        return 0
+    cutoff = time.time() - max(0.0, float(max_age_hours)) * 3600
+    removed = 0
+    for entry in root.iterdir():
+        if not entry.is_dir():
+            continue
+        try:
+            if entry.stat().st_mtime >= cutoff:
+                continue
+        except OSError:
+            continue
+        shutil.rmtree(entry, ignore_errors=True)
+        removed += 1
+    return removed
 
 
 # --------------------------------------------------------------------------- planning

@@ -353,6 +353,53 @@ SCRAPE_MAX_DELAY = _float("BVG_SCRAPE_MAX_DELAY", 2.0)
 # session, especially from datacenter IPs like the VM's.
 SCRAPE_COOKIES_FILE = _str("BVG_SCRAPE_COOKIES_FILE")
 
+# yt-dlp format selection, and the reason there are two of them.
+#
+# TikTok advertises `acodec: aac` on EVERY format it offers, including its
+# bytevc1 (H.265) renditions — some of which are delivered with no audio track
+# whatsoever. Measured on one post: h264_540p carried real AAC, bytevc1_540p
+# from the same post, the same minute, carried none. yt-dlp's default codec
+# preference ranks H.265 ABOVE H.264, so plain `best` picks the silent one.
+#
+# It is NOT as simple as banning H.265: on a different post the bytevc1_720p
+# rendition had perfectly good audio and was the only 720p on offer, so banning
+# it outright would have cost real resolution for nothing. And the format
+# metadata is identical either way — abr, asr, audio_channels and audio_ext
+# look the same on a silent stream as on a real one, so nothing can be decided
+# before the bytes arrive.
+#
+# So: take the best format, then look at what actually landed, and only fall
+# back to the no-H.265 selector when the file turns out to be silent.
+SCRAPE_FORMAT = _str("BVG_SCRAPE_FORMAT") or "mp4/best"
+SCRAPE_FORMAT_WITH_AUDIO = (_str("BVG_SCRAPE_FORMAT_WITH_AUDIO")
+                            or "best[vcodec!*=h265][vcodec!*=hev]/best")
+
+# Set false to skip the audio check and the recovery re-download entirely —
+# the clips are for an ASMR bank, so silence is a defect, but a caller who only
+# wants footage should not pay for a second fetch.
+SCRAPE_REQUIRE_AUDIO = _bool("BVG_SCRAPE_REQUIRE_AUDIO", True)
+
+# Single-video fetches from the scraper page land here, one folder per browser
+# session. They are synchronous and have no job row, so they need a home the
+# orphan sweep in store.reap_old_jobs() will not pull out from under a user
+# mid-download — the leading `_` is exactly what exempts a folder from it.
+#
+# Which also means nothing else ever cleans these up, hence the TTL below: the
+# page prunes stale session folders itself on every load.
+SINGLE_FETCH_ROOT = JOBS_ROOT / "_single"
+SINGLE_FETCH_TTL_HOURS = _float("BVG_SINGLE_FETCH_TTL_HOURS", 6.0)
+
+# How many times a single-link fetch re-asks TikTok before giving up.
+#
+# Extraction is genuinely flaky — measured live, one link downloaded fine and
+# then failed "Unable to extract universal data for rehydration" on the very
+# next request, seconds later. The profile scrape rides that out because a
+# failure is never recorded as "seen", so next month's scrape tries again. A
+# one-off fetch has no next scrape: without a retry the user is simply told
+# their video is a photo carousel, which it is not.
+SINGLE_FETCH_ATTEMPTS = _int("BVG_SINGLE_FETCH_ATTEMPTS", 3)
+SINGLE_FETCH_RETRY_DELAY = _float("BVG_SINGLE_FETCH_RETRY_DELAY", 2.0)
+
 
 # --------------------------------------------------------------------------- paths
 
