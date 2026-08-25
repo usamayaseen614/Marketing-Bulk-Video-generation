@@ -1676,7 +1676,10 @@ class VideoGenerator:
             spec.bg_video_x = cfg.bg_video_x
         if spec.bg_video_y is None:
             spec.bg_video_y = cfg.bg_video_y
-        if self._has_bg_videos:
+        # Opacity 0 turns the layer off entirely (build_ffmpeg_command gates on
+        # it too), so don't probe a pool and emit warnings for a layer that
+        # will never reach the output.
+        if self._has_bg_videos and (cfg.bg_video_opacity or 0) > 0:
             self._resolve_bg_video_sequence(spec)
 
         color_deck = list(RANDOM_TEXT_COLORS)
@@ -2063,8 +2066,8 @@ class VideoGenerator:
                 f"instead of repeating to {floor:g}s.")
         if target is not None and covered < target:
             spec.warnings.append(
-                f"{label}: reached the {cap}-clip cap before covering the whole "
-                f"video; the last {item}'s final frame will hold.")
+                f"{label}: reached the {cap}-{item} cap before covering the "
+                f"whole video; the last {item}'s final frame will hold.")
         return chosen, repeats
 
     def _resolve_gif_sequence(self, spec: RowSpec) -> None:
@@ -2691,6 +2694,26 @@ class VideoGenerator:
         # before decoding, which is what holds a short bed for the dwell floor.
         # Finite by construction — an unbounded -stream_loop -1 was measured
         # running away when no -t bounded the output.
+        #
+        # Claimed LAST, and trimmed to whatever budget the other layers left,
+        # because this is the layer that must give way: three variable-length
+        # runs (CTA clips, gifs, beds) share one 60-input ceiling, and at their
+        # per-layer caps they add to 120. The bed is ambience — the CTA and the
+        # gifs carry the message — so a short bed whose last frame holds beats
+        # failing the row outright, which is what the raise below would do for
+        # every row in the batch.
+        if has_bgv:
+            room = max(0, MAX_TOTAL_FFMPEG_INPUTS - n_inputs)
+            if len(bgvs) > room:
+                spec.warnings.append(
+                    f"Background videos: only {room} of {len(bgvs)} clip(s) fit "
+                    f"beside this row's other layers (the {MAX_TOTAL_FFMPEG_INPUTS}"
+                    "-input ceiling), so the sequence is shorter and its last "
+                    "frame holds. Raise 'Minimum seconds per background video' "
+                    "to need fewer.")
+                bgvs = bgvs[:room]
+                bgv_reps = bgv_reps[:room]
+                has_bgv = bool(bgvs)
         bgv_ix = ([add_input("-stream_loop", str(max(1, int(r)) - 1), "-i", str(p))
                    for p, r in zip(bgvs, bgv_reps)] if has_bgv else [])
 
@@ -2704,8 +2727,9 @@ class VideoGenerator:
                 f"{MAX_TOTAL_FFMPEG_INPUTS} limit: {len(clips)} CTA clip(s), "
                 f"{len(gifs)} gif(s), {len(sub_layers)} subliminal layer(s), "
                 f"{len(bgvs) if has_bgv else 0} background video(s). "
-                "Raise the gif dwell time so fewer gifs are needed, use fewer "
-                "CTA clips, or shorten the promo video.")
+                "Raise the gif dwell time so fewer gifs are needed, raise the "
+                "background-video dwell time, use fewer CTA clips, or shorten "
+                "the promo video.")
 
         # ---- filter graph, written against the indices claimed above ---------
         # spec.video_* are the per-row resolved box (Excel Video_* overrides,

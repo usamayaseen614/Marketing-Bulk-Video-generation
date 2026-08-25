@@ -175,6 +175,39 @@ for clip, reps in zip(fspec.bg_video_clips, fspec.bg_video_clip_repeats):
 print(f"deck: {len(pool)} clips used before any repeat; 2s clip repeats twice "
       f"under a 3s floor")
 
+# ---------- 2c. the input ceiling trims the bed instead of failing the row ----
+# Three variable-length layers share one 60-input ceiling. The bed is ambience,
+# so it must give way — before this, a long promo with short gifs AND short beds
+# raised RuntimeError, and render_row's broad except turned that into every row
+# of the batch failing with the same message.
+import video_generator as _vg
+squeeze_promo = mk(TMP / "promo_squeeze.mp4", "color=c=0x101010:s=320x240:r=30", 40.0)
+squeeze_cfg = RenderConfig(bg_color="#FF00FF", include_audio=False,
+                           preset="ultrafast", crf=30, bg_video_opacity=0.5,
+                           bg_video_min_seconds=1.0, gif_min_seconds=1.0)
+gif_pool = [mk(TMP / f"g_{i}.mp4", "color=c=0x00FFFF:s=160x120:r=30", 1.0)
+            for i in range(4)]
+# Short beds too, so both layers run to their 40-clip caps: 40 + 40 + the fixed
+# inputs is 83 against a ceiling of 60.
+short_beds = [mk(TMP / f"sb_{i}.mp4", "color=c=0xFFFF00:s=160x120:r=30", 1.0)
+              for i in range(4)]
+sq = VideoGenerator(squeeze_cfg, bg_dir, squeeze_promo, None, TMP / "wq",
+                    TMP / "oq", gif_paths=gif_pool, bg_video_paths=short_beds)
+sqspec = RowSpec.from_row(row, 3)
+sq._resolve_positions(sqspec)
+assert len(sqspec.gif_clips) + len(sqspec.bg_video_clips) > _vg.MAX_TOTAL_FFMPEG_INPUTS, \
+    "this case is meant to overflow the ceiling"
+sqcmd = sq.build_ffmpeg_command(sqspec, base_png, overlay_png, None, TMP / "sq.mp4")
+assert sum(1 for a in sqcmd if a == "-i") <= _vg.MAX_TOTAL_FFMPEG_INPUTS
+VideoGenerator._check_filter_inputs(
+    sqcmd[sqcmd.index("-filter_complex") + 1], sum(1 for a in sqcmd if a == "-i"))
+# The gifs are untouched; only the bed was shortened, and it said so.
+for clip in sqspec.gif_clips:
+    assert str(clip) in sqcmd, f"a gif was dropped: {clip.name}"
+assert any("Background videos: only" in w for w in sqspec.warnings), sqspec.warnings
+print(f"ceiling: {len(sqspec.gif_clips)} gifs kept, bed trimmed to fit "
+      f"{_vg.MAX_TOTAL_FFMPEG_INPUTS} inputs, row still renders")
+
 # ---------- 3. per-row sequence: deterministic, varies across rows ----------
 gen2 = VideoGenerator(cfg, bg_dir, promo, None, TMP / "w2", TMP / "o2",
                       bg_video_paths=list(pool))
