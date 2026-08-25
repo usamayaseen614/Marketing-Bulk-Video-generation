@@ -48,6 +48,34 @@ with tab_account:
         help="The profile to pull from. Clips come newest-first, TikTok's own order.",
     )
 
+    asset = st.radio(
+        "What to pull",
+        options=["video", "music"],
+        format_func=lambda a: {
+            "video": "Videos — clips, trimmed and sorted into slot folders",
+            "music": "Overlay music — just the sound behind each post, as MP3",
+        }[a],
+        horizontal=True,
+        help="Music mode gives you a folder of tracks to drop under your own "
+             "videos, rather than a clip bank.",
+    )
+    is_music = asset == "music"
+    if is_music:
+        st.info(
+            "**What actually lands.** TikTok does not publish the original "
+            "music file for a normal post, so each track is pulled out of the "
+            "post itself — which means it is that post's full audio (the "
+            "sound plus any voiceover over it), not an isolated stem, and it "
+            "costs the same bandwidth as downloading the video would.\n\n"
+            "Posts sharing a named sound are collapsed to one file, so an "
+            "account with 500 posts usually yields far fewer tracks. Creators' "
+            "own audio (“original sound”) has no distinct name to "
+            "match on, so those are deduplicated by content instead and near-"
+            "identical ones can slip through.\n\n"
+            "Music scrapes keep their own history, so this will not skip "
+            "anything just because the account was scraped for videos before."
+        )
+
     mode = st.radio(
         "Output layout",
         options=["batch", "dump"],
@@ -57,7 +85,12 @@ with tab_account:
         }[m],
         help="Batch mode does the sorting for you: 50 clips per batch, "
              "round-robin across the slots, 10 clips per slot.",
+        disabled=is_music,
+        captions=(["Not used for music — tracks land in one folder.", ""]
+                  if is_music else None),
     )
+    if is_music:
+        mode = "dump"
 
     col_a, col_b, col_c = st.columns(3)
 
@@ -87,17 +120,26 @@ with tab_account:
     )
 
     st.subheader("Trim window")
-    st.caption(
-        "Every clip is cut to this window — a trim, not a filter, so nothing is "
-        "dropped for being too long. Starting at 1s skips most creator intro "
-        "branding and on-screen text, which would otherwise ride into your output."
-    )
-    col_start, col_dur = st.columns(2)
-    trim_start = col_start.number_input(
-        "Start at (s)", 0.0, 60.0, settings.SCRAPE_TRIM_START, 0.5)
-    trim_duration = col_dur.number_input(
-        "Length (s)", 1.0, 60.0, settings.SCRAPE_TRIM_DURATION, 0.5)
-    st.caption(f"→ keeping {trim_start:g}s to {trim_start + trim_duration:g}s of each clip.")
+    if is_music:
+        # A track cut to a ten-second window is not a track. There is nothing
+        # here to configure, so the controls go rather than sit greyed out
+        # inviting a value that would be ignored.
+        trim_start, trim_duration = 0.0, 0.0
+        st.caption("Not used for music — each track is kept whole.")
+    else:
+        st.caption(
+            "Every clip is cut to this window — a trim, not a filter, so nothing "
+            "is dropped for being too long. Starting at 1s skips most creator "
+            "intro branding and on-screen text, which would otherwise ride into "
+            "your output."
+        )
+        col_start, col_dur = st.columns(2)
+        trim_start = col_start.number_input(
+            "Start at (s)", 0.0, 60.0, settings.SCRAPE_TRIM_START, 0.5)
+        trim_duration = col_dur.number_input(
+            "Length (s)", 1.0, 60.0, settings.SCRAPE_TRIM_DURATION, 0.5)
+        st.caption(f"→ keeping {trim_start:g}s to "
+                   f"{trim_start + trim_duration:g}s of each clip.")
 
     drive_folder = st.text_input(
         "Google Drive folder link (optional)", value="",
@@ -132,6 +174,7 @@ with tab_account:
             kind=store.KIND_SCRAPE,
             params={
                 "account": account.strip(),
+                "asset": asset,
                 "mode": mode,
                 "batches": int(n_batches),
                 "limit": int(limit),
@@ -140,14 +183,14 @@ with tab_account:
                 "skip_known": bool(skip_known),
                 "drive_folder": drive_folder.strip(),
             },
-            label=f"scrape-{handle}",
+            label=f"{'music' if is_music else 'scrape'}-{handle}",
             notify_email=notify_email.strip(),
             submitted_by=get_session_id(),
             job_id=job_id,
         )
         st.success(
-            f"**Queued a scrape of @{handle}.** You can close this tab — it runs in "
-            "the background"
+            f"**Queued a {'music scrape' if is_music else 'scrape'} of @{handle}.** "
+            "You can close this tab — it runs in the background"
             + (f" and emails {notify_email.strip()} when it's done."
                if notify_email.strip() else ".")
         )

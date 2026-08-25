@@ -335,6 +335,7 @@ def _render_batches(job: dict, df: pd.DataFrame, ws, n_batches: int,
                 cta_video_slots=ws.cta_video_slots,
                 gif_paths=ws.gif_paths,
                 bg_video_paths=ws.bg_video_paths,
+                music_paths=ws.music_paths,
             )
             for message in generator.input_warnings:
                 if message not in batch_warnings:

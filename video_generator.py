@@ -30,7 +30,7 @@ import threading
 import zlib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 import pandas as pd
 from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont, ImageOps
@@ -145,6 +145,48 @@ GIF_MAX_TOTAL_CLIPS = 40
 # rather than punctuation — a bed that changes every 5 seconds reads as flicker.
 BG_VIDEO_MIN_SECONDS = 10.0
 BG_VIDEO_MAX_TOTAL_CLIPS = 40
+
+# The music bed: a flat pool of AUDIO files sequenced exactly like the gifs and
+# the background videos — tracks are drawn until their combined length covers
+# the promo, each held for at least MUSIC_MIN_SECONDS by repeating ITSELF a
+# whole number of times. The floor is longer again than the background videos'
+# because a track that swaps every ten seconds reads as a fault, not a bed.
+#
+# Mixed against the promo's own audio by music_volume: at 0.10 the bed is at
+# 10% and the promo at 90%, a straight complementary split. amix runs with
+# normalize=0, so those numbers are the linear gains they claim to be rather
+# than something amix re-scales behind them.
+MUSIC_MIN_SECONDS = 30.0
+MUSIC_MAX_TOTAL_CLIPS = 20
+# Sample rate / layout every track is forced to before concat. Concat refuses
+# inputs that disagree, and a pool of user-supplied files disagrees as a matter
+# of course — a 44.1kHz stereo MP3 next to a 48kHz mono WAV is the normal case,
+# not the edge one.
+MUSIC_FORMAT = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
+
+# Split-audio: the promo's OWN audio track is cut into equal chunks and each is
+# replayed at its own random tempo, so the sound runs fast in places and slow in
+# others while still ending exactly with the picture.
+#
+# Exactness is arithmetic rather than luck. Chunk i is played at tempo t_i, so it
+# occupies L/t_i seconds. Writing r_i = 1/t_i, the warped track runs L*sum(r_i)
+# — so normalising the r_i to mean exactly 1 makes that N*L, the source length,
+# to the precision of the float. atempo itself rounds to its internal WSOLA
+# frames (measured 10-40ms short over a 20s clip, growing with the chunk count),
+# which apad=whole_dur then makes up.
+#
+# atempo is a PITCH-PRESERVING time stretch: the pace changes, voices do not go
+# chipmunk. It accepts 0.5-100, and the spread cap below keeps every tempo far
+# inside that — the real limit is quality, since WSOLA warbles on speech well
+# before the filter complains.
+SPLIT_AUDIO_CHUNKS = 8
+SPLIT_AUDIO_SPREAD = 0.35
+# Past ~0.6 the slow chunks smear badly and the fast ones gabble. Also keeps
+# 1/(1-spread) bounded well under atempo's ceiling.
+SPLIT_AUDIO_MAX_SPREAD = 0.6
+# Each chunk adds ~65 characters to the filter graph, which shares Windows'
+# 32767-character command line with everything else — see MAX_TOTAL_FFMPEG_INPUTS.
+SPLIT_AUDIO_MAX_CHUNKS = 24
 # Ceiling on FFmpeg inputs for ONE row across BOTH clip layers plus the fixed
 # inputs and the subliminal stills. Two independent caps are not enough: they
 # add up in a single command line, and Windows stops at 32767 characters with a
@@ -348,6 +390,52 @@ def _has_video_stream(ffmpeg: str, path: Path) -> bool:
     with _VIDEO_STREAM_LOCK:
         _VIDEO_STREAM_CACHE[key] = ok
     return ok
+
+
+# The mirror of _VIDEO_STREAM_CACHE for audio, and needed for the same class of
+# reason: a filter graph cannot take an optional stream. `-map 1:a?` quietly
+# maps nothing when the promo is silent, but `[1:a]` in -filter_complex is a
+# hard "Stream specifier ':a' ... matches no streams" before a frame is drawn.
+# So anything routing audio through the graph has to know first.
+_AUDIO_STREAM_CACHE: dict[tuple, bool] = {}
+_AUDIO_STREAM_LOCK = threading.Lock()
+_AUDIO_STREAM_RE = re.compile(r"Stream #\d+:\d+.*?: Audio", re.IGNORECASE)
+
+
+def _has_audio_stream(ffmpeg: str, path: Path) -> bool:
+    try:
+        key = (path.name.lower(), path.stat().st_size)
+    except OSError:
+        return False
+    with _AUDIO_STREAM_LOCK:
+        if key in _AUDIO_STREAM_CACHE:
+            return _AUDIO_STREAM_CACHE[key]
+    ok = False
+    try:
+        proc = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)],
+                              **_FF_CAPTURE, timeout=60)
+        ok = _AUDIO_STREAM_RE.search(proc.stderr or "") is not None
+    except (subprocess.TimeoutExpired, OSError):
+        ok = False
+    with _AUDIO_STREAM_LOCK:
+        _AUDIO_STREAM_CACHE[key] = ok
+    return ok
+
+
+def split_audio_tempos(n: int, spread: float, rng: random.Random) -> list[float]:
+    """`n` random atempo factors whose playback times sum to the source length.
+
+    Draw the time-stretch factors r_i (how much LONGER chunk i plays), normalise
+    them to mean exactly 1 so the warped track is exactly as long as what went
+    in, and return the tempos 1/r_i. See the SPLIT_AUDIO_* constants."""
+    n = max(2, int(n))
+    spread = max(0.0, min(float(spread), SPLIT_AUDIO_MAX_SPREAD))
+    stretches = [rng.uniform(1.0 - spread, 1.0 + spread) for _ in range(n)]
+    total = sum(stretches)
+    if total <= 0:                      # only reachable at spread >= 1
+        return [1.0] * n
+    scale = n / total
+    return [1.0 / (r * scale) for r in stretches]
 
 
 # How long a file's VIDEO STREAM runs, as opposed to what its container header
@@ -770,6 +858,26 @@ class RenderConfig:
     variant_salt: int = 0
     audio_bitrate: str = "192k"
     include_audio: bool = True
+    # ---- the music bed. 0 = off, and off means the audio path is byte-for-byte
+    # what it always was: `-map <promo>:a?` straight into AAC, no filter graph.
+    # Above 0 the promo's audio drops to (1 - music_volume) and the bed comes in
+    # at music_volume, a complementary split — "music at 10%" leaves the original
+    # at 90%. Linear gain, not perceptual: 0.10 is about -20dB.
+    music_volume: float = 0.0
+    # Dwell floor for the music sequence. Scoped batch-wide for the same reason
+    # as gif_min_seconds and bg_video_min_seconds — it is pacing, and a per-row
+    # column would make the FFmpeg input count vary row to row.
+    music_min_seconds: float = MUSIC_MIN_SECONDS
+    # ---- split audio. Cuts the PROMO's own audio into split_audio_chunks equal
+    # pieces and replays each at its own random tempo, so it runs fast in places
+    # and slow in others and still ends exactly with the picture. Picture and
+    # sound drift apart in the middle by design. Pitch is preserved (atempo).
+    # The chunk tempos are drawn from the row's seed, so every output video in a
+    # batch warps differently and re-rendering a sheet reproduces it exactly.
+    split_audio: bool = False
+    split_audio_chunks: int = SPLIT_AUDIO_CHUNKS
+    # How far tempos stray from 1.0. 0.35 gives roughly 0.74x-1.54x.
+    split_audio_spread: float = SPLIT_AUDIO_SPREAD
     font_path: Optional[str] = None   # the user's uploaded TTF/OTF, if any
     # Default font + artistic style for texts whose *_Font / *_Style cells are
     # blank. default_font is a FONT_LIBRARY key, FONT_SYSTEM, or FONT_CUSTOM.
@@ -936,6 +1044,11 @@ class RowSpec:
     # because build_ffmpeg_command zips them into `-stream_loop N -i path`.
     bg_video_clips: Optional[list] = None
     bg_video_clip_repeats: Optional[list] = None
+    # The row's music sequence, filled by _resolve_music_sequence. Same contract
+    # as gif_clips/gif_clip_repeats: index-aligned, and build_ffmpeg_command
+    # zips them into `-stream_loop N -i path`, so they MUST stay equal length.
+    music_clips: Optional[list] = None
+    music_clip_repeats: Optional[list] = None
     # The sheet's row number (1-based), mixed into placement_seed so two rows
     # with identical text still get distinct random picks — CTA-video clips,
     # colors, sizes, auto-placement. Without it, a templated sheet where every
@@ -1063,6 +1176,7 @@ class VideoGenerator:
         cta_video_slots: Optional[list] = None,
         gif_paths: Optional[list] = None,
         bg_video_paths: Optional[list] = None,
+        music_paths: Optional[list] = None,
     ):
         self.config = config
         self.video_path = Path(video_path)
@@ -1133,6 +1247,24 @@ class VideoGenerator:
                     "(audio-only or corrupt) — skipped.")
         self.bg_video_paths = good_bgvs
         self._has_bg_videos = bool(self.bg_video_paths)
+        # The music pool: audio files, so the check is the mirror image of the
+        # clip pools' — drop anything with no AUDIO stream and warn, never
+        # raise. A stray cover image dragged in with the tracks would otherwise
+        # fail every row with FFmpeg's "matches no streams".
+        good_music = []
+        for p in (music_paths or []):
+            p = Path(p)
+            if _has_audio_stream(self.ffmpeg, p):
+                good_music.append(p)
+            else:
+                self.input_warnings.append(
+                    f"Music '{p.name}' has no audio stream (or isn't a media "
+                    "file) — skipped.")
+        self.music_paths = good_music
+        self._has_music = bool(self.music_paths)
+        # Whether the PROMO carries audio, probed once. `-map <promo>:a?` could
+        # stay ignorant of this; a filter graph cannot (see _has_audio_stream).
+        self._promo_has_audio = _has_audio_stream(self.ffmpeg, self.video_path)
 
         self._bg_index, self._bg_names = self._build_bg_index(Path(bg_dir))
         # Fonts are cached by (file path, named variation, size). The uploaded
@@ -1682,6 +1814,14 @@ class VideoGenerator:
         if self._has_bg_videos and (cfg.bg_video_opacity or 0) > 0:
             self._resolve_bg_video_sequence(spec)
 
+        # The music bed has no box and no z-order — it is only ever heard — so
+        # unlike every layer above it there is nothing to resolve for the
+        # editor. Gated on the volume for the same reason the background videos
+        # are gated on opacity: a bed mixed at 0 never reaches the output, so
+        # probing its pool would only produce warnings about a silent layer.
+        if self._has_music and (cfg.music_volume or 0) > 0 and cfg.include_audio:
+            self._resolve_music_sequence(spec)
+
         color_deck = list(RANDOM_TEXT_COLORS)
         for element in spec.text_elements:
             if not element.text:
@@ -2094,6 +2234,41 @@ class VideoGenerator:
             spec, self.bg_video_paths, 0xB6D,
             max(0.1, float(self.config.bg_video_min_seconds or BG_VIDEO_MIN_SECONDS)),
             BG_VIDEO_MAX_TOTAL_CLIPS, "Background videos", "background video")
+
+    def _resolve_music_sequence(self, spec: RowSpec) -> None:
+        """Fill spec.music_clips / spec.music_clip_repeats for this row.
+
+        Third caller of the dwell-sequence dealer, and it wants exactly what the
+        other two do: a derived-length sequence over a flat pool with a floor.
+        That the items are audio rather than video changes nothing here — only
+        how build_ffmpeg_command wires them up."""
+        if not self.music_paths:
+            return
+        spec.music_clips, spec.music_clip_repeats = self._deal_dwell_sequence(
+            spec, self.music_paths, 0x5D3,
+            max(0.1, float(self.config.music_min_seconds or MUSIC_MIN_SECONDS)),
+            MUSIC_MAX_TOTAL_CLIPS, "Music", "track")
+
+    def _split_audio_tempos(self, spec: RowSpec) -> list[float]:
+        """This row's per-chunk tempos, or [] when the effect is off/unusable.
+
+        Seeded off the row like every other random choice, with its own salt so
+        two rows that drew the same gifs do not also warp identically."""
+        cfg = self.config
+        if not (cfg.split_audio and cfg.include_audio and self._promo_has_audio):
+            return []
+        chunks = max(2, min(int(cfg.split_audio_chunks or SPLIT_AUDIO_CHUNKS),
+                            SPLIT_AUDIO_MAX_CHUNKS))
+        # The chunk boundaries are cut at fractions of the measured length, so
+        # without a measurement there is nothing to cut. Warn rather than guess:
+        # a silent no-op would read as "the checkbox does nothing".
+        if self._probe_duration(self.video_path) is None:
+            spec.warnings.append(
+                "Split audio: couldn't measure the promo's duration, so the "
+                "audio can't be cut into chunks — left at normal speed.")
+            return []
+        rng = random.Random(spec.placement_seed() ^ 0x5A7)
+        return split_audio_tempos(chunks, cfg.split_audio_spread, rng)
 
     def _paint_text(self, target: Image.Image, ax: float, ay: float, element: TextSpec,
                     what: str = "full", fill: Optional[tuple] = None) -> None:
@@ -2516,11 +2691,18 @@ class VideoGenerator:
 
     # Every `[<n>:v]` reference in a filter_complex.
     _FILTER_INPUT_RE = re.compile(r"\[(\d+):v\]")
+    _FILTER_AUDIO_INPUT_RE = re.compile(r"\[(\d+):a\]")
 
     @classmethod
-    def _check_filter_inputs(cls, filter_complex: str, n_inputs: int) -> None:
+    def _check_filter_inputs(cls, filter_complex: str, n_inputs: int,
+                             audio_only: Iterable[int] = ()) -> None:
         """Assert that each of the n_inputs declared inputs is referenced
         exactly once in the filter graph.
+
+        `audio_only` names the inputs carrying no video (the music bed), which
+        are checked against their `[N:a]` references instead — they are a fourth
+        variable-length run in the same command line and drift exactly as
+        silently as the other three.
 
         This is a real guard, not a formality. With two clip layers plus the
         subliminal stills, the inputs form three variable-length runs in one
@@ -2531,10 +2713,15 @@ class VideoGenerator:
         filter chain here, so any drift shows up as one index referenced twice
         and another not at all, which this catches and a max-index check does
         not."""
+        audio_only = set(audio_only)
         seen: dict[int, int] = {}
         for match in cls._FILTER_INPUT_RE.findall(filter_complex):
             index = int(match)
             seen[index] = seen.get(index, 0) + 1
+        for match in cls._FILTER_AUDIO_INPUT_RE.findall(filter_complex):
+            index = int(match)
+            if index in audio_only:
+                seen[index] = seen.get(index, 0) + 1
         missing = [i for i in range(n_inputs) if i not in seen]
         duplicated = sorted(i for i, count in seen.items() if count > 1)
         stray = sorted(i for i in seen if i >= n_inputs)
@@ -2655,6 +2842,14 @@ class VideoGenerator:
         # references and shift every later input by one.
         if len(bgv_reps) != len(bgvs):
             bgv_reps = (bgv_reps + [1] * len(bgvs))[:len(bgvs)]
+        music = list(spec.music_clips or [])
+        music_reps = list(spec.music_clip_repeats or [])
+        has_music = bool(self._has_music and music and cfg.include_audio
+                         and (cfg.music_volume or 0) > 0)
+        # Same normalisation, same reason as the two above: zip() truncates, so
+        # a length mismatch would emit fewer -i than the graph references.
+        if len(music_reps) != len(music):
+            music_reps = (music_reps + [1] * len(music))[:len(music)]
         sub_layers = sub_layers or []
         # These two are built together and stay aligned by construction, but a
         # mismatch here would be silent and expensive: zip() truncates, so the
@@ -2690,6 +2885,13 @@ class VideoGenerator:
         gif_ix = [add_input("-stream_loop", str(max(1, int(r)) - 1), "-i", str(p))
                   for p, r in zip(gifs, gif_reps)]
         sub_ix = [add_still(sl["png"]) for sl in sub_layers]
+        # Music is claimed before the background beds, and for the same reason
+        # they are claimed last: the beds have a graceful degradation (a short
+        # sequence holds its last frame) and the music does not. A bed that
+        # under-fills is cosmetic; a track dropped for want of an input slot is
+        # a gap of silence.
+        music_ix = ([add_input("-stream_loop", str(max(1, int(r)) - 1), "-i", str(p))
+                     for p, r in zip(music, music_reps)] if has_music else [])
         # Background beds, claimed like the gifs: -stream_loop N replays a clip
         # before decoding, which is what holds a short bed for the dwell floor.
         # Finite by construction — an unbounded -stream_loop -1 was measured
@@ -2726,10 +2928,11 @@ class VideoGenerator:
                 f"This row needs {n_inputs} FFmpeg inputs, over the "
                 f"{MAX_TOTAL_FFMPEG_INPUTS} limit: {len(clips)} CTA clip(s), "
                 f"{len(gifs)} gif(s), {len(sub_layers)} subliminal layer(s), "
+                f"{len(music) if has_music else 0} music track(s), "
                 f"{len(bgvs) if has_bgv else 0} background video(s). "
                 "Raise the gif dwell time so fewer gifs are needed, raise the "
-                "background-video dwell time, use fewer CTA clips, or shorten "
-                "the promo video.")
+                "background-video or music dwell time, use fewer CTA clips, or "
+                "shorten the promo video.")
 
         # ---- filter graph, written against the indices claimed above ---------
         # spec.video_* are the per-row resolved box (Excel Video_* overrides,
@@ -2890,20 +3093,123 @@ class VideoGenerator:
             en = f":enable='{enable}'" if enable else ""
             parts.append(f"[{last}]{label}overlay={pos}{en}{fmt}[{out}]{sep}")
             last = out
+
+        # ---- audio ----------------------------------------------------------
+        # The DEFAULT path is untouched: with no music bed and no split, audio
+        # is still `-map <promo>:a?` straight into AAC — optional, so a silent
+        # promo maps nothing and renders fine. The graph is only entered when
+        # one of the two features is actually on, so every sheet that renders
+        # today produces the same command it did before.
+        #
+        # Once inside it, though, `?` is gone: a filter graph cannot take an
+        # optional stream, which is why self._promo_has_audio exists.
+        tempos = self._split_audio_tempos(spec)
+        aparts: list[str] = []
+        audio_out = ""              # non-empty => map this label instead
+        if cfg.include_audio and (has_music or tempos):
+            main_dur = self._probe_duration(self.video_path)
+            legs: list[str] = []
+            # Complementary split: music at v leaves the original at 1-v.
+            vol = max(0.0, min(float(cfg.music_volume or 0.0), 1.0))
+            if self._promo_has_audio:
+                if tempos:
+                    n = len(tempos)
+                    step = main_dur / n
+                    # asegment, not asplit+atrim: one decode feeding N cuts
+                    # rather than N branches each discarding what it is not for,
+                    # and about half the graph text per chunk — which matters,
+                    # because this shares Windows' command-line ceiling with
+                    # everything else here.
+                    stamps = "|".join(f"{step * (i + 1):.4f}" for i in range(n - 1))
+                    aparts.append(f"[{promo_i}:a]asegment=timestamps={stamps}"
+                                 + "".join(f"[as{i}]" for i in range(n)) + ";")
+                    for i, tempo in enumerate(tempos):
+                        # asetpts rebases each cut to zero so concat can stitch
+                        # them; atempo is a pitch-preserving stretch, so the
+                        # pace moves and the voices do not go chipmunk.
+                        aparts.append(f"[as{i}]asetpts=PTS-STARTPTS,"
+                                     f"atempo={tempo:.5f}[aw{i}];")
+                    # apad=whole_dur, never a bare apad. atempo rounds to its
+                    # WSOLA frames, so the joined track lands a few tens of ms
+                    # short and needs making up — but a bare apad pads FOREVER,
+                    # and an infinite leg under amix's duration=first would run
+                    # the render away on any path where -t went missing. The
+                    # bounded form both fills the gap and terminates on its own
+                    # (verified with -t removed entirely).
+                    aparts.append("".join(f"[aw{i}]" for i in range(n))
+                                 + f"concat=n={n}:v=0:a=1,"
+                                 f"apad=whole_dur={main_dur:.3f}[apromo];")
+                else:
+                    aparts.append(f"[{promo_i}:a]anull[apromo];")
+                if has_music:
+                    aparts.append(f"[apromo]volume={1.0 - vol:.4f}[apromov];")
+                    legs.append("[apromov]")
+                else:
+                    legs.append("[apromo]")
+            if has_music:
+                # With no original audio to balance against, the bed IS the mix:
+                # honouring "10%" literally would produce a near-silent video
+                # that reads as a bug rather than a setting.
+                bed_vol = vol if self._promo_has_audio else 1.0
+                if not self._promo_has_audio:
+                    spec.warnings.append(
+                        "Music: this promo video has no audio track, so the "
+                        f"music plays at full volume rather than {vol:.0%} — "
+                        "there is nothing to mix it against.")
+                for k, idx in enumerate(music_ix):
+                    # aformat before concat, always: concat refuses inputs whose
+                    # rate or layout disagree, and a pool of user-supplied
+                    # tracks disagreeing is the normal case (44.1kHz stereo MP3
+                    # beside a 48kHz mono WAV), not the edge one.
+                    aparts.append(f"[{idx}:a]{MUSIC_FORMAT},asetpts=PTS-STARTPTS[mu{k}];")
+                if len(music_ix) > 1:
+                    aparts.append("".join(f"[mu{k}]" for k in range(len(music_ix)))
+                                 + f"concat=n={len(music_ix)}:v=0:a=1[museq];")
+                    museq = "[museq]"
+                else:
+                    museq = "[mu0]"
+                aparts.append(f"{museq}volume={bed_vol:.4f}[abed];")
+                legs.append("[abed]")
+            if len(legs) == 2:
+                # normalize=0 or the weights stop meaning what they say — amix
+                # otherwise rescales by the number of live inputs. duration=first
+                # ends the mix with the promo leg, which apad has already pinned
+                # to the video's exact length.
+                aparts.append("".join(legs) + "amix=inputs=2:duration=first"
+                                             ":dropout_transition=0:normalize=0[aout]")
+                audio_out = "[aout]"
+            elif legs:
+                # A lone music leg still has to reach the end of the video: with
+                # nothing else mapped, -shortest would otherwise cut the picture
+                # at the point the bed ran out. (The promo leg is already pinned
+                # by its own apad above.) Bounded, so it cannot run away.
+                if legs[0] == "[abed]" and main_dur:
+                    aparts.append(f"[abed]apad=whole_dur={main_dur:.3f}[aout]")
+                    audio_out = "[aout]"
+                else:
+                    audio_out = legs[0]
+
+        # The last VIDEO chain deliberately carries no trailing ';' (it feeds
+        # -map), and the audio chains must not leave one either — FFmpeg reads a
+        # dangling separator as an empty filterchain and refuses the graph.
         filter_complex = "".join(parts)
+        if aparts:
+            filter_complex += ";" + "".join(aparts).rstrip(";")
         # The invariant that actually catches an index slip. Checking that the
         # highest referenced index equals n_inputs-1 does NOT: an injected
         # off-by-one in either direction passes it and still renders a different
         # video with exit 0.
-        self._check_filter_inputs(filter_complex, n_inputs)
+        self._check_filter_inputs(filter_complex, n_inputs, audio_only=music_ix)
 
         cmd += ["-filter_complex", filter_complex, "-map", "[out]"]
-        if cfg.include_audio:
+        if not cfg.include_audio:
+            cmd += ["-an"]
+        elif audio_out:
+            cmd += ["-map", audio_out, "-c:a", "aac", "-b:a", cfg.audio_bitrate]
+        else:
             # Take audio from the promo video if it exists; never fail without
             # it. The CTA video's and the gifs' audio is intentionally ignored.
             cmd += ["-map", f"{promo_i}:a?", "-c:a", "aac", "-b:a", cfg.audio_bitrate]
-        else:
-            cmd += ["-an"]
         cmd += [
             "-c:v", "libx264",
             "-preset", cfg.preset,

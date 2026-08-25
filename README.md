@@ -334,6 +334,11 @@ So the video made from **row 2** on **video 3.mp4** reads `sakfjn`.
 | Minimum seconds per background video | The dwell floor (default 10, longer than the GIF floor). A clip shorter than this repeats **itself** a whole number of times to clear it; one already longer plays once, in full. Sidebar-only, like the GIF floor — it is batch-wide pacing |
 | Background video opacity | How visible the pool's clips are (1–50%, default 8). Keep it low so texts stay legible; 0 would disable the layer, so the slider floors at 1 |
 | Background video box | The box the row's clip is **cover-filled** into (scaled + center-cropped). Defaults to the **full canvas**; overridable per row via `BG_Video_X`/`BG_Video_Y`/`BG_Video_Width`/`BG_Video_Height` |
+| Music tracks | The music bed's pool (MP3/WAV/M4A/AAC/OGG/OPUS/FLAC). **Flat, like the gifs and background videos** — tracks play back-to-back for the length of each video, dealt from a shuffled deck (seeded per row). Leave empty to skip the layer. Can come from a Drive folder instead — see *Where the music comes from* |
+| Music volume | The music's share of the mix (0–100%, default 0 = off). The promo video's own audio takes the rest: 10% music leaves the original at 90%. Linear gain, so 10% is about −20 dB. A promo with **no** audio track of its own plays the music at full volume instead, and says so in the row's warnings — there is nothing to mix it against |
+| Minimum seconds per track | The music dwell floor (default 30, longest of the three). A track shorter than this repeats **itself** a whole number of times to clear it; one already longer plays once. Sidebar-only, like the other two floors |
+| Split the audio track (random speed) | Cuts the promo video's **own** audio into equal chunks and replays each at its own random speed — fast in places, slow in others, and still ending exactly with the picture. Sound and vision drift apart mid-video by design. Pitch is preserved (`atempo`), so voices do not go chipmunk. Seeded per row, so every output in the batch warps differently and re-running a sheet reproduces it exactly. Off by default, and off means the audio path is exactly what it was before this setting existed |
+| Chunks / Speed variation | Split-audio only. **Chunks** (2–24, default 8) is how many pieces the audio is cut into — more chunks means the speed changes more often, and the change is audible at each seam. **Speed variation** (5–60%, default 35) is how far each chunk strays from normal: 35% gives roughly 0.74×–1.54×. Past about 50% the slow parts smear and the fast parts gabble |
 | Layer order (z-index) | Which layer sits on top: promo video (1), **GIFs (2)**, CTA video (3), CTA image (4), texts (5). Higher = nearer the front; the background is always at the back. Raise the gif number above the promo video's to float a gif over the video instead of behind it. The **background videos have no number**: they always sit directly beneath the texts, over any layer numbered at or below the texts — a layer raised *above* the texts also rises above the veil |
 | Default font | The font used when a text's `*_Font` cell is blank — a bundled family, the system font, or your uploaded font |
 | Default artistic style | The style used when a text's `*_Style` cell is blank — `classic`, `outline`, `shadow`, or `neon` |
@@ -448,6 +453,31 @@ There are two options rather than four: uploading, or a single pooled Drive fold
 (downloaded straight into `assets/gifs/`). "Scrape a TikTok account" is deliberately absent —
 it harvests posts by view count, which means nothing for a pool of loops.
 
+### Where the music comes from
+
+The music pool has its own source selector too, and it is the only one that reads **audio**
+out of Drive — a folder of MP3s is invisible to the clip, gif and background-video selectors,
+and a folder of MP4s is invisible to this one. Two options, same as the gifs: upload, or a
+single pooled Drive folder (downloaded straight into `assets/music/`).
+
+### What to expect from the audio features
+
+* **The music bed is a sequence, not a song.** At the 30-second floor a 20-second video hears
+  one track and a 3-minute video hears about six, dealt from a shuffled deck. As with the
+  gifs, the pool is the source of variety *across* videos rather than within one, and the
+  last track is cut wherever the video ends.
+* **The volume split is complementary and linear.** Music at 10% means gain 0.10 on the bed
+  and 0.90 on the promo's own audio — roughly −20 dB and −0.9 dB. The mix runs with
+  `normalize=0`, so those are the gains applied, not something FFmpeg rescales afterwards.
+* **Split audio always ends on time.** The chunk speeds are drawn at random and then
+  normalised so their playback times add back up to the original length exactly, so the
+  warped track is neither short nor long however the dice fall. Any residue from `atempo`'s
+  internal rounding (tens of milliseconds over a 20-second clip) is made up by `apad`.
+* **Split audio desyncs on purpose.** Picture and sound drift apart in the middle and land
+  together at the end. If lip-sync matters, leave it off.
+* **Split audio does nothing to a silent promo.** There is no audio to cut, so the row
+  renders normally and says so in its warnings rather than failing.
+
 ### What to expect from the gif layer
 
 Two consequences of the dwell floor are worth knowing before you judge a batch:
@@ -471,6 +501,37 @@ downloaded.
 | **📋 Jobs** | Queued / running / finished batches, live progress, per-row errors, downloads |
 | **🎵 TikTok Scraper** | Paste an account, get clips downloaded, trimmed to 10s, and dropped into Drive pre-sorted into `batch_NN/slot_N` folders — plus a `metadata.xlsx` of views, likes, duration and post date so curating 500 clips means sorting by views, not scrubbing thumbnails |
 | **🔧 Setup** | What's configured (email, Drive, Gemini, worker) with a test button for each, and caption-pool generation |
+
+#### Scraping the overlay music instead of the videos
+
+The scraper's *What to pull* switch has a second setting: **Overlay music**, which gives you
+a folder of MP3s to drop into the generator's Music uploader (or to point the Music source
+at, as a Drive link) rather than a clip bank. Batch layout and the trim window are ignored —
+tracks land whole, in one flat `music_<date>` folder — and the sheet leads with
+`Track` / `Artist` / `Album` instead of the clip columns.
+
+Three things about it are worth knowing before you run one:
+
+* **It is the post's audio, not the original sound file.** TikTok publishes `music.playUrl`
+  only for audio-only slideshows, so for an ordinary post the track has to come out of the
+  post itself. What lands is that post's full mix — the sound plus any voiceover over it —
+  and it costs the same bandwidth as downloading the video would, because yt-dlp has to
+  fetch the MP4 whenever no audio-only rendition is on offer.
+* **Posts sharing a named sound collapse to one file.** An account with 500 posts usually
+  draws on far fewer sounds, and this is what makes the scrape worth running. Byte-hashing
+  cannot do it (each post clips the same track to a different length), so the match is on the
+  sound's name. A creator's **own** audio has no distinct name — TikTok calls all of it
+  "original sound" — so those fall back to content hashing and near-identical ones can slip
+  through.
+* **Music scrapes keep their own history.** Scraping an account for music after scraping it
+  for videos pulls everything; the two dedup ledgers are separate. Posts skipped for
+  duplicating a sound are remembered too, so a re-scrape next month does not re-download all
+  of them to rediscover the same verdict.
+* **Photo carousels are kept, not skipped.** A video scrape drops them (they have no video to
+  download); a music scrape keeps them, because they are the one post type whose *original*
+  sound file TikTok does publish — and the flat-enumeration hint that flags them is unreliable
+  enough to drop real videos too. A post that turns out to have no audio at all is counted as
+  a skip, same as any other download failure.
 
 ### Batches, mixing, and the two filenames
 
@@ -738,6 +799,16 @@ everything in a single pass per row:
 # optional CTA image (only when uploaded): configurable alpha fade-in, placed on top
 [N:v]format=rgba,fade=t=in:st=CFS:d=CFD:alpha=1[cta]
 [withgifs][cta]overlay=CTA_X:CTA_Y,format=yuv420p
+# --- audio. Only built when the music bed or split-audio is on; otherwise the audio is
+# still `-map <promo>:a?` straight into AAC, exactly as it always was.
+# split audio: cut the promo's own track into N chunks, each at its own random tempo:
+[1:a]asegment=timestamps=T1|T2|...[as0][as1]... ; [as0]asetpts=PTS-STARTPTS,atempo=S0[aw0]; ...
+[aw0][aw1]...concat=n=N:v=0:a=1,apad=whole_dur=DUR[apromo]
+# music bed: each track claimed with `-stream_loop <repeats-1>` like the gifs, forced to a
+# common rate/layout so concat will join them, then joined and mixed complementarily:
+[M:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[mu0]; ...
+[mu0][mu1]...concat=n=M:v=0:a=1[museq] ; [museq]volume=VOL[abed]
+[apromo]volume=1-VOL[apromov] ; [apromov][abed]amix=inputs=2:duration=first:normalize=0[aout]
 ```
 
 Layers are stacked in ascending z-index order, so the actual chain depends on the sidebar's
@@ -756,9 +827,29 @@ Three things about the gif layer are load-bearing and easy to undo by accident:
 - **No `setpts` on the gif chain.** `-stream_loop` already emits continuous monotonic PTS and
   `concat` re-stamps the joined timeline; `setpts=N/FRAME_RATE/TB` drops one frame per segment.
 
+Four things about the audio chain are load-bearing in the same way:
+
+- **`apad=whole_dur=DUR`, never a bare `apad`.** `atempo` rounds to its internal WSOLA frames,
+  so the joined chunks land tens of milliseconds short and need making up — but a bare `apad`
+  pads *forever*, and an infinite leg under `amix`'s `duration=first` runs the render away on
+  any path where `-t` goes missing. The bounded form fills the gap and terminates on its own.
+- **`normalize=0` on the mix.** Without it `amix` rescales by the number of live inputs and
+  the volume slider stops meaning what it says.
+- **`aformat` before the music `concat`.** `concat` refuses inputs whose sample rate or
+  channel layout disagree, and a pool of user-supplied tracks disagreeing is the normal case
+  (a 44.1 kHz stereo MP3 beside a 48 kHz mono WAV), not the edge one.
+- **`_promo_has_audio` is probed, not assumed.** `-map 1:a?` quietly maps nothing when the
+  promo is silent; `[1:a]` inside `-filter_complex` is a hard "matches no streams" failure
+  before a frame is drawn. Everything routing audio through the graph has to know first.
+
+The split-audio tempos are drawn at random and then normalised so their *playback times* sum
+to the source length exactly: chunk `i` at tempo `t_i` occupies `L/t_i` seconds, so scaling
+the reciprocals `1/t_i` to mean 1 makes the total `N*L` whatever the dice do. That is why
+there is no drift to correct for and no "close enough" tolerance anywhere in the feature.
+
 Input indices are claimed through a helper that returns the index it took, rather than computed
 by summing list lengths, and `_check_filter_inputs` then asserts every input is referenced
-exactly once. That guard exists because an off-by-one here does **not** fail — it renders a
+exactly once (audio-only inputs against their `[N:a]` references, the rest against `[N:v]`). That guard exists because an off-by-one here does **not** fail — it renders a
 different video with exit code 0 and empty stderr.
 
 Gif dwell times are computed from the **video stream's** duration, not the container header:

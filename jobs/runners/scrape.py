@@ -38,7 +38,8 @@ def _sleep_politely() -> None:
 def _metadata_frame(clips: dict[str, tiktok.ClipInfo],
                     plan: list[tiktok.PlannedClip],
                     items_by_id: dict[str, dict],
-                    owner_of: Optional[dict] = None) -> pd.DataFrame:
+                    owner_of: Optional[dict] = None,
+                    is_music: bool = False) -> pd.DataFrame:
     """One row per clip.
 
     This exists so curating 500 clips is a matter of sorting by views and
@@ -55,7 +56,7 @@ def _metadata_frame(clips: dict[str, tiktok.ClipInfo],
     for video_id, clip in clips.items():
         item = items_by_id.get(video_id) or {}
         meta = item.get("meta") or {}
-        rows.append({
+        row = {
             "Video_ID": video_id,
             "Views": clip.view_count,
             "Likes": clip.like_count,
@@ -75,7 +76,20 @@ def _metadata_frame(clips: dict[str, tiktok.ClipInfo],
             "Placement": ", ".join(placement.get(video_id, [])),
             "Status": item.get("render_status") or "pending",
             "Error": item.get("render_error") or "",
-        })
+        }
+        if is_music:
+            # The sound is the point of a music scrape, so it leads. Audio /
+            # Segments / the trim columns are meaningless here -- what landed is
+            # one whole track, and it is audio by construction.
+            for key in ("Audio", "Segments", "Trimmed_Duration_s"):
+                row.pop(key, None)
+            row = {"Video_ID": row.pop("Video_ID"),
+                   "Track": meta.get("track") or "",
+                   "Artist": meta.get("artists") or "",
+                   "Album": meta.get("album") or "",
+                   "Track_Duration_s": meta.get("duration"),
+                   **row}
+        rows.append(row)
 
     frame = pd.DataFrame(rows)
     if not frame.empty:
@@ -129,7 +143,16 @@ def run(job: dict) -> dict:
 
     account_input = params.get("account") or ""
     account = tiktok.account_name(account_input)
-    mode = params.get("mode", "batch")
+    # What to pull: the videos, or just the sound behind each post. Kept apart
+    # from `mode` (which is layout) because they answer different questions --
+    # a music scrape has no slot semantics, so it forces the dump layout below.
+    asset = params.get("asset", "video")
+    is_music = asset == "music"
+    # The dedup ledger is keyed on the account alone, so a music scrape of an
+    # account already scraped for videos would find every post "already seen"
+    # and pull nothing. Give the two runs separate histories.
+    ledger = f"{account}#music" if is_music else account
+    mode = "dump" if is_music else params.get("mode", "batch")
     n_batches = int(params.get("batches") or 1)
     limit = int(params.get("limit") or config.SCRAPE_MAX_VIDEOS)
     trim_start = float(params.get("trim_start", config.SCRAPE_TRIM_START))
@@ -150,10 +173,17 @@ def run(job: dict) -> dict:
 
     # A profile advertising "1000 posts" may hold far fewer real videos, so the
     # true count is reported rather than silently coming up short.
-    likely_photos = [c for c in found if c.likely_photo]
-    candidates = [c for c in found if not c.likely_photo]
+    # Music mode keeps the photo carousels. They are the one post type whose
+    # ORIGINAL sound yt-dlp can fetch directly (music.playUrl, used when a post
+    # yields no video formats at all), so dropping them would throw away the
+    # best-quality audio on the profile -- and `likely_photo` is a hint from a
+    # flat enumeration, not a verdict, so it also drops real videos. Letting the
+    # download decide is what the video path does for every other uncertainty
+    # too; a post that turns out to have no audio lands in `skipped` below.
+    likely_photos = [] if is_music else [c for c in found if c.likely_photo]
+    candidates = found if is_music else [c for c in found if not c.likely_photo]
 
-    known = store.known_clip_ids(account) if skip_known else set()
+    known = store.known_clip_ids(ledger) if skip_known else set()
     duplicates = [c for c in candidates if c.video_id in known]
     fresh = [c for c in candidates if c.video_id not in known]
 
@@ -183,7 +213,7 @@ def run(job: dict) -> dict:
     # ---- 2. download + trim, one at a time, politely
     store.set_stage(job_id, "downloading")
     ffmpeg = tiktok.find_ffmpeg()
-    seen_hashes = store.known_content_hashes(account) if skip_known else set()
+    seen_hashes = store.known_content_hashes(ledger) if skip_known else set()
 
     downloaded = trimmed = skipped = silent = 0
     pending = store.pending_render_items(job_id, stage=store.STAGE_SCRAPE)
@@ -199,6 +229,48 @@ def run(job: dict) -> dict:
             continue
 
         try:
+            if is_music:
+                # The sound, not the post. Lands straight in clips_dir -- there
+                # is no trim step: a track cut to a 10s window is not a track.
+                raw, clip = source.download_audio(clip, clips_dir)
+                clip_by_id[video_id] = clip   # the sheet wants the enriched copy
+                downloaded += 1
+                digest = tiktok.content_hash(raw)
+                # Dedup on the SOUND where TikTok named one, on the bytes where
+                # it did not. The byte hash alone cannot collapse a sound reused
+                # across posts, because each post clips it to a different length
+                # -- and collapsing those is the entire reason to scrape music.
+                key = tiktok.sound_key(clip) or digest
+                if key in seen_hashes:
+                    raw.unlink(missing_ok=True)
+                    # Recorded, not just skipped -- see the remember_clips call
+                    # below for why this one skip is worth remembering.
+                    store.update_item(
+                        job_id, item["idx"], render_status=store.ITEM_SKIPPED,
+                        meta={**(item.get("meta") or {}), "content_hash": key,
+                              "track": clip.track, "artists": clip.artists},
+                        render_error=(f"Already have this sound ({clip.track})"
+                                      if tiktok.sound_key(clip)
+                                      else "Duplicate audio (already have it)"))
+                    skipped += 1
+                    _sleep_politely()
+                    continue
+                seen_hashes.add(key)
+                trimmed += 1
+                store.update_item(
+                    job_id, item["idx"], name=raw.name,
+                    render_status=store.ITEM_DONE, render_error=None,
+                    meta={**(item.get("meta") or {}),
+                          "content_hash": key,
+                          "segments": [raw.name],
+                          "track": clip.track, "artists": clip.artists,
+                          "album": clip.album,
+                          "duration": tiktok.probe_duration(raw, ffmpeg)},
+                )
+                store.heartbeat(job_id, stage=f"downloading {n}/{len(pending)}")
+                _sleep_politely()
+                continue
+
             raw = source.download(clip, raw_dir)
             downloaded += 1
 
@@ -255,8 +327,19 @@ def run(job: dict) -> dict:
     items = store.list_items(job_id, stage=store.STAGE_SCRAPE)
     items_by_id = {(i.get("meta") or {}).get("video_id"): i for i in items}
     good = [i for i in items if i["render_status"] == store.ITEM_DONE]
+    if is_music:
+        # A post skipped for carrying the same SOUND as one already taken is a
+        # settled verdict, not a flaky failure -- and it is the common case, not
+        # the rare one: an account with 500 posts routinely draws on 80 sounds.
+        # Without this every re-scrape re-downloads all 420 of the rest to
+        # rediscover what it already knew. Genuine extraction failures are still
+        # NOT remembered (see the scrapers/tiktok.py docstring) -- those are
+        # flaky and worth retrying.
+        good += [i for i in items
+                 if i["render_status"] == store.ITEM_SKIPPED
+                 and (i.get("meta") or {}).get("content_hash")]
     store.remember_clips(
-        account,
+        ledger,
         [{"video_id": (i.get("meta") or {}).get("video_id"),
           "content_hash": (i.get("meta") or {}).get("content_hash"),
           "duration": (i.get("meta") or {}).get("trimmed_duration")}
@@ -284,8 +367,9 @@ def run(job: dict) -> dict:
     # ---- 5. metadata sheet
     store.set_stage(job_id, "building metadata")
     sheet_path = store.job_dir(job_id) / "metadata.xlsx"
-    frame = _metadata_frame({c.video_id: c for c in fresh}, plan,
-                            items_by_id, owner_of)
+    frame = _metadata_frame({c.video_id: clip_by_id.get(c.video_id, c)
+                             for c in fresh}, plan,
+                            items_by_id, owner_of, is_music=is_music)
     frame.to_excel(sheet_path, index=False, engine="openpyxl")
 
     # ---- 6. package, so the clips are reachable even without Drive
@@ -302,7 +386,7 @@ def run(job: dict) -> dict:
     # ---- 7. upload
     drive_result = ({} if params.get("upload") is False else
                     _upload(job, account, mode, plan, items_by_id,
-                            clips_dir, sheet_path))
+                            clips_dir, sheet_path, is_music=is_music))
 
     elapsed = time.time() - started
     batches_built = len({p.batch for p in plan if p.batch}) if mode != "dump" else 0
@@ -311,6 +395,7 @@ def run(job: dict) -> dict:
 
     result = {
         "account": account,
+        "asset": asset,
         "videos_found": len(candidates),
         "photos_skipped": len(likely_photos) + skipped,
         "duplicates": len(duplicates),
@@ -331,7 +416,8 @@ def run(job: dict) -> dict:
 
 
 def _upload(job: dict, account: str, mode: str, plan: list[tiktok.PlannedClip],
-            items_by_id: dict, clips_dir: Path, sheet_path: Path) -> dict:
+            items_by_id: dict, clips_dir: Path, sheet_path: Path,
+            is_music: bool = False) -> dict:
     """Push clips into Drive, pre-split into the slot folders the sidebar
     uploaders expect — the user drags 5 folders in instead of hand-sorting 50
     loose files."""
@@ -359,7 +445,11 @@ def _upload(job: dict, account: str, mode: str, plan: list[tiktok.PlannedClip],
     # group in parallel.
     groups: dict[tuple, list[tiktok.PlannedClip]] = {}
     if mode == "dump":
-        folder = f"dump_{time.strftime('%Y-%m-%d')}"
+        # music_<date> rather than dump_<date>: the two land side by side under
+        # the same account folder, and a folder of MP3s that says "dump" is one
+        # a Drive-link paste will send to the wrong pool.
+        stamp = time.strftime('%Y-%m-%d')
+        folder = f"music_{stamp}" if is_music else f"dump_{stamp}"
         for entry in plan:
             groups.setdefault((folder,), []).append(entry)
     else:

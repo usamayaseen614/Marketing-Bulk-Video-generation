@@ -184,7 +184,8 @@ def _clips_stage(job: dict, params: dict) -> dict:
     }
 
 
-def _download_drive_folder(job_id: str, link: str, dest: Path, label: str) -> dict:
+def _download_drive_folder(job_id: str, link: str, dest: Path, label: str,
+                           kind: str = "video") -> dict:
     """Pull one Drive folder's clips onto this machine.
 
     The point of the whole mode: the clips already live in Drive, and the VM
@@ -201,7 +202,8 @@ def _download_drive_folder(job_id: str, link: str, dest: Path, label: str) -> di
         store.heartbeat(job_id, stage=f"downloading {label} {done}/{total}")
 
     try:
-        report = drive.download_folder(folder_id, dest, on_progress=progress)
+        report = drive.download_folder(folder_id, dest, on_progress=progress,
+                                       kind=kind)
     except drive.DriveError as exc:
         # These already say exactly what is wrong and what to do about it.
         raise RuntimeError(f"{label}: {exc}") from exc
@@ -209,9 +211,9 @@ def _download_drive_folder(job_id: str, link: str, dest: Path, label: str) -> di
     have = report["downloaded"] + report["skipped"]
     if not have:
         raise RuntimeError(
-            f"{label}: no clips could be downloaded from “{report['folder']}”. "
+            f"{label}: nothing could be downloaded from “{report['folder']}”. "
             + (f"First error: {report['errors'][0]}" if report["errors"]
-               else "The folder has no video files in it.")
+               else f"The folder has no {kind} files in it.")
         )
     if report["failed"]:
         # Not fatal — a batch built from 98 of 100 clips is still the batch you
@@ -296,7 +298,7 @@ def _drive_clips_stage(job: dict, params: dict) -> dict:
 
 
 def _drive_pool_stage(job: dict, params: dict, param_key: str,
-                      subdir: str, label: str) -> dict:
+                      subdir: str, label: str, kind: str = "video") -> dict:
     """A FLAT clip pool from a Google Drive folder (the gifs, the background
     videos — anything without slots).
 
@@ -309,7 +311,8 @@ def _drive_pool_stage(job: dict, params: dict, param_key: str,
     dest = store.assets_dir(job_id) / subdir
     dest.mkdir(parents=True, exist_ok=True)
     store.set_stage(job_id, f"downloading {label} from Drive")
-    report = _download_drive_folder(job_id, params.get(param_key), dest, label)
+    report = _download_drive_folder(job_id, params.get(param_key), dest, label,
+                                   kind=kind)
     return {
         "source": "drive_folder",
         "drive_folder": report["folder"],
@@ -387,6 +390,11 @@ def run(job: dict) -> dict:
         result["bg_videos"] = _drive_pool_stage(
             job, params, "bg_videos_drive_folder", "bg_videos",
             "background videos")
+
+    # ---- 1d. music (independent of every pool above)
+    if params.get("music_source") == "drive_folder":
+        result["music"] = _drive_pool_stage(
+            job, params, "music_drive_folder", "music", "music", kind="audio")
 
     # ---- 2. captions
     if params.get("generate_pool"):

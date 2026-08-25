@@ -160,6 +160,12 @@ class ClipInfo:
     repost_count: Optional[int] = None
     timestamp: Optional[int] = None
     uploader: str = ""
+    # The sound behind the post. Only ever populated by a FULL extraction --
+    # flat enumeration carries no music info at all, which is why the music
+    # scrape can only learn what a post's sound is after downloading it.
+    track: str = ""
+    artists: str = ""
+    album: str = ""
 
     @property
     def likely_photo(self) -> bool:
@@ -191,7 +197,38 @@ def _clip_from_info(info: dict, url: str, uploader_fallback: str = "") -> ClipIn
         repost_count=info.get("repost_count"),
         timestamp=info.get("timestamp"),
         uploader=info.get("uploader") or uploader_fallback,
+        track=str(info.get("track") or "").strip(),
+        artists=", ".join(info.get("artists") or []) or str(info.get("artist") or ""),
+        album=str(info.get("album") or "").strip(),
     )
+
+
+# TikTok's placeholder for "this creator's own audio". yt-dlp already collapses
+# the English form ("original sound - somehandle") to this, and the localised
+# forms are caught by the handle suffix instead -- see sound_key.
+_GENERIC_SOUND = "original sound"
+
+
+def sound_key(clip: ClipInfo) -> str:
+    """A stable identity for the sound behind a post, or "" when TikTok did not
+    name one specific enough to trust.
+
+    Deduping a music scrape by sound name is the whole point of it: an account
+    with 500 posts routinely draws on far fewer sounds, and byte-hashing cannot
+    collapse them because each post clips the same track to a different length.
+
+    But it must not over-collapse either. A creator's own audio is titled
+    "original sound - <their handle>", which is one NAME across hundreds of
+    genuinely different recordings -- so those return "" and fall back to the
+    byte hash."""
+    track = re.sub(r"\s+", " ", (clip.track or "").strip().lower())
+    if not track or track == _GENERIC_SOUND:
+        return ""
+    handle = (clip.uploader or "").strip().lower()
+    if handle and track.endswith(f"- {handle}"):
+        return ""
+    artists = re.sub(r"\s+", " ", (clip.artists or "").strip().lower())
+    return track + chr(0x1f) + artists
 
 
 def clip_stem(clip: ClipInfo) -> str:
@@ -336,6 +373,61 @@ class YtDlpSource:
             return path
         finally:
             shutil.rmtree(alt_dir, ignore_errors=True)
+
+    def download_audio(self, clip: ClipInfo, dest_dir: Path) -> tuple[Path, ClipInfo]:
+        """Fetch just the sound of one post, as an MP3, plus what TikTok says it is.
+
+        There is no way to fetch the ORIGINAL music file for an ordinary post:
+        TikTok exposes `music.playUrl` only for audio-only slideshows, where
+        yt-dlp finds no video formats at all. For everything else the audio has
+        to come out of the post itself, so this is `bestaudio/best` plus the
+        extract-audio postprocessor -- yt-dlp takes an audio-only rendition
+        where TikTok offers one and strips the MP4 where it does not.
+
+        Two things follow, and both are deliberate rather than oversights:
+        bandwidth is the same as a video scrape whenever no audio rendition
+        exists, and what lands is the post's full MIX (the sound plus any
+        voiceover over it), not an isolated stem.
+
+        Returns the enriched ClipInfo too. The track name only exists in a full
+        extraction -- enumeration is flat and carries no music info -- and the
+        sound name is what a music scrape deduplicates on.
+        """
+        dest_dir = Path(dest_dir)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        # ffmpeg_location, always: the postprocessor is what turns the download
+        # into an MP3, and without this it looks for `ffmpeg` on PATH -- which
+        # is not where this project's binary necessarily is (see find_ffmpeg).
+        opts = {
+            "outtmpl": str(dest_dir / f"{clip.video_id}.%(ext)s"),
+            "format": config.SCRAPE_AUDIO_FORMAT,
+            "ignoreerrors": False,
+            "noplaylist": True,
+            "ffmpeg_location": find_ffmpeg(),
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": config.SCRAPE_AUDIO_CODEC,
+                "preferredquality": config.SCRAPE_AUDIO_QUALITY,
+            }],
+        }
+        with self._ydl(opts) as ydl:
+            info = ydl.extract_info(clip.url, download=True)
+        if info and info.get("_type") == "playlist":
+            entries = [e for e in (info.get("entries") or []) if e]
+            info = entries[0] if entries else None
+        if not info:
+            raise ScrapeError(f"TikTok returned nothing for {clip.url}")
+
+        enriched = _clip_from_info(
+            info, url=clip.url, uploader_fallback=clip.uploader)
+        # Enumeration knows the view counts; the download knows the sound. Keep
+        # both -- the metadata sheet wants the first and dedup wants the second.
+        for field_name in ("view_count", "like_count", "comment_count",
+                           "repost_count", "timestamp", "title"):
+            if not getattr(enriched, field_name):
+                setattr(enriched, field_name, getattr(clip, field_name))
+        return _produced_file(dest_dir, clip.video_id), enriched
 
     def fetch_one(self, url: str, dest_dir: Path) -> tuple[ClipInfo, Path]:
         """Resolve *and* download a single post in one extraction.

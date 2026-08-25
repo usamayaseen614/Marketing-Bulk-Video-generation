@@ -260,7 +260,14 @@ def render_job(job: dict, expanded: bool = False) -> None:
         # files directly rather than through Drive)
         zip_path = result.get("zip_path")
         if zip_path and Path(zip_path).is_file():
-            if job["kind"] == store.KIND_SCRAPE:
+            if job["kind"] == store.KIND_SCRAPE and result.get("asset") == "music":
+                label = "⬇️ Download all tracks (ZIP)"
+                st.caption(
+                    "One MP3 per distinct sound, in a single flat folder — "
+                    "drop them into the generator's Music uploader, or point the "
+                    "Music source at this scrape's Drive folder."
+                )
+            elif job["kind"] == store.KIND_SCRAPE:
                 label = "⬇️ Download all clips (ZIP)"
                 st.caption(
                     "Clips are laid out as `batch_NN/slot_N/` inside the ZIP — "

@@ -39,9 +39,20 @@ MAX_PROMO_VIDEOS = 20
 # — and the symptom was clips that vanished between two green log lines.
 VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
 
+# The same definition for the music bed, and it has to be kept in step for the
+# same reason VIDEO_SUFFIXES does — the Drive downloader, the pipeline stage and
+# this module all decide "is this one of mine?" from it, and a set that only two
+# of the three agree on shows up as tracks vanishing between two green log lines.
+AUDIO_SUFFIXES = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".oga", ".opus",
+                  ".flac", ".wma"}
+
 
 def is_video(path: Path) -> bool:
     return Path(path).suffix.lower() in VIDEO_SUFFIXES
+
+
+def is_audio(path: Path) -> bool:
+    return Path(path).suffix.lower() in AUDIO_SUFFIXES
 
 
 @dataclass
@@ -69,6 +80,10 @@ class Workspace:
     # length of each video. Drawn full-canvas by default, always above the
     # promo/gif/CTA layers and below the texts.
     bg_video_paths: list = field(default_factory=list)
+    # The music pool. Flat and sequenced like the two above, but heard rather
+    # than seen: tracks play back-to-back under the promo's own audio, mixed at
+    # RenderConfig.music_volume.
+    music_paths: list = field(default_factory=list)
 
     def promo_for_batch(self, batch_index: int) -> Path:
         """The promo video for batch `batch_index` (0-based).
@@ -83,7 +98,7 @@ class Workspace:
 
 def stage_uploads(dest: Path, video_file, zip_file, cta_file, font_file,
                   cta_video_slot_files=None, gif_files=None,
-                  bg_video_files=None) -> None:
+                  bg_video_files=None, music_files=None) -> None:
     """Write the in-memory uploads to disk where FFmpeg/PIL can read them.
 
     `video_file` may be a single upload or a list of up to MAX_PROMO_VIDEOS —
@@ -146,6 +161,15 @@ def stage_uploads(dest: Path, video_file, zip_file, cta_file, font_file,
         if f is not None:
             (bgv_dir / Path(f.name).name).write_bytes(f.getvalue())
 
+    # The music pool: one flat folder, same shape again. Its own folder rather
+    # than sharing bg_videos/ because the two are filtered by different suffix
+    # sets — a stray .mp4 in here would be silently ignored, and a .mp3 there.
+    music_dir = dest / "music"
+    music_dir.mkdir(parents=True, exist_ok=True)
+    for f in music_files or []:
+        if f is not None:
+            (music_dir / Path(f.name).name).write_bytes(f.getvalue())
+
 
 def workspace_from_dir(assets: Path, work_dir: Path) -> Workspace:
     """Rebuild a Workspace by reading a folder staged by stage_uploads().
@@ -192,6 +216,12 @@ def workspace_from_dir(assets: Path, work_dir: Path) -> Workspace:
         (f for f in bgv_dir.iterdir() if f.is_file() and is_video(f))
     ) if bgv_dir.is_dir() else []
 
+    # The music pool, sorted for the same reproducibility reason.
+    music_dir = assets / "music"
+    music_paths = sorted(
+        (f for f in music_dir.iterdir() if f.is_file() and is_audio(f))
+    ) if music_dir.is_dir() else []
+
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     return Workspace(
@@ -204,13 +234,14 @@ def workspace_from_dir(assets: Path, work_dir: Path) -> Workspace:
         gif_paths=gif_paths,
         video_paths=video_paths,
         bg_video_paths=bg_video_paths,
+        music_paths=music_paths,
     )
 
 
 def build_workspace(tmp: Path, video_file, zip_file, cta_file, font_file,
                     cta_video_slot_files=None, gif_files=None,
-                    bg_video_files=None) -> Workspace:
+                    bg_video_files=None, music_files=None) -> Workspace:
     """Stage the uploads into `tmp` and return the Workspace over them."""
     stage_uploads(tmp, video_file, zip_file, cta_file, font_file,
-                  cta_video_slot_files, gif_files, bg_video_files)
+                  cta_video_slot_files, gif_files, bg_video_files, music_files)
     return workspace_from_dir(tmp, tmp / "work")

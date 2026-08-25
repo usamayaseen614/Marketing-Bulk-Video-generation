@@ -379,6 +379,15 @@ SCRAPE_FORMAT_WITH_AUDIO = (_str("BVG_SCRAPE_FORMAT_WITH_AUDIO")
 # wants footage should not pay for a second fetch.
 SCRAPE_REQUIRE_AUDIO = _bool("BVG_SCRAPE_REQUIRE_AUDIO", True)
 
+# The music scrape. `bestaudio/best` lets yt-dlp take an audio-only rendition
+# when TikTok offers one and fall back to the muxed MP4 when it does not; the
+# extract-audio postprocessor strips the sound out either way. MP3 rather than
+# the native m4a because the output is a bed to drop into a timeline, and mp3
+# is the format every editor and every phone opens without asking.
+SCRAPE_AUDIO_FORMAT = _str("BVG_SCRAPE_AUDIO_FORMAT") or "bestaudio/best"
+SCRAPE_AUDIO_CODEC = _str("BVG_SCRAPE_AUDIO_CODEC") or "mp3"
+SCRAPE_AUDIO_QUALITY = _str("BVG_SCRAPE_AUDIO_QUALITY") or "192"
+
 # Single-video fetches from the scraper page land here, one folder per browser
 # session. They are synchronous and have no job row, so they need a home the
 # orphan sweep in store.reap_old_jobs() will not pull out from under a user

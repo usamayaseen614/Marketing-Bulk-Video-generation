@@ -1082,6 +1082,21 @@ def _looks_like_video(name: str, mime: str) -> bool:
     return workspace.is_video(str(name or ""))
 
 
+def _looks_like_audio(name: str, mime: str) -> bool:
+    """The same question for the music bed. Same mime-then-extension order, and
+    the same reason: Drive-for-desktop hands back application/octet-stream for
+    plenty of perfectly ordinary MP3s."""
+    if str(mime or "").startswith("audio/"):
+        return True
+    return workspace.is_audio(str(name or ""))
+
+
+# What a source folder is being read FOR. The two differ only in which files
+# count, so everything downstream takes this rather than growing a parallel set
+# of audio functions.
+_WANTED = {"video": _looks_like_video, "audio": _looks_like_audio}
+
+
 def _children(folder_id: str) -> list[dict]:
     """Every non-trashed child of one folder, following pagination.
 
@@ -1150,8 +1165,12 @@ def folder_info(folder_id: str) -> dict:
 
 
 def list_videos(folder_id: str, recursive: bool = True,
-                max_files: Optional[int] = None) -> list[dict]:
+                max_files: Optional[int] = None,
+                kind: str = "video") -> list[dict]:
     """Every video file under a source folder, as [{id, name, size}].
+
+    `kind="audio"` returns the music files instead — same walk, same ordering
+    guarantees, different answer to "is this one of mine?".
 
     Ordering is deterministic — by folder path, then filename — because the
     names handed to the downloader are de-duplicated positionally. A resumed
@@ -1159,6 +1178,7 @@ def list_videos(folder_id: str, recursive: bool = True,
     again under a different name."""
     root = folder_info(folder_id)["id"]
     limit = max_files if max_files is not None else config.DRIVE_MAX_SOURCE_FILES
+    wanted = _WANTED[kind]
 
     found: list[tuple[tuple, str, dict]] = []
     stack: list[tuple[str, tuple]] = [(root, ())]
@@ -1178,7 +1198,7 @@ def list_videos(folder_id: str, recursive: bool = True,
                     seen_folders.add(entry_id)
                     stack.append((entry_id, path + (name,)))
                 continue
-            if not _looks_like_video(name, mime):
+            if not wanted(name, mime):
                 continue
             found.append((path, name, {
                 "id": entry_id,
@@ -1189,8 +1209,8 @@ def list_videos(folder_id: str, recursive: bool = True,
     found.sort(key=lambda f: (f[0], f[1], f[2]["id"]))
     if len(found) > limit:
         raise DriveError(
-            f"That folder holds {len(found):,} videos, more than the "
-            f"{limit:,}-file limit. Point at a folder with just the clips you "
+            f"That folder holds {len(found):,} {kind} files, more than the "
+            f"{limit:,}-file limit. Point at a folder with just the files you "
             "want, or raise BVG_DRIVE_MAX_SOURCE_FILES."
         )
     return [f[2] for f in found]
@@ -1246,8 +1266,12 @@ def download_folder(
     dest_dir: Path,
     concurrency: Optional[int] = None,
     on_progress: Optional[Callable[[int, int], None]] = None,
+    kind: str = "video",
 ) -> dict:
     """Download every video under a Drive folder into `dest_dir`.
+
+    `kind="audio"` fetches the music files instead; everything else about the
+    walk, the resume check and the reporting is identical.
 
     Returns {folder, files, downloaded, skipped, failed, bytes, errors}.
     `skipped` counts clips a previous attempt already fetched: the whole point
@@ -1260,7 +1284,7 @@ def download_folder(
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
     info = folder_info(folder_id)
-    files = list_videos(info["id"])
+    files = list_videos(info["id"], kind=kind)
     names = local_names(files)
     total = len(files)
 
@@ -1307,7 +1331,7 @@ def download_folder(
     return report
 
 
-def check_source(link: str) -> tuple[bool, str]:
+def check_source(link: str, kind: str = "video") -> tuple[bool, str]:
     """Can we READ this folder, and what is in it?
 
     Separate from check_access() on purpose: that proves we can *write* into a
@@ -1317,20 +1341,21 @@ def check_source(link: str) -> tuple[bool, str]:
         return False, "Paste a Google Drive folder link first."
     try:
         info = folder_info(folder_id)
-        files = list_videos(info["id"])
+        files = list_videos(info["id"], kind=kind)
     except DriveError as exc:
         return False, str(exc)
     except Exception as exc:  # noqa: BLE001
         return False, f"Could not read that folder: {exc}"
 
+    noun = {"video": "clips", "audio": "tracks"}[kind]
     if not files:
         return False, (
-            f"“{info['name']}” opened fine, but there are no video files in it "
+            f"“{info['name']}” opened fine, but there are no {kind} files in it "
             f"(looked in its sub-folders too). {folder_link(info['id'])}"
         )
     size_gb = sum(f["size"] for f in files) / 1024 ** 3
     return True, (
-        f"“{info['name']}” — **{len(files):,} clips**, {size_gb:.2f} GB. "
+        f"“{info['name']}” — **{len(files):,} {noun}**, {size_gb:.2f} GB. "
         "They'll be downloaded straight to the server when the batch runs."
     )
 

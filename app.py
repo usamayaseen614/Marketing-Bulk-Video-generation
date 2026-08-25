@@ -32,6 +32,11 @@ from video_generator import (
     DEFAULT_CTA_VIDEO_SLOTS,
     FPS_CHOICES,
     MAX_CTA_VIDEO_SLOTS,
+    MUSIC_MIN_SECONDS,
+    SPLIT_AUDIO_CHUNKS,
+    SPLIT_AUDIO_MAX_CHUNKS,
+    SPLIT_AUDIO_MAX_SPREAD,
+    SPLIT_AUDIO_SPREAD,
     FONT_CHOICES,
     FONT_CUSTOM,
     REQUIRED_COLUMNS,
@@ -64,6 +69,7 @@ def make_generator(ws: Workspace, config: RenderConfig, output_dir: Path) -> Vid
         cta_video_slots=ws.cta_video_slots,
         gif_paths=ws.gif_paths,
         bg_video_paths=ws.bg_video_paths,
+        music_paths=ws.music_paths,
     )
     # Bad uploads caught at construction (e.g. an audio-only "video" clip that
     # would crash FFmpeg mid-render) — show them wherever a generator is built.
@@ -256,6 +262,69 @@ with st.sidebar:
                                          CANVAS_W, key="bgv_w")
         bg_video_h = bgv_c2.number_input("BG video height", 50, CANVAS_H,
                                          CANVAS_H, key="bgv_h")
+
+    st.subheader("Audio")
+    music_files = st.file_uploader(
+        "Music tracks (optional)",
+        type=["mp3", "wav", "m4a", "aac", "ogg", "opus", "flac"],
+        key="music_pool", accept_multiple_files=True,
+        help="A pool of music laid under the promo video's own sound. Tracks "
+             "play one after another for the length of each video — the same "
+             "treatment as the background videos, with its own dwell floor "
+             "below — dealt from a shuffled deck so every track is used before "
+             "any repeats. Can also come from a Drive folder: see 'Music "
+             "source' in the main panel.",
+    )
+    # Not gated on the uploader: the pool may arrive from Drive instead.
+    music_volume = st.slider(
+        "Music volume (%)", 0, 100, 0,
+        help="The music's share of the mix. The promo video's original audio "
+             "takes the rest — 10% music leaves the original at 90%. 0 turns "
+             "the layer off completely, and the audio comes out exactly as it "
+             "did before this setting existed.",
+    )
+    if music_volume:
+        st.caption(
+            f"Music at **{music_volume}%**, the promo's own audio at "
+            f"**{100 - music_volume}%**. A promo with no audio track of its own "
+            "plays the music at full volume instead — there is nothing to mix "
+            "it against.")
+    music_min_seconds = st.number_input(
+        "Minimum seconds per track", 1.0, 600.0, float(MUSIC_MIN_SECONDS), 5.0,
+        help="The dwell floor. Tracks play one after another for the length of "
+             "the video; one shorter than this repeats itself until it clears "
+             "the floor, one already longer plays once. Long by default — a bed "
+             "that swaps every few seconds reads as a fault rather than a mix.",
+    )
+    split_audio = st.checkbox(
+        "Split the audio track (random speed)", value=False,
+        help="Cuts the promo video's OWN audio into equal chunks and replays "
+             "each at its own random speed, so it runs fast in places and slow "
+             "in others — and still ends exactly with the picture. Sound and "
+             "vision drift apart in the middle by design. Pitch is preserved, "
+             "so voices do not go chipmunk. Every output video in the batch "
+             "warps differently.",
+    )
+    if split_audio:
+        split_audio_chunks = st.slider(
+            "Chunks", 2, SPLIT_AUDIO_MAX_CHUNKS, int(SPLIT_AUDIO_CHUNKS),
+            help="How many pieces the audio is cut into. More chunks = the "
+                 "speed changes more often; the change is audible at each seam.",
+        )
+        split_audio_spread = st.slider(
+            "Speed variation (%)", 5, int(SPLIT_AUDIO_MAX_SPREAD * 100),
+            int(SPLIT_AUDIO_SPREAD * 100),
+            help="How far each chunk strays from normal speed. 35% gives "
+                 "roughly 0.74x-1.54x. Past about 50% the slow parts smear and "
+                 "the fast parts gabble.",
+        ) / 100.0
+        st.caption(
+            f"~{20 / max(1, split_audio_chunks):.1f}s per chunk on a 20-second "
+            "video. The chunks always add back up to the full length, so the "
+            "audio never runs short or long.")
+    else:
+        split_audio_chunks = SPLIT_AUDIO_CHUNKS
+        split_audio_spread = SPLIT_AUDIO_SPREAD
 
     st.subheader("Video placement")
     if is_split:
@@ -616,6 +685,11 @@ config = RenderConfig(
     bg_video_x=int(bg_video_x), bg_video_y=int(bg_video_y),
     bg_video_w=int(bg_video_w), bg_video_h=int(bg_video_h),
     bg_video_min_seconds=float(bg_video_min_seconds),
+    music_volume=float(music_volume) / 100.0,
+    music_min_seconds=float(music_min_seconds),
+    split_audio=bool(split_audio),
+    split_audio_chunks=int(split_audio_chunks),
+    split_audio_spread=float(split_audio_spread),
     video_x=int(video_x), video_y=int(video_y),
     video_w=int(video_w), video_h=int(video_h),
     cta_x=int(cta_x), cta_y=int(cta_y),
@@ -1091,6 +1165,41 @@ if bg_video_source == "drive_folder":
             _ok, _msg = _drv.check_source(clip_params["bg_videos_drive_folder"])
             (st.success if _ok else st.error)(f"**Background videos** — {_msg}")
 
+# ---- Music source. Its own selector again, and the only one that reads AUDIO
+# files out of Drive — a folder of MP3s is invisible to the three above.
+st.markdown("**Music**")
+music_source = st.radio(
+    "Where does the music come from?",
+    options=["upload", "drive_folder"],
+    format_func=lambda m: {
+        "upload": "Upload it in the sidebar (as above)",
+        "drive_folder": "Paste a Google Drive folder link — the server "
+                        "downloads it itself (no upload)",
+    }[m],
+    horizontal=True,
+    key="music_source",
+    help="Independent of where the clips, gifs and background videos come from.",
+)
+if music_source == "drive_folder":
+    clip_params["music_drive_folder"] = st.text_input(
+        "Music folder — Drive link", key="music_drive",
+        placeholder="https://drive.google.com/drive/folders/…",
+        help="Every audio file in this folder — and its sub-folders — joins the "
+             "music pool. Share it with the service account first.",
+    ).strip()
+    st.caption("The sidebar music uploader is ignored in this mode.")
+    if st.button("🔍 Check the music folder",
+                 disabled=not clip_params.get("music_drive_folder")):
+        from integrations import drive as _drv
+
+        with st.spinner("Reading Drive…"):
+            _ok, _msg = _drv.check_source(clip_params["music_drive_folder"],
+                                          kind="audio")
+            (st.success if _ok else st.error)(f"**Music** — {_msg}")
+if music_source == "upload" and not music_files and music_volume:
+    st.caption("No tracks uploaded yet — the music layer stays off until there "
+               "are some.")
+
 # ---- captions
 st.subheader("4. Captions")
 _pool = store.active_pool()
@@ -1415,7 +1524,7 @@ if preview_clicked and ready:
                 # the row's chosen clip so the box is draggable in the preview.
                 ws = build_workspace(Path(tmp), video_file, zip_file, cta_file,
                                      font_file, cta_video_slot_files, gif_files,
-                                     bg_video_files)
+                                     bg_video_files, music_files)
                 generator = make_generator(ws, config, Path(tmp) / "out")
                 # Same deterministic background assignment as the real batch,
                 # so the preview shows the row's actual background — and the
@@ -1451,7 +1560,7 @@ if render_row_clicked and ready:
             try:
                 ws = build_workspace(Path(tmp), video_file, zip_file, cta_file,
                                      font_file, cta_video_slot_files, gif_files,
-                                     bg_video_files)
+                                     bg_video_files, music_files)
                 generator = make_generator(ws, config, Path(tmp) / "out")
                 # Same deterministic background assignment as the real batch, so
                 # this row renders with its actual background. df already carries
@@ -1592,6 +1701,12 @@ if generate_clicked and ready and bg_video_source == "drive_folder" \
              "background videos, or switch their source back to upload.")
     generate_clicked = False
 
+if generate_clicked and ready and music_source == "drive_folder" \
+        and not clip_params.get("music_drive_folder"):
+    st.error("Not queued — paste the Google Drive folder link for the music, "
+             "or switch its source back to upload.")
+    generate_clicked = False
+
 if generate_clicked and ready and grid_errors:
     # A grid whose headers do not resolve would render the wrong promo's words
     # onto thousands of videos and look entirely successful doing it. There is
@@ -1628,7 +1743,10 @@ if generate_clicked and ready:
                       None if gif_source != "upload" else gif_files,
                       # Same rule as the gifs: gated on this layer's OWN
                       # source flag, never on anyone else's.
-                      None if bg_video_source != "upload" else bg_video_files)
+                      None if bg_video_source != "upload" else bg_video_files,
+                      # And again for the music, which is the only pool read out
+                      # of Drive as AUDIO — see check_source(kind="audio").
+                      None if music_source != "upload" else music_files)
 
         # The sheet is written with any preview-editor edits baked in, so the
         # worker renders exactly what this page was showing. updated_excel_bytes
@@ -1652,6 +1770,7 @@ if generate_clicked and ready:
         # that still has to come down from Drive.
         chained = (clip_source != "upload" or gif_source != "upload"
                    or bg_video_source != "upload"
+                   or music_source != "upload"
                    or caption_mode == "generate")
         store.create_job(
             kind=store.KIND_PIPELINE if chained else store.KIND_RENDER,
@@ -1671,6 +1790,7 @@ if generate_clicked and ready:
                 "clip_source": clip_source,
                 "gif_source": gif_source,
                 "bg_video_source": bg_video_source,
+                "music_source": music_source,
                 "drive_folder": drive_folder.strip(),
                 **clip_params,
                 **caption_params,
