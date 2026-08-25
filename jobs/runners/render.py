@@ -103,6 +103,9 @@ def _hashtag_override(job_id: str, params: dict) -> Optional[list[str]]:
     one hashtag set per row, or none at all. With none, a filename is just its
     caption — the naming code already treats the hashtag as optional, so the
     "exactly one #" rule simply becomes "at most one"."""
+    if params.get("fixed_tail"):
+        # A fixed CTA line replaces hashtags outright — see naming.FIXED_TAILS.
+        return []
     source = params.get("hashtag_source", "pool")
     if source == "none":
         return []
@@ -205,8 +208,10 @@ def _assign_names(job_id: str, slots: list[Slot], n_rows: int,
             ) from exc
         drawn = dict(zip(need_pool, pairs))
 
-    # Hashtags may come from somewhere other than the pool entirely.
+    # Hashtags may come from somewhere other than the pool entirely — or be
+    # replaced wholesale by a fixed CTA line drawn per video.
     override = _hashtag_override(job_id, params or {})
+    fixed_tail = bool((params or {}).get("fixed_tail"))
 
     rows = []
     used_sheet = used_pool = used_headline = 0
@@ -225,11 +230,18 @@ def _assign_names(job_id: str, slots: list[Slot], n_rows: int,
         if override is not None and not from_sheet[slot]:
             # Cycled rather than random so the spread is even and reproducible.
             hashtags = override[n % len(override)] if override else ""
+        if fixed_tail:
+            # Blanked, not just unused: the results sheet reports this column,
+            # and hashtags listed there but absent from every filename would be
+            # a lie the user only discovers after posting.
+            hashtags = ""
         rows.append((slot, caption, hashtags))
 
     # De-duplicate names across the WHOLE render, not per batch — two batches
     # drawing similar captions would otherwise collide inside a mixed folder.
-    name_pairs = naming.names_for_rows([(c, h) for _s, c, h in rows])
+    name_pairs = naming.names_for_rows(
+        [(c, h) for _s, c, h in rows],
+        tails=naming.FIXED_TAILS if fixed_tail else None)
 
     for (slot, caption, hashtags), (short, long_name) in zip(rows, name_pairs):
         idx = batching.item_index(slot.batch, slot.row, n_rows)
@@ -248,7 +260,8 @@ def _assign_names(job_id: str, slots: list[Slot], n_rows: int,
         "from_headline": used_headline,
         "pool_id": pool["id"] if pool else None,
         "theme": pool.get("theme") if pool else None,
-        "hashtag_source": (params or {}).get("hashtag_source", "pool"),
+        "hashtag_source": "fixed_tail" if fixed_tail else
+                          (params or {}).get("hashtag_source", "pool"),
         "reason": None if pool else
                   "No caption pool — names fall back to the sheet's Headline.",
     }
@@ -321,6 +334,7 @@ def _render_batches(job: dict, df: pd.DataFrame, ws, n_batches: int,
                 output_dir=store.videos_dir(job_id) / batching.source_folder_name(batch),
                 cta_video_slots=ws.cta_video_slots,
                 gif_paths=ws.gif_paths,
+                bg_video_paths=ws.bg_video_paths,
             )
             for message in generator.input_warnings:
                 if message not in batch_warnings:

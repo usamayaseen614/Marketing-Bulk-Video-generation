@@ -22,10 +22,24 @@ only when two names actually collide, and that suffix is budgeted inside the
 
 from __future__ import annotations
 
+import random
 import re
 from typing import Iterable, Optional
 
 EXTENSION = ".mp4"
+
+# Fixed call-to-action lines, one appended at random to every name when the
+# batch asks for them. They REPLACE hashtags rather than joining them: a name
+# carrying both would blow the 90-character cap and read as two endings.
+# The three run 43/46/47 characters. The longest leaves 42 for the caption
+# inside the cap, which clears the 40 captions are generated at
+# (config.CAPTION_MAX_CHARS) — with 2 to spare, not 3. Lengthen a line here and
+# that headroom is what you are spending.
+FIXED_TAILS = [
+    "Chat with your plushie at PlushieFriend.com",
+    "Bring your bestie to life at PlushieFriend.com",
+    "Join the plushie community at PlushieFriend.com",
+]
 
 # The hard rule is on the NAME — caption plus hashtags — not on the filename.
 # ".mp4" sits outside it, so what you paste as a caption is what is capped.
@@ -149,19 +163,41 @@ def _finalize(stem: str, ext: str = EXTENSION) -> str:
     return f"{stem}{ext}"
 
 
+def _with_tail(caption: str, tail: str, stem_cap: int) -> str:
+    """caption + a fixed CTA line, the line always kept whole.
+
+    Same trade as the hashtag in a short name: the tail is the part doing the
+    work, so the caption is what gives way when the cap bites. A tail longer
+    than the whole budget leaves the tail alone as the name."""
+    return f"{_truncate_words(caption, stem_cap - 1 - len(tail))} {tail}".strip()
+
+
 def build_names(caption, hashtags, ext: str = EXTENSION,
                 max_short: int = MAX_SHORT,
                 max_long: int = MAX_LONG,
                 keep_emoji: Optional[bool] = None,
-                max_long_tags: int = MAX_LONG_HASHTAGS) -> tuple[str, str]:
+                max_long_tags: int = MAX_LONG_HASHTAGS,
+                tail: Optional[str] = None) -> tuple[str, str]:
     """Return (short_name, long_name) for one video.
 
     The short name keeps its single hashtag intact and sacrifices caption text
     to stay inside the cap — the hashtag carries the reach, so truncating it
-    would be the wrong trade."""
+    would be the wrong trade.
+
+    With `tail` set (a fixed CTA line), hashtags are ignored entirely and both
+    names become caption + tail. The two forms are identical by design: they
+    are published into different folders, so what distinguishes them is where
+    they land, and the tail leaves no room for the hashtags that used to be the
+    difference."""
     caption = clean_caption(caption)
     if not (_keep_emoji_default() if keep_emoji is None else keep_emoji):
         caption = strip_emoji(caption)
+
+    if tail:
+        tail = clean_text(tail)
+        return (_finalize(_with_tail(caption, tail, max_short - len(ext)), ext),
+                _finalize(_with_tail(caption, tail, max_long - len(ext)), ext))
+
     tags = parse_hashtags(hashtags)
 
     # ---- short: caption + exactly one hashtag, <= max_short INCLUDING ext
@@ -220,16 +256,30 @@ def build_names(caption, hashtags, ext: str = EXTENSION,
     return short, long_name
 
 
-def _with_suffix(name: str, n: int, cap: int, ext: str = EXTENSION) -> str:
-    """Add a ' (n)' disambiguator, making room for it inside `cap`."""
+def _with_suffix(name: str, n: int, cap: int, ext: str = EXTENSION,
+                 tails: Optional[list] = None) -> str:
+    """Add a ' (n)' disambiguator, making room for it inside `cap`.
+
+    A tailed name is cut from the CAPTION and the counter goes in front of the
+    tail — `caption (2) <line>`. Trimming the end instead, as an untailed name
+    does, would eat the call-to-action's last characters and publish a dead
+    link (`PlushieFriend.co (2)`), which is the one thing the tail exists to
+    carry. Duplicate captions are the normal case here: a hand-written Caption
+    cell and the Headline fallback both repeat across batches."""
     suffix = f" ({n})"
     stem = name[: -len(ext)] if name.endswith(ext) else name
+    for tail in (tails or []):
+        if stem == tail or stem.endswith(f" {tail}"):
+            head = stem[: len(stem) - len(tail)].rstrip()
+            room = cap - len(ext) - len(suffix) - 1 - len(tail)
+            head = _truncate_words(head, room) if room > 0 else ""
+            return _finalize(f"{head}{suffix} {tail}".strip(), ext)
     room = cap - len(ext) - len(suffix)
     return _finalize(stem[:room].rstrip() + suffix, ext)
 
 
 def dedupe(names: Iterable[str], cap: int = MAX_SHORT,
-           ext: str = EXTENSION) -> list[str]:
+           ext: str = EXTENSION, tails: Optional[list] = None) -> list[str]:
     """Make a list of names unique, returned parallel to the input.
 
     Drive will happily store a dozen files with the same name, so uniqueness is
@@ -246,23 +296,30 @@ def dedupe(names: Iterable[str], cap: int = MAX_SHORT,
             continue
         # Keep bumping until the suffixed name is genuinely unused.
         n = seen[key] + 1
-        candidate = _with_suffix(name, n, cap, ext)
+        candidate = _with_suffix(name, n, cap, ext, tails)
         while candidate.lower() in seen:
             n += 1
-            candidate = _with_suffix(name, n, cap, ext)
+            candidate = _with_suffix(name, n, cap, ext, tails)
         seen[key] = n
         seen[candidate.lower()] = 1
         out.append(candidate)
     return out
 
 
-def names_for_rows(rows: Iterable[tuple], ext: str = EXTENSION) -> list[tuple[str, str]]:
+def names_for_rows(rows: Iterable[tuple], ext: str = EXTENSION,
+                   tails: Optional[list] = None) -> list[tuple[str, str]]:
     """Build and de-duplicate both names for a whole batch at once.
 
     `rows` yields (caption, hashtags) pairs. Both name lists are de-duplicated
     independently, since two rows sharing a caption but differing in hashtags
-    collide on the short name and not the long one."""
-    pairs = [build_names(caption, tags, ext=ext) for caption, tags in rows]
-    shorts = dedupe([p[0] for p in pairs], cap=MAX_SHORT, ext=ext)
-    longs = dedupe([p[1] for p in pairs], cap=MAX_LONG, ext=ext)
+    collide on the short name and not the long one.
+
+    `tails` (when given) is the pool of fixed CTA lines: each video draws one
+    independently, so the split across a batch is random rather than dealt.
+    Hashtags are then ignored — see build_names."""
+    pairs = [build_names(caption, tags, ext=ext,
+                         tail=random.choice(tails) if tails else None)
+             for caption, tags in rows]
+    shorts = dedupe([p[0] for p in pairs], cap=MAX_SHORT, ext=ext, tails=tails)
+    longs = dedupe([p[1] for p in pairs], cap=MAX_LONG, ext=ext, tails=tails)
     return list(zip(shorts, longs))

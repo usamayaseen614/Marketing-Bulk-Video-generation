@@ -74,7 +74,15 @@ def main(argv=None) -> int:
 
     job = store.get_job(args.job_id)
     if not job:
-        p.error(f"No job {args.job_id!r} in {config.DB_PATH}")
+        # An id is 16 hex characters and gets truncated by every terminal it
+        # passes through, so a prefix is accepted when it names exactly one job.
+        known = [j["id"] for j in store.list_jobs(limit=100)]
+        hit = [i for i in known if i.startswith(args.job_id)]
+        if len(hit) != 1:
+            p.error(f"No job matching {args.job_id!r} in {config.DB_PATH}. "
+                    "Run without a job id to list them.")
+        args.job_id = hit[0]
+        job = store.get_job(args.job_id)
 
     # Overrides go through merge_job_params rather than the in-memory dict, so
     # a re-run after this one keeps the same choice instead of silently
@@ -91,14 +99,26 @@ def main(argv=None) -> int:
         job["params"] = store.merge_job_params(args.job_id, **changes)
     params = job["params"]
 
-    n_rows = int(params.get("rows") or 0)
     n_batches = max(1, int(params.get("batches") or 1))
     n_folders = max(1, int(params.get("folders") or n_batches))
-    if not n_rows:
-        # Every idx is (batch - 1) * n_rows + row, so guessing this wrong sends
-        # videos to the wrong output folders and names them from the wrong row.
-        p.error("This job's params carry no row count, so the item indexes "
-                "cannot be split. Pass the sheet's row count another way.")
+
+    # The row count is deliberately NOT read from params: nothing puts it
+    # there. run() takes it from the staged sheet, which cleanup deletes the
+    # moment a job finishes — so by the time this tool is useful it is gone.
+    # The item rows carry the same fact and outlive the sheet. Getting this
+    # wrong is not a small error: every idx is (batch - 1) * n_rows + row, so a
+    # row count that is off by one sends every video to the wrong output folder
+    # under a name drawn from a different row.
+    items = store.list_items(args.job_id)
+    n_rows = max((int((i.get("meta") or {}).get("row") or 0) for i in items),
+                 default=0)
+    if n_rows * n_batches != len(items):
+        # Items registered before meta carried the row — the flat index layout
+        # still holds, so the count divides out.
+        n_rows = len(items) // n_batches
+    if n_rows < 1:
+        p.error(f"Cannot derive the row count from {len(items)} item(s) across "
+                f"{n_batches} batch(es).")
 
     counts = store.item_counts(args.job_id)
     videos = store.videos_dir(args.job_id)

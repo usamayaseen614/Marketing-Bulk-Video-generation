@@ -33,6 +33,14 @@ Each output video is composed of:
    to the largest size that sits inside the box — **enlarged** when smaller than it, shrunk
    when bigger — never cropped or stretched, with whatever is behind showing through the
    space the aspect ratio leaves over
+7. An optional **background-video layer** — a **flat pool** of videos (uploaded or from a
+   Drive folder) that play **one after another** for the length of each video, exactly like
+   the GIF layer: each holds the frame for at least a **dwell time** (10s by default),
+   repeating itself if it is shorter, and clips are dealt from a shuffled deck so every one
+   is used before any repeats. Drawn **translucent** (opacity slider, 8% by default) in a
+   box that defaults to the **full canvas** and is overridable per row via the `BG_Video_*`
+   columns. It always sits **directly beneath the texts** and over every other layer at or
+   below the texts' z-number — there is no z knob for it
 
 Output: H.264 MP4, 30 fps, `yuv420p`, AAC audio, `+faststart` — upload-ready for social platforms.
 
@@ -111,6 +119,8 @@ rows alone determines how many videos are generated:
 | `GIF_X` / `GIF_Y` | **Top-left corner** of the gif box, per row. Rounded down to an even pixel so the chroma planes stay aligned. **Blank/absent = the sidebar default** | `60` / `560` |
 | `GIF_Width` / `GIF_Height` | Size of the gif box. Each gif is **contain-fitted** into it — scaled up or down until one side touches the edge, never cropped and never stretched, so the box sets the gif's size whatever the source resolution. **Blank/absent = the sidebar default** | `360` / `360` |
 | `GIF_Fade_Start` / `GIF_Fade_Duration` | Fade-in timing for the gif layer, in **seconds**. Applies to the first gif only. **Blank/absent = the sidebar default (0/0 = visible immediately)** | `0.5` / `0.5` |
+| `BG_Video_X` / `BG_Video_Y` | **Top-left corner** of the translucent background-video box, per row. **Blank/absent = the sidebar default (0/0)** | `0` / `0` |
+| `BG_Video_Width` / `BG_Video_Height` | Size of the background-video box (every clip in the row's sequence is cover-filled to it — scaled and center-cropped, never stretched). **Blank/absent = the sidebar default (the full 1080 × 1920 canvas)** | `1080` / `1920` |
 | `Headline` | Headline text (empty = skipped) | `Summer Mega Sale` |
 | `Headline_Width` / `Headline_Height` | Optional **fit box**, in canvas pixels, **centred on `Headline_X`/`Headline_Y`**. Set both and the box drives the type: the text re-wraps to the width and the font size is chosen so the painted block (glyphs *plus* any outline/shadow/glow) fills the box. `Headline_Size` is then ignored — the box computes it. **Blank/absent, or either one alone = the sidebar default, else the classic behaviour** (`Headline_Size`, wrapped to the canvas). Same columns exist for Subheading and Footer | `800` / `300` |
 | `Headline_Size` | Font size in px. **Blank/absent = random** within a sensible range per element (headline 56–88, subheading 34–52, footer 24–36) | `72` |
@@ -320,7 +330,11 @@ So the video made from **row 2** on **video 3.mp4** reads `sakfjn`.
 | Minimum seconds per gif | The dwell floor (default 5). A gif shorter than this repeats **itself** a whole number of times until it clears the floor — a 3s gif plays twice (6s). A gif already longer plays once, in full. Sidebar-only: it is batch-wide pacing, so there is no per-row column |
 | GIF box X/Y/W/H | The box gifs are fitted into. It is an **invisible fit guide**, not a visible panel — nothing is drawn for it. Overridable per row via `GIF_X`/`GIF_Y`/`GIF_Width`/`GIF_Height` |
 | GIF fade-in start / duration | When the gif layer fades in and for how long. Defaults to 0/0 (visible from the first frame), which is also exactly what the static preview shows. Applies to the first gif only — the rest of the sequence cuts straight in. Overridable per row via `GIF_Fade_Start` / `GIF_Fade_Duration` |
-| Layer order (z-index) | Which layer sits on top: promo video (1), **GIFs (2)**, CTA video (3), CTA image (4), texts (5). Higher = nearer the front; the background is always at the back. Raise the gif number above the promo video's to float a gif over the video instead of behind it |
+| Background videos (MP4) | The translucent overlay pool. **Flat, like the gifs** — clips play back-to-back for the length of each video, dealt from a shuffled deck (seeded per row, so previews and re-runs match). Leave empty to skip the layer. Can come from a Drive folder instead — see *Where the background videos come from* |
+| Minimum seconds per background video | The dwell floor (default 10, longer than the GIF floor). A clip shorter than this repeats **itself** a whole number of times to clear it; one already longer plays once, in full. Sidebar-only, like the GIF floor — it is batch-wide pacing |
+| Background video opacity | How visible the pool's clips are (1–50%, default 8). Keep it low so texts stay legible; 0 would disable the layer, so the slider floors at 1 |
+| Background video box | The box the row's clip is **cover-filled** into (scaled + center-cropped). Defaults to the **full canvas**; overridable per row via `BG_Video_X`/`BG_Video_Y`/`BG_Video_Width`/`BG_Video_Height` |
+| Layer order (z-index) | Which layer sits on top: promo video (1), **GIFs (2)**, CTA video (3), CTA image (4), texts (5). Higher = nearer the front; the background is always at the back. Raise the gif number above the promo video's to float a gif over the video instead of behind it. The **background videos have no number**: they always sit directly beneath the texts, over any layer numbered at or below the texts — a layer raised *above* the texts also rises above the veil |
 | Default font | The font used when a text's `*_Font` cell is blank — a bundled family, the system font, or your uploaded font |
 | Default artistic style | The style used when a text's `*_Style` cell is blank — `classic`, `outline`, `shadow`, or `neon` |
 | Text fit boxes (per role) | Optional fixed box for the Headline / Subheading / Footer, **0 = off**. With one set, the text re-wraps to the box width and its font size is picked so the block fills the box — line breaks are added *and removed*, and the size **grows as well as shrinks**. The box is centred on the text's X/Y, so switching it on never moves anything. Per-row overrides: `Headline_Width`/`Headline_Height` and the same for the other two |
@@ -340,8 +354,11 @@ So the video made from **row 2** on **video 3.mp4** reads `sakfjn`.
    against these sheets** to confirm every column lines up with an uploaded promo
    (see *Different text per promo video*).
 2. Pick a row number and click **👁️ Preview Row** — an interactive preview opens.
-   **Drag** the video box, the CTA image, the CTA video box, the GIF box, or any text to
-   reposition it. The GIF box keeps a permanent dashed outline (every other element only
+   **Drag** the video box, the CTA image, the CTA video box, the GIF box, the background-video
+   box, or any text to reposition it. The background-video box starts full-canvas, where it
+   deliberately lets clicks pass through to the boxes beneath (moving a full-canvas box is a
+   no-op) — grab its corner handle at the canvas's bottom-right to shrink it first, and it
+   becomes draggable like the rest. It shows the row's chosen clip at the render opacity. The GIF box keeps a permanent dashed outline (every other element only
    outlines on hover) because a contain-fitted gif fills the box on one axis only — unless
    its aspect ratio matches the box exactly, the rest stays empty and see-through, so along
    those sides there is nothing to grab. Resizing the box resizes the gif with it, up as
@@ -492,6 +509,42 @@ Your evening routine deserves better than this #skincareroutine #asmrsounds #for
 The exception is a caption too long to fit even beside a single hashtag: it is being
 truncated either way, so the full set is kept rather than losing tags for nothing.
 
+### A fixed call-to-action instead of hashtags
+
+Tick **End every filename with a fixed call-to-action line** in *4. Captions* and each
+video's name ends with one of three lines, drawn at random per video:
+
+```
+Chat with your plushie at PlushieFriend.com
+Bring your bestie to life at PlushieFriend.com
+Join the plushie community at PlushieFriend.com
+```
+
+```
+Soft little friend for quiet nights Chat with your plushie at PlushieFriend.com.mp4
+```
+
+Hashtags are **switched off** while it is on — a name carries one ending, not two, and
+both together would not fit inside 90 characters. The short and long names then come out
+identical, which is fine because they are published into different folders (so pick one
+platform in *Publish which names?* unless you want the video in both).
+
+**The line is never truncated**, including when a collision forces a ` (2)` counter: the
+caption is what gives way, and the counter goes *in front of* the line rather than eating
+the end of the URL. That matters because duplicate captions are normal here — a `Caption`
+you typed into the sheet is reused across batches, as is the `Headline` fallback:
+
+```
+Your plushie remembers every single word Bring your bestie to life at PlushieFriend.com.mp4
+Your plushie remembers every single (2) Bring your bestie to life at PlushieFriend.com.mp4
+```
+
+A caption still has to fit beside it: the longest line is 47 characters, leaving 42 of the
+90. Captions generated at the 40-character limit always fit; a **pool generated before that
+limit** holds longer ones and they are cut — the app counts them and warns you before you
+queue. The lines live in `captions/naming.py` (`FIXED_TAILS`) — edit them there to change
+the wording or domain.
+
 Each output folder is published as **two ZIPs**, one per platform, so a 16,000-video night
 arrives as ~32 archives instead of ~32,000 files:
 
@@ -632,7 +685,8 @@ runs and not just inside one. The Setup page shows how many are left.
 Hashtags are the opposite — they repeat freely, and the hashtag pool can be small. With
 the caption already unique per video, the tags carry no naming duty at all; a handful of
 sets is enough. (Keep at least two tags per set, or the short and long names come out
-identical.)
+identical.) With the fixed call-to-action line switched on, no hashtags are generated
+at all — the line replaces them, so the hashtag half of the pool is skipped.
 
 The one exception is a `Caption` you type into the sheet yourself: that text is reused
 across every batch, because you asked for that exact wording. Those are the only files

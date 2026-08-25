@@ -295,20 +295,21 @@ def _drive_clips_stage(job: dict, params: dict) -> dict:
     }
 
 
-def _drive_gifs_stage(job: dict, params: dict) -> dict:
-    """The GIF pool from a Google Drive folder.
+def _drive_pool_stage(job: dict, params: dict, param_key: str,
+                      subdir: str, label: str) -> dict:
+    """A FLAT clip pool from a Google Drive folder (the gifs, the background
+    videos — anything without slots).
 
-    Simpler than _drive_clips_stage because the gif pool is FLAT — there are no
-    slots to deal across, so the folder is downloaded straight into
-    `assets/gifs/`, which is exactly where workspace_from_dir looks for it. No
-    selection step either: every gif in the folder is in the pool, and which
-    ones a given video uses is decided per row at render time."""
+    Simpler than _drive_clips_stage because there are no slots to deal across:
+    the folder is downloaded straight into `assets/<subdir>/`, which is exactly
+    where workspace_from_dir looks for it. No selection step either — every
+    clip in the folder is in the pool, and which ones a given video uses is
+    decided per row at render time."""
     job_id = job["id"]
-    dest = store.assets_dir(job_id) / "gifs"
+    dest = store.assets_dir(job_id) / subdir
     dest.mkdir(parents=True, exist_ok=True)
-    store.set_stage(job_id, "downloading GIFs from Drive")
-    report = _download_drive_folder(
-        job_id, params.get("gifs_drive_folder"), dest, "GIFs")
+    store.set_stage(job_id, f"downloading {label} from Drive")
+    report = _download_drive_folder(job_id, params.get(param_key), dest, label)
     return {
         "source": "drive_folder",
         "drive_folder": report["folder"],
@@ -341,8 +342,10 @@ def _captions_stage(job: dict, params: dict) -> dict:
     def progress(done: int, total: int) -> None:
         store.heartbeat(job_id, stage=f"captions {done}/{total}")
 
-    # Only generate hashtag sets if the pool is actually the hashtag source.
-    wants_pool_hashtags = params.get("hashtag_source", "pool") == "pool"
+    # Only generate hashtag sets if the pool is actually the hashtag source —
+    # a fixed CTA line replaces them, so generating any is money for nothing.
+    wants_pool_hashtags = (params.get("hashtag_source", "pool") == "pool"
+                           and not params.get("fixed_tail"))
     return pool_module.build_pool(
         theme=theme,
         caption_count=int(params.get("caption_count") or config.CAPTION_POOL_SIZE),
@@ -376,7 +379,14 @@ def run(job: dict) -> dict:
 
     # ---- 1b. gifs (independent of where the CTA clips came from)
     if params.get("gif_source") == "drive_folder":
-        result["gifs"] = _drive_gifs_stage(job, params)
+        result["gifs"] = _drive_pool_stage(
+            job, params, "gifs_drive_folder", "gifs", "GIFs")
+
+    # ---- 1c. background videos (independent of both pools above)
+    if params.get("bg_video_source") == "drive_folder":
+        result["bg_videos"] = _drive_pool_stage(
+            job, params, "bg_videos_drive_folder", "bg_videos",
+            "background videos")
 
     # ---- 2. captions
     if params.get("generate_pool"):

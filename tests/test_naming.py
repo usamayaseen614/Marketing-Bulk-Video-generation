@@ -238,4 +238,77 @@ for _ in range(4000):
 print(f"\nfuzzed 4000 random caption/hashtag pairs — cap never broken "
       f"(longest short name seen: {worst})")
 
+# ---------- fixed CTA tails: they replace hashtags and are never cut ----------
+print("\n--- fixed call-to-action tails ---")
+TAIL = naming.FIXED_TAILS[2]          # the longest of the three (47 chars)
+assert len(TAIL) == max(len(t) for t in naming.FIXED_TAILS)
+s_t, l_t = naming.build_names("Your skin will thank you for this",
+                              "#skincare #asmr #fyp", tail=TAIL)
+print("short:", s_t)
+assert s_t == l_t, "with a tail both names are the same by design"
+assert s_t.endswith(f"{TAIL}.mp4"), s_t
+assert "#" not in s_t, "a fixed tail replaces hashtags entirely"
+assert len(s_t[:-4]) <= STEM
+
+# A caption at the generation cap plus the longest tail still fits whole.
+import config as settings
+longest_caption = "x" * settings.CAPTION_MAX_CHARS
+s_f, _ = naming.build_names(longest_caption, "", tail=TAIL)
+assert s_f == f"{longest_caption} {TAIL}.mp4", s_f
+assert len(s_f[:-4]) <= STEM, len(s_f[:-4])
+print(f"caption at the {settings.CAPTION_MAX_CHARS}-char generation cap + the "
+      f"longest tail = {len(s_f[:-4])} chars, inside {STEM}")
+
+# An over-long caption gives way; the tail survives whole.
+s_o, _ = naming.build_names("word " * 60, "", tail=TAIL)
+assert s_o.endswith(f"{TAIL}.mp4"), s_o
+assert len(s_o[:-4]) <= STEM
+
+# Every tail, drawn per video, and all three actually get used across a batch.
+rows_t = [(f"caption number {i}", "#a #b") for i in range(60)]
+pairs_t = naming.names_for_rows(rows_t, tails=naming.FIXED_TAILS)
+used = {t for t in naming.FIXED_TAILS
+        if any(sh[:-4].endswith(t) for sh, _ in pairs_t)}
+assert used == set(naming.FIXED_TAILS), f"only {len(used)}/3 tails drawn"
+assert all(len(sh[:-4]) <= STEM and "#" not in sh for sh, _ in pairs_t)
+assert len({sh for sh, _ in pairs_t}) == len(pairs_t), "names must stay unique"
+print(f"60 videos drew all 3 tails at random, every name unique and inside {STEM}")
+
+# Fuzz the tail path too - the cap is the same hard rule.
+for _ in range(2000):
+    cap_txt = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 250)))
+    t = rng.choice(naming.FIXED_TAILS)
+    s_x, l_x = naming.build_names(cap_txt, "#a #b #c", tail=t)
+    assert len(s_x[:-4]) <= STEM, f"TAIL CAP BROKEN {len(s_x[:-4])}"
+    assert len(l_x[:-4]) <= STEM
+    assert s_x[:-4].endswith(t), f"tail was cut: {s_x!r}"
+    assert not set(s_x) & set('<>:"/\|?*')
+print("fuzzed 2000 tailed names - cap never broken, tail never cut")
+
+# Duplicate captions: the ' (2)' counter must come out of the CAPTION, never
+# out of the call-to-action line. Cutting the end of a tailed name publishes a
+# dead link (PlushieFriend.co), which is the whole payload of the feature.
+dupe_rows = [("Your plushie remembers every single word you say", "")] * 12
+dupe_pairs = naming.names_for_rows(dupe_rows, tails=naming.FIXED_TAILS)
+for sh, lo in dupe_pairs:
+    assert any(sh[:-4].endswith(t) for t in naming.FIXED_TAILS),         f"the counter ate the tail: {sh!r}"
+    assert any(lo[:-4].endswith(t) for t in naming.FIXED_TAILS), lo
+    assert len(sh[:-4]) <= STEM, len(sh[:-4])
+assert len({sh for sh, _ in dupe_pairs}) == len(dupe_pairs), "not unique"
+assert sum(" (" in sh for sh, _ in dupe_pairs) >= 8, "dedupe never fired"
+print("12 identical captions deduped with every URL intact, e.g.")
+print("  ", dupe_pairs[1][0])
+
+# The same, at the exact generation cap, where the budget is tightest.
+tight = [("A 40 character caption that fills it up!", "")] * 3
+for sh, _ in naming.names_for_rows(tight, tails=naming.FIXED_TAILS):
+    assert any(sh[:-4].endswith(t) for t in naming.FIXED_TAILS), sh
+    assert len(sh[:-4]) <= STEM, len(sh[:-4])
+print("40-char captions at the cap dedupe without touching the tail")
+
+# An untailed name still trims from the end, as it always has.
+plain = naming.dedupe(["same name.mp4"] * 3, cap=naming.MAX_SHORT)
+assert plain[1].endswith("(2).mp4") and len(plain[1]) <= naming.MAX_SHORT
+print("untailed dedupe unchanged:", plain[1])
+
 print("\nALL NAMING TESTS PASSED")

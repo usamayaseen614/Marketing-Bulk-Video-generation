@@ -64,6 +64,11 @@ class Workspace:
     # different one per batch; `video_path` is the first, so single-promo
     # callers (Preview, Render Row) are unaffected.
     video_paths: list = field(default_factory=list)
+    # The translucent background-video pool. Flat like the gif pool, and
+    # sequenced the same way: clips play back-to-back (seeded per row) for the
+    # length of each video. Drawn full-canvas by default, always above the
+    # promo/gif/CTA layers and below the texts.
+    bg_video_paths: list = field(default_factory=list)
 
     def promo_for_batch(self, batch_index: int) -> Path:
         """The promo video for batch `batch_index` (0-based).
@@ -77,7 +82,8 @@ class Workspace:
 
 
 def stage_uploads(dest: Path, video_file, zip_file, cta_file, font_file,
-                  cta_video_slot_files=None, gif_files=None) -> None:
+                  cta_video_slot_files=None, gif_files=None,
+                  bg_video_files=None) -> None:
     """Write the in-memory uploads to disk where FFmpeg/PIL can read them.
 
     `video_file` may be a single upload or a list of up to MAX_PROMO_VIDEOS —
@@ -129,6 +135,17 @@ def stage_uploads(dest: Path, video_file, zip_file, cta_file, font_file,
         if f is not None:
             (gif_dir / Path(f.name).name).write_bytes(f.getvalue())
 
+    # The background-video pool: one flat folder, same shape as the gifs.
+    # NOT inside backgrounds/ (_build_bg_index only sees images there) and not
+    # matching the input_*.mp4 / cta_slot_* globs whose sort keys parse an
+    # integer. Always created, so the Drive pipeline stage and rehydration
+    # agree on where the pool lives even when it arrives empty.
+    bgv_dir = dest / "bg_videos"
+    bgv_dir.mkdir(parents=True, exist_ok=True)
+    for f in bg_video_files or []:
+        if f is not None:
+            (bgv_dir / Path(f.name).name).write_bytes(f.getvalue())
+
 
 def workspace_from_dir(assets: Path, work_dir: Path) -> Workspace:
     """Rebuild a Workspace by reading a folder staged by stage_uploads().
@@ -169,6 +186,12 @@ def workspace_from_dir(assets: Path, work_dir: Path) -> Workspace:
         key=lambda p: int(p.stem.rsplit("_", 1)[1]),
     )
 
+    # The background-video pool, sorted for the same reproducibility reason.
+    bgv_dir = assets / "bg_videos"
+    bg_video_paths = sorted(
+        (f for f in bgv_dir.iterdir() if f.is_file() and is_video(f))
+    ) if bgv_dir.is_dir() else []
+
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     return Workspace(
@@ -180,12 +203,14 @@ def workspace_from_dir(assets: Path, work_dir: Path) -> Workspace:
         cta_video_slots=cta_video_slots,
         gif_paths=gif_paths,
         video_paths=video_paths,
+        bg_video_paths=bg_video_paths,
     )
 
 
 def build_workspace(tmp: Path, video_file, zip_file, cta_file, font_file,
-                    cta_video_slot_files=None, gif_files=None) -> Workspace:
+                    cta_video_slot_files=None, gif_files=None,
+                    bg_video_files=None) -> Workspace:
     """Stage the uploads into `tmp` and return the Workspace over them."""
     stage_uploads(tmp, video_file, zip_file, cta_file, font_file,
-                  cta_video_slot_files, gif_files)
+                  cta_video_slot_files, gif_files, bg_video_files)
     return workspace_from_dir(tmp, tmp / "work")

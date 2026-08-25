@@ -588,6 +588,78 @@ _TEMPLATE = r"""
       items.push(gItem);
     }
 
+    // --- Background-video box (optional). Shares the texts' z-index; the
+    //     texts are appended to the stage AFTER this element, so DOM order
+    //     breaks the tie and keeps it directly beneath them — the same
+    //     "under the texts, over everything else" contract as the render's
+    //     tie-break. The poster frame is shown at the render opacity so the
+    //     translucency is honest. ---
+    if (DATA.bg_video) {
+      const bv = DATA.bg_video;
+      const bvEl = document.createElement('div');
+      bvEl.className = 'el';
+      bvEl.id = 'bgVideoBox';
+      const bvFrame = document.createElement('img');
+      bvFrame.className = 'frame';
+      bvFrame.src = bv.frame;
+      bvFrame.draggable = false;
+      bvFrame.style.opacity = (bv.opacity == null ? 1 : bv.opacity);
+      bvEl.appendChild(bvFrame);
+      bvEl.style.zIndex = Z.text;
+      if (bv.count > 1) bvEl.title = 'Background video 1 of ' + bv.count + ' in this video';
+      stage.appendChild(bvEl);
+      const bvItem = {
+        x: bv.x, y: bv.y, w: bv.w, h: bv.h,
+        center() { return { cx: this.x + this.w / 2, cy: this.y + this.h / 2 }; },
+        snapResize() { snapResizeBox(this, __MIN_VIDEO_DIM__); },
+        bounds() {
+          return { minX: 0, maxX: DATA.canvas_w - this.w, minY: 0, maxY: DATA.canvas_h - this.h };
+        },
+        place() {
+          bvEl.style.left = px(this.x);
+          bvEl.style.top = px(this.y);
+          bvEl.style.width = px(this.w);
+          bvEl.style.height = px(this.h);
+          // A full-canvas body would swallow every pointerdown meant for the
+          // boxes beneath it (it has the highest box z-index) while its own
+          // bounds clamp makes dragging it a no-op anyway — so let clicks pass
+          // through until the box is actually smaller than the canvas. The
+          // resize handle re-enables itself below, so the box always stays
+          // shrinkable.
+          bvEl.style.pointerEvents =
+            (this.w >= DATA.canvas_w && this.h >= DATA.canvas_h) ? 'none' : 'auto';
+          const r = Math.min(this.w / bv.frame_w, this.h / bv.frame_h);
+          const fw = bv.frame_w * r, fh = bv.frame_h * r;
+          bvFrame.style.width = px(fw);
+          bvFrame.style.height = px(fh);
+          bvFrame.style.left = px((this.w - fw) / 2);
+          bvFrame.style.top = px((this.h - fh) / 2);
+        },
+        startResize(e) { return { w0: this.w, h0: this.h, sx: e.clientX, sy: e.clientY }; },
+        resize(ctx, ev) {
+          this.w = clamp(ctx.w0 + (ev.clientX - ctx.sx) / scale, __MIN_VIDEO_DIM__, DATA.canvas_w - this.x);
+          this.h = clamp(ctx.h0 + (ev.clientY - ctx.sy) / scale, __MIN_VIDEO_DIM__, DATA.canvas_h - this.y);
+        },
+        endResize() { this.w = Math.round(this.w); this.h = Math.round(this.h); },
+        reset() { this.x = bv.x; this.y = bv.y; this.w = bv.w; this.h = bv.h; this.place(); },
+        cols() {
+          return [
+            ['BG_Video_X', bv.x, Math.round(this.x)],
+            ['BG_Video_Y', bv.y, Math.round(this.y)],
+            ['BG_Video_Width', bv.w, Math.round(this.w)],
+            ['BG_Video_Height', bv.h, Math.round(this.h)],
+          ];
+        },
+      };
+      makeDraggable(bvEl, bvItem);
+      addHandle(bvEl, bvItem);
+      // The handle must stay clickable even while the full-canvas body is
+      // click-through (see place()).
+      bvEl.querySelector('.handle').style.pointerEvents = 'auto';
+      bvItem.place();
+      items.push(bvItem);
+    }
+
     // --- texts (x/y is the block CENTER; resizing scales the font size
     //     around that center, so X/Y stay put and centeredness can't change —
     //     hence no snapResize). Layers, bottom to top: a live CSS background

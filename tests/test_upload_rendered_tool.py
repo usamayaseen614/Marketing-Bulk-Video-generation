@@ -55,7 +55,7 @@ from tools import upload_rendered  # noqa: E402  — after the stubs are in plac
 
 job_id = store.create_job(
     kind=store.KIND_RENDER, label="died at 3 of 4",
-    params={"rows": N_ROWS, "batches": N_BATCHES, "folders": N_FOLDERS,
+    params={"batches": N_BATCHES, "folders": N_FOLDERS,
             "upload_mode": "zip", "free_local_videos": True},
     items=[{"idx": i} for i in range(1, 5)])
 store.make_job_dirs(job_id)

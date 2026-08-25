@@ -20,6 +20,7 @@ from openpyxl import load_workbook
 import config as settings
 import text_grids
 import ui_common
+from captions import naming as caption_naming
 from jobs import store
 from preview_editor import preview_editor
 from ui_common import get_session_id
@@ -62,6 +63,7 @@ def make_generator(ws: Workspace, config: RenderConfig, output_dir: Path) -> Vid
         output_dir=output_dir,
         cta_video_slots=ws.cta_video_slots,
         gif_paths=ws.gif_paths,
+        bg_video_paths=ws.bg_video_paths,
     )
     # Bad uploads caught at construction (e.g. an audio-only "video" clip that
     # would crash FFmpeg mid-render) — show them wherever a generator is built.
@@ -213,6 +215,47 @@ with st.sidebar:
         help="Used wherever a row has no background image — e.g. when no "
              "background ZIP is uploaded (the ZIP is optional).",
     )
+    bg_video_files = st.file_uploader(
+        "Background videos (MP4, optional)", type=["mp4"], key="bg_video_pool",
+        accept_multiple_files=True,
+        help="A pool of translucent overlay videos. They play one after "
+             "another for the length of each video — the same treatment as the "
+             "GIFs, with its own dwell floor below — dealt from a shuffled "
+             "deck so every clip is used before any repeats. Drawn directly "
+             "beneath the texts and over every layer at or below the texts' "
+             "z-number, full-canvas unless the box below says otherwise. Can "
+             "also come from a Drive folder — see 'Background video source' in "
+             "the main panel. Note: it is composited on every frame, so expect "
+             "roughly 1.5–2.5× the render time per video.",
+    )
+    # Not gated on the uploader: the pool may arrive from Drive instead.
+    bg_video_opacity = st.slider(
+        "Background video opacity (%)", 1, 50, 8,
+        help="How visible the background videos are. Keep it low (≈8–15) so "
+             "texts stay legible.",
+    )
+    bg_video_min_seconds = st.number_input(
+        "Minimum seconds per background video", 1.0, 120.0, 10.0, 0.5,
+        help="The dwell floor. Clips play one after another for the length of "
+             "the video; one shorter than this repeats itself until it clears "
+             "the floor, one already longer plays once, in full. Longer than "
+             "the GIF floor by default — this layer is ambience, and a bed "
+             "that changes every few seconds reads as flicker.",
+    )
+    st.caption(
+        f"At ~{bg_video_min_seconds:g}s each, a 20-second video shows about "
+        f"{max(1, int(20 // bg_video_min_seconds))} and a 60-second video about "
+        f"{max(1, int(60 // bg_video_min_seconds))} of them, dealt from a "
+        "shuffled deck so every clip is used once before any repeats."
+    )
+    with st.expander("Background video box (default: full canvas)"):
+        bgv_c1, bgv_c2 = st.columns(2)
+        bg_video_x = bgv_c1.number_input("BG video X", 0, CANVAS_W, 0, key="bgv_x")
+        bg_video_y = bgv_c2.number_input("BG video Y", 0, CANVAS_H, 0, key="bgv_y")
+        bg_video_w = bgv_c1.number_input("BG video width", 50, CANVAS_W,
+                                         CANVAS_W, key="bgv_w")
+        bg_video_h = bgv_c2.number_input("BG video height", 50, CANVAS_H,
+                                         CANVAS_H, key="bgv_h")
 
     st.subheader("Video placement")
     if is_split:
@@ -398,6 +441,11 @@ with st.sidebar:
         "Texts", 1, 99, 5, 1, key="z_text",
         help="Stacking order of the headline / subheading / footer texts.",
     )
+    st.caption(
+        "The background videos have no number: they always sit directly "
+        "beneath the texts, over any layer whose number is at or below the "
+        "texts'. (A layer raised ABOVE the texts also rises above the veil.)"
+    )
 
     st.subheader("Text style")
     st.caption(
@@ -564,6 +612,10 @@ config = RenderConfig(
     layout_mode=layout_mode, swap_sides=bool(swap_sides),
     split_panel_h=int(split_panel_h), crop_to_panels=bool(crop_to_panels),
     bg_color=bg_color,
+    bg_video_opacity=float(bg_video_opacity) / 100.0,
+    bg_video_x=int(bg_video_x), bg_video_y=int(bg_video_y),
+    bg_video_w=int(bg_video_w), bg_video_h=int(bg_video_h),
+    bg_video_min_seconds=float(bg_video_min_seconds),
     video_x=int(video_x), video_y=int(video_y),
     video_w=int(video_w), video_h=int(video_h),
     cta_x=int(cta_x), cta_y=int(cta_y),
@@ -1008,6 +1060,37 @@ if gif_source == "drive_folder":
             _ok, _msg = _drv.check_source(clip_params["gifs_drive_folder"])
             (st.success if _ok else st.error)(f"**GIFs** — {_msg}")
 
+# ---- Background-video source. Its own selector for the same reason the gifs
+# have one: the pool is independent of both clip layers everywhere else.
+st.markdown("**Background videos**")
+bg_video_source = st.radio(
+    "Where do the background videos come from?",
+    options=["upload", "drive_folder"],
+    format_func=lambda m: {
+        "upload": "Upload them in the sidebar (as above)",
+        "drive_folder": "Paste a Google Drive folder link — the server "
+                        "downloads them itself (no upload)",
+    }[m],
+    horizontal=True,
+    key="bg_video_source",
+    help="Independent of where the CTA clips and gifs come from.",
+)
+if bg_video_source == "drive_folder":
+    clip_params["bg_videos_drive_folder"] = st.text_input(
+        "Background videos folder — Drive link", key="bg_videos_drive",
+        placeholder="https://drive.google.com/drive/folders/…",
+        help="Every video in this folder — and its sub-folders — joins the "
+             "background pool. Share it with the service account first.",
+    ).strip()
+    st.caption("The sidebar background-video uploader is ignored in this mode.")
+    if st.button("🔍 Check the background videos folder",
+                 disabled=not clip_params.get("bg_videos_drive_folder")):
+        from integrations import drive as _drv
+
+        with st.spinner("Reading Drive…"):
+            _ok, _msg = _drv.check_source(clip_params["bg_videos_drive_folder"])
+            (st.success if _ok else st.error)(f"**Background videos** — {_msg}")
+
 # ---- captions
 st.subheader("4. Captions")
 _pool = store.active_pool()
@@ -1026,6 +1109,34 @@ caption_mode = st.radio(
 )
 caption_params: dict = {}
 
+fixed_tail = st.checkbox(
+    "End every filename with a fixed call-to-action line",
+    value=False, key="fixed_tail",
+    help="One of the lines below is picked at random for each video and added "
+         "after its caption. Hashtags are switched off while this is on — the "
+         "name carries one ending, not two, and both would not fit inside the "
+         "90-character cap.",
+)
+caption_params["fixed_tail"] = bool(fixed_tail)
+if fixed_tail:
+    st.caption("One of these, at random, per video:\n\n"
+               + "\n".join(f"- {t}" for t in caption_naming.FIXED_TAILS))
+    # A pool generated before the caption limit dropped holds captions too long
+    # to sit beside the line, and they are cut at naming time. Measured against
+    # the real pool rather than guessed, so the warning only appears when it
+    # is actually true.
+    _room = caption_naming.MAX_STEM - 1 - max(
+        len(t) for t in caption_naming.FIXED_TAILS)
+    _over = [c for c in ((_pool or {}).get("captions") or []) if len(c) > _room]
+    if _over and caption_mode == "existing":
+        st.warning(
+            f"**{len(_over):,} of {len(_pool['captions']):,} captions in the "
+            f"active pool are longer than {_room} characters** and will be cut "
+            f"to fit beside the line (the line itself is never cut). This pool "
+            f"predates the {settings.CAPTION_MAX_CHARS}-character limit — "
+            f"generate a fresh one to avoid it."
+        )
+
 hashtag_source = st.radio(
     "Hashtags",
     options=["pool", "excel", "none"],
@@ -1035,9 +1146,14 @@ hashtag_source = st.radio(
         "none": "None — filenames are the caption only",
     }[m],
     horizontal=True,
+    disabled=bool(fixed_tail),
     help="Hashtags are optional. Without them the short filename is just the "
          "caption, still capped at 90 characters.",
 )
+if fixed_tail:
+    # Recorded as 'none' so nothing downstream reads a stale choice as live —
+    # the fixed line has already replaced hashtags by the time naming runs.
+    hashtag_source = "none"
 caption_params["hashtag_source"] = hashtag_source
 hashtag_file = None
 if hashtag_source == "excel":
@@ -1112,6 +1228,7 @@ if caption_mode == "generate":
         st.caption(
             "Only captions will be generated — hashtags come from "
             + ("your uploaded file." if hashtag_source == "excel"
+               else "the fixed call-to-action line above." if fixed_tail
                else "nowhere, by choice.")
         )
     # Same arithmetic the Setup page shows. Worth repeating here because this
@@ -1186,7 +1303,10 @@ if ready and df is not None:
     _n_names = len(upload_platforms.split(","))
     note = (f"**{len(df):,} rows x {int(n_batches)} passes = "
             f"{total_videos:,} videos**, mixed across {int(n_folders)} folders, "
-            + ("each published under both names."
+            + (("each published twice under the SAME name — the fixed "
+                "call-to-action leaves the two forms identical, so one "
+                "platform's set is enough unless you want both folders."
+                if fixed_tail else "each published under both names.")
                if _n_names == 2 else
                f"published as `{upload_platforms}.zip` only."))
     if promo_count > 1 and int(n_batches) == promo_count:
@@ -1291,8 +1411,11 @@ if preview_clicked and ready:
     with st.spinner(f"Rendering preview of row {preview_row}…"):
         with tempfile.TemporaryDirectory(prefix="bvg_preview_") as tmp:
             try:
+                # The bg-video pool IS staged here: the editor payload frames
+                # the row's chosen clip so the box is draggable in the preview.
                 ws = build_workspace(Path(tmp), video_file, zip_file, cta_file,
-                                     font_file, cta_video_slot_files, gif_files)
+                                     font_file, cta_video_slot_files, gif_files,
+                                     bg_video_files)
                 generator = make_generator(ws, config, Path(tmp) / "out")
                 # Same deterministic background assignment as the real batch,
                 # so the preview shows the row's actual background — and the
@@ -1327,7 +1450,8 @@ if render_row_clicked and ready:
         with tempfile.TemporaryDirectory(prefix="bvg_rowrender_") as tmp:
             try:
                 ws = build_workspace(Path(tmp), video_file, zip_file, cta_file,
-                                     font_file, cta_video_slot_files, gif_files)
+                                     font_file, cta_video_slot_files, gif_files,
+                                     bg_video_files)
                 generator = make_generator(ws, config, Path(tmp) / "out")
                 # Same deterministic background assignment as the real batch, so
                 # this row renders with its actual background. df already carries
@@ -1454,6 +1578,20 @@ if generate_clicked and ready and clip_source == "drive_folder" and not any(
              "clips, or choose a different clip source.")
     generate_clicked = False
 
+# Same deferred-failure rule for the other two Drive-sourced pools: a blank
+# link would run the (potentially long) earlier pipeline stages and then die.
+if generate_clicked and ready and gif_source == "drive_folder" \
+        and not clip_params.get("gifs_drive_folder"):
+    st.error("Not queued — paste the Google Drive folder link for the GIFs, "
+             "or switch the GIF source back to upload.")
+    generate_clicked = False
+
+if generate_clicked and ready and bg_video_source == "drive_folder" \
+        and not clip_params.get("bg_videos_drive_folder"):
+    st.error("Not queued — paste the Google Drive folder link for the "
+             "background videos, or switch their source back to upload.")
+    generate_clicked = False
+
 if generate_clicked and ready and grid_errors:
     # A grid whose headers do not resolve would render the wrong promo's words
     # onto thousands of videos and look entirely successful doing it. There is
@@ -1487,7 +1625,10 @@ if generate_clicked and ready:
                       # uploads their gifs would otherwise lose every one of
                       # them silently — nothing downstream checks for gifs, so
                       # the batch would render clean and gif-free.
-                      None if gif_source != "upload" else gif_files)
+                      None if gif_source != "upload" else gif_files,
+                      # Same rule as the gifs: gated on this layer's OWN
+                      # source flag, never on anyone else's.
+                      None if bg_video_source != "upload" else bg_video_files)
 
         # The sheet is written with any preview-editor edits baked in, so the
         # worker renders exactly what this page was showing. updated_excel_bytes
@@ -1510,6 +1651,7 @@ if generate_clicked and ready:
         # this a pipeline job rather than a plain render — including a gif pool
         # that still has to come down from Drive.
         chained = (clip_source != "upload" or gif_source != "upload"
+                   or bg_video_source != "upload"
                    or caption_mode == "generate")
         store.create_job(
             kind=store.KIND_PIPELINE if chained else store.KIND_RENDER,
@@ -1528,6 +1670,7 @@ if generate_clicked and ready:
                 "text_grids": sorted(grid_overrides),
                 "clip_source": clip_source,
                 "gif_source": gif_source,
+                "bg_video_source": bg_video_source,
                 "drive_folder": drive_folder.strip(),
                 **clip_params,
                 **caption_params,

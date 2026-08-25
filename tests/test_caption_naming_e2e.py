@@ -166,4 +166,54 @@ assert store.active_pool()["cursor"] == cursor_before, "a refused job ate captio
 print("\npool too small -> job failed before rendering, pool untouched:")
 print("  ", error.splitlines()[0])
 
+# ---- fixed CTA tails: filenames end with one, and carry no hashtags -------
+# A fresh pool, because the one above is spent.
+store.save_pool("plushie asmr",
+                [f"Soft little friend number {i}" for i in range(1, 6)],
+                [f"#plushie #asmr{i} #fyp" for i in range(5)], model="stub")
+job3 = store.new_job_id()
+store.make_job_dirs(job3)
+stage_uploads(store.assets_dir(job3), Fake(SA / "promo.mp4"),
+              Fake(SA / "backgrounds.zip"), None, None,
+              [[Fake(SA / "cta_video_1.mp4")]])
+df.head(3).to_excel(store.assets_dir(job3) / "input.xlsx", index=False,
+                    engine="openpyxl")
+store.create_job(
+    kind=store.KIND_RENDER,
+    params={"render_config": asdict(RenderConfig(crf=30, preset="veryfast")),
+            "workers": 4, "make_zip": False,
+            # What the sidebar checkbox sends. hashtag_source is deliberately
+            # left at its default to prove the tail overrides it rather than
+            # relying on the UI having also switched it off.
+            "fixed_tail": True},
+    label="fixed-tail-test", items=[{"idx": i} for i in range(1, 4)],
+    job_id=job3,
+)
+worker.main(["--once"])
+
+job3_row = store.get_job(job3)
+assert job3_row["status"] == store.STATUS_SUCCEEDED, job3_row.get("error")
+tail_files = sorted(p.name for p in Path(job3_row["result"]["videos_dir"]).rglob("*.mp4"))
+print("\nfixed-tail filenames:")
+for f in tail_files:
+    print("   ", f)
+assert len(tail_files) == 3, tail_files
+for f in tail_files:
+    assert any(f[:-4].endswith(t) for t in naming.FIXED_TAILS), f
+    assert "#" not in f, f"hashtags must be gone when a tail is used: {f}"
+    assert len(f[:-4]) <= naming.MAX_STEM, len(f[:-4])
+
+tail_manifest = pd.read_excel(job3_row["result"]["sheet_path"], engine="openpyxl")
+# Both published names are the tail form, and the reported Hashtags column is
+# blank rather than listing tags that appear in no filename.
+for _, row in tail_manifest.iterrows():
+    assert row["Short_Filename"] == row["Long_Filename"], dict(row)
+    assert any(str(row["Short_Filename"])[:-4].endswith(t)
+               for t in naming.FIXED_TAILS), row["Short_Filename"]
+    # Blank reads back as NaN through openpyxl, hence the isna() rather than
+    # a truthiness check — str(nan) is the non-empty "nan".
+    assert pd.isna(row.get("Hashtags")) or not str(row["Hashtags"]).strip(), \
+        row.get("Hashtags")
+print("both names identical, no hashtags anywhere, every name inside the cap")
+
 print("\nCAPTION NAMING E2E PASSED")

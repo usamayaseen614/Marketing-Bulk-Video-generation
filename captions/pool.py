@@ -343,7 +343,11 @@ def generate_captions(theme: str, count: int, model: Optional[str] = None,
             f"Angle for this set: {angle}\n\n"
             "Rules:\n"
             "- Each caption stands alone; it is not a reply or continuation.\n"
-            "- Under 120 characters.\n"
+            # Asking for the real limit rather than a loose one: anything
+            # longer is cut by _clean_caption, and a sentence cut mid-thought
+            # reads worse than one written to fit.
+            f"- Under {config.CAPTION_MAX_CHARS} characters. This is a hard "
+            "limit — write short, punchy lines, not trimmed long ones.\n"
             "- No hashtags — those are handled separately.\n"
             "- No emoji anywhere. Plain text only.\n"
             "- No numbering, quotes, or surrounding punctuation.\n"

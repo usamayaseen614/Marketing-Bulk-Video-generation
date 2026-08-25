@@ -137,6 +137,14 @@ GIF_MIN_SECONDS = 5.0
 # Ceiling on gifs concatenated into one sequence — same rationale as
 # CTA_MAX_TOTAL_CLIPS. At the 5s floor this already covers a ~3.3-minute promo.
 GIF_MAX_TOTAL_CLIPS = 40
+
+# The background-video layer sequences its pool exactly like the gifs: clips are
+# drawn until their combined on-screen time covers the promo, each holding the
+# frame for at least BG_VIDEO_MIN_SECONDS by repeating ITSELF a whole number of
+# times. The floor is longer than the gifs' because this layer is ambience
+# rather than punctuation — a bed that changes every 5 seconds reads as flicker.
+BG_VIDEO_MIN_SECONDS = 10.0
+BG_VIDEO_MAX_TOTAL_CLIPS = 40
 # Ceiling on FFmpeg inputs for ONE row across BOTH clip layers plus the fixed
 # inputs and the subliminal stills. Two independent caps are not enough: they
 # add up in a single command line, and Windows stops at 32767 characters with a
@@ -184,6 +192,8 @@ OPTIONAL_COLUMNS = [
     # decision, so it lives in the sidebar only — see RenderConfig).
     "GIF_X", "GIF_Y", "GIF_Width", "GIF_Height",
     "GIF_Fade_Start", "GIF_Fade_Duration",
+    # The translucent background-video box (full canvas unless overridden).
+    "BG_Video_X", "BG_Video_Y", "BG_Video_Width", "BG_Video_Height",
     *TEXT_BOX_COLUMNS,
     "Headline", "Headline_Size", "Headline_Color", "Headline_Opacity",
     "Headline_X", "Headline_Y", "Headline_Font",
@@ -658,6 +668,21 @@ class RenderConfig:
     # Canvas color used when a row has no background image (backgrounds are
     # optional — without a ZIP every row renders on this solid color).
     bg_color: str = "#1E1B4B"
+    # The translucent background-video layer: clips from the uploaded/Drive
+    # pool play back-to-back for the length of each video, sequenced like the
+    # gifs (see _resolve_bg_video_sequence). Sits ABOVE the promo/gif/CTA and
+    # ALWAYS directly below the texts (it shares text_z with a lower tie-break,
+    # so no sidebar z setting can put it over them). 0 opacity = layer off even
+    # when a pool exists. The box defaults to the full canvas.
+    bg_video_opacity: float = 0.08
+    bg_video_x: int = 0
+    bg_video_y: int = 0
+    bg_video_w: int = CANVAS_W
+    bg_video_h: int = CANVAS_H
+    # Dwell floor for the background sequence, scoped like gif_min_seconds and
+    # for the same reasons (batch-wide pacing; per-row values would make the
+    # FFmpeg input count vary row to row).
+    bg_video_min_seconds: float = BG_VIDEO_MIN_SECONDS
     video_x: int = 90
     video_y: int = 300
     video_w: int = 900
@@ -898,6 +923,19 @@ class RowSpec:
     # mismatch would emit fewer inputs than the index arithmetic accounts for.
     gif_clips: Optional[list] = None
     gif_clip_repeats: Optional[list] = None
+    # Per-row background-video box (BG_Video_* cells); blank => sidebar values
+    # (full canvas by default). X/Y are the box's TOP-LEFT corner.
+    bg_video_x: Optional[int] = None
+    bg_video_y: Optional[int] = None
+    bg_video_w: Optional[int] = None
+    bg_video_h: Optional[int] = None
+    # The row's background-video sequence, filled by _resolve_bg_video_sequence:
+    # the chosen clips in play order and, index-aligned with them, how many
+    # times each repeats to satisfy the dwell floor. Same contract as
+    # gif_clips/gif_clip_repeats — the two lists MUST stay the same length,
+    # because build_ffmpeg_command zips them into `-stream_loop N -i path`.
+    bg_video_clips: Optional[list] = None
+    bg_video_clip_repeats: Optional[list] = None
     # The sheet's row number (1-based), mixed into placement_seed so two rows
     # with identical text still get distinct random picks — CTA-video clips,
     # colors, sizes, auto-placement. Without it, a templated sheet where every
@@ -970,6 +1008,10 @@ class RowSpec:
                 row.get("GIF_Fade_Start"), warnings, "GIF_Fade_Start"),
             gif_fade_duration=_parse_opt_float(
                 row.get("GIF_Fade_Duration"), warnings, "GIF_Fade_Duration"),
+            bg_video_x=_parse_opt_int(row.get("BG_Video_X"), warnings, "BG_Video_X"),
+            bg_video_y=_parse_opt_int(row.get("BG_Video_Y"), warnings, "BG_Video_Y"),
+            bg_video_w=_parse_opt_int(row.get("BG_Video_Width"), warnings, "BG_Video_Width"),
+            bg_video_h=_parse_opt_int(row.get("BG_Video_Height"), warnings, "BG_Video_Height"),
             seed_salt=row_number,
             warnings=warnings,
         )
@@ -1020,6 +1062,7 @@ class VideoGenerator:
         output_dir: Path,
         cta_video_slots: Optional[list] = None,
         gif_paths: Optional[list] = None,
+        bg_video_paths: Optional[list] = None,
     ):
         self.config = config
         self.video_path = Path(video_path)
@@ -1077,6 +1120,19 @@ class VideoGenerator:
                     "FFmpeg 'matches no streams' error.")
         self.gif_paths = good_gifs
         self._has_gifs = bool(self.gif_paths)
+        # The background-video pool: drop-and-warn per clip like the gifs,
+        # never raise — one audio-only upload would otherwise fail every row.
+        good_bgvs = []
+        for p in (bg_video_paths or []):
+            p = Path(p)
+            if _has_video_stream(self.ffmpeg, p):
+                good_bgvs.append(p)
+            else:
+                self.input_warnings.append(
+                    f"Background video '{p.name}' has no video stream "
+                    "(audio-only or corrupt) — skipped.")
+        self.bg_video_paths = good_bgvs
+        self._has_bg_videos = bool(self.bg_video_paths)
 
         self._bg_index, self._bg_names = self._build_bg_index(Path(bg_dir))
         # Fonts are cached by (file path, named variation, size). The uploaded
@@ -1608,6 +1664,21 @@ class VideoGenerator:
         if self._has_gifs:
             self._resolve_gif_sequence(spec)
 
+        # Background-video box (resolved unconditionally, same reasoning as the
+        # CTA video / gif boxes: the editor needs concrete numbers either way).
+        # Full canvas by default. Never a no-go zone for text auto-placement —
+        # at its opacity the texts are meant to sit on it.
+        spec.bg_video_w = box_dim(spec.bg_video_w, cfg.bg_video_w, CANVAS_W,
+                                  "BG_Video_Width")
+        spec.bg_video_h = box_dim(spec.bg_video_h, cfg.bg_video_h, CANVAS_H,
+                                  "BG_Video_Height")
+        if spec.bg_video_x is None:
+            spec.bg_video_x = cfg.bg_video_x
+        if spec.bg_video_y is None:
+            spec.bg_video_y = cfg.bg_video_y
+        if self._has_bg_videos:
+            self._resolve_bg_video_sequence(spec)
+
         color_deck = list(RANDOM_TEXT_COLORS)
         for element in spec.text_elements:
             if not element.text:
@@ -1914,36 +1985,31 @@ class VideoGenerator:
                 f"CTA video: reached the {CTA_MAX_TOTAL_CLIPS}-clip cap before "
                 "covering the full main video (clips may be very short).")
 
-    def _resolve_gif_sequence(self, spec: RowSpec) -> None:
-        """Decide which gifs play for this row, in what order, and how many
-        times each repeats. Fills spec.gif_clips / spec.gif_clip_repeats.
+    def _deal_dwell_sequence(self, spec: RowSpec, pool: list, salt: int,
+                             floor: float, cap: int, label: str,
+                             item: str) -> tuple[list, list]:
+        """Draw clips from a flat pool until they cover the promo, each held for
+        at least `floor` seconds. Returns (clips, repeats), index-aligned.
 
-        The sequence LENGTH IS DERIVED, not configured: gifs are drawn from the
-        flat pool until their combined on-screen time covers the promo, so the
-        layer never freezes on a stopped animation. That is deliberate — with a
-        dwell floor the count needed depends on the promo, and one sheet renders
+        Shared by the gif layer and the background-video layer, which want the
+        same thing: a derived-length sequence over a flat pool with a dwell
+        floor. The sequence LENGTH IS DERIVED, not configured — with a dwell
+        floor the count needed depends on the promo, and one sheet renders
         against up to MAX_PROMO_VIDEOS promos of different lengths, so any fixed
         count would be right for at most one of them.
 
-        This is _fill_cta_sequence's shape but NOT its arithmetic, and the two
+        This is _fill_cta_sequence's shape but NOT its arithmetic, and those two
         must not be merged: a CTA clip contributes `duration / speed`, whereas a
-        gif contributes `duration * repeats` where `repeats` is itself derived
-        from the duration.
+        clip here contributes `duration * repeats` where `repeats` is itself
+        derived from the duration. `salt` keeps each caller's draw independent —
+        sharing one would lock two layers to the same picks in every row.
         """
-        cfg = self.config
-        pool = self.gif_paths
-        if not pool:
-            return
-        # A different salt from the CTA picker's 0xC7A. Seeding both from the
-        # same row seed with the same salt would lock the two layers together:
-        # every row that drew CTA clip #3 would also draw gif #3, in every batch.
-        rng = random.Random(spec.placement_seed() ^ 0x91F)
-        floor = max(0.1, float(cfg.gif_min_seconds or GIF_MIN_SECONDS))
+        rng = random.Random(spec.placement_seed() ^ salt)
         target = self._probe_duration(self.video_path)
         if target is None:
             spec.warnings.append(
-                "GIFs: couldn't measure the promo video's duration, so the "
-                "sequence length can't be derived — playing each gif in the "
+                f"{label}: couldn't measure the promo video's duration, so the "
+                f"sequence length can't be derived — playing each {item} in the "
                 "pool once. It may stop before the video ends.")
 
         chosen: list[Path] = []
@@ -1951,7 +2017,7 @@ class VideoGenerator:
         unmeasured: list[str] = []
         covered = 0.0
         # Deal from a shuffled deck rather than picking independently each time,
-        # the same way backgrounds are assigned: every gif in the pool is used
+        # the same way backgrounds are assigned: every clip in the pool is used
         # once before any is used twice. Independent random picks look fine in
         # theory and bad in practice — with four gifs against a 20s promo they
         # produced green, amber, green, amber, leaving two uploads never shown.
@@ -1961,16 +2027,16 @@ class VideoGenerator:
             if not deck:
                 deck.extend(pool)
                 rng.shuffle(deck)
-                # Don't let a reshuffle put the same gif either side of the
+                # Don't let a reshuffle put the same clip either side of the
                 # seam; that is the one repeat the deck can't rule out.
                 if chosen and len(deck) > 1 and str(deck[0]) == str(chosen[-1]):
                     deck.append(deck.pop(0))
             return deck.pop(0)
 
         # Without a target, fall back to one pass over the pool: bounded, and
-        # with the floor applied it still covers 5s per gif.
-        untargeted_limit = min(len(pool), GIF_MAX_TOTAL_CLIPS)
-        while len(chosen) < GIF_MAX_TOTAL_CLIPS:
+        # with the floor applied it still covers `floor` seconds per clip.
+        untargeted_limit = min(len(pool), cap)
+        while len(chosen) < cap:
             if target is None:
                 if len(chosen) >= untargeted_limit:
                     break
@@ -1993,14 +2059,38 @@ class VideoGenerator:
         if unmeasured:
             names = ", ".join(sorted(set(unmeasured))[:5])
             spec.warnings.append(
-                f"GIFs: couldn't measure the length of {names} — played once "
+                f"{label}: couldn't measure the length of {names} — played once "
                 f"instead of repeating to {floor:g}s.")
         if target is not None and covered < target:
             spec.warnings.append(
-                f"GIFs: reached the {GIF_MAX_TOTAL_CLIPS}-gif cap before "
-                "covering the whole video; the last gif's final frame will hold.")
-        spec.gif_clips = chosen
-        spec.gif_clip_repeats = repeats
+                f"{label}: reached the {cap}-clip cap before covering the whole "
+                f"video; the last {item}'s final frame will hold.")
+        return chosen, repeats
+
+    def _resolve_gif_sequence(self, spec: RowSpec) -> None:
+        """Fill spec.gif_clips / spec.gif_clip_repeats for this row."""
+        if not self.gif_paths:
+            return
+        # A different salt from the CTA picker's 0xC7A. Seeding both from the
+        # same row seed with the same salt would lock the two layers together:
+        # every row that drew CTA clip #3 would also draw gif #3, in every batch.
+        spec.gif_clips, spec.gif_clip_repeats = self._deal_dwell_sequence(
+            spec, self.gif_paths, 0x91F,
+            max(0.1, float(self.config.gif_min_seconds or GIF_MIN_SECONDS)),
+            GIF_MAX_TOTAL_CLIPS, "GIFs", "gif")
+
+    def _resolve_bg_video_sequence(self, spec: RowSpec) -> None:
+        """Fill spec.bg_video_clips / spec.bg_video_clip_repeats for this row.
+
+        Same treatment as the gifs — a derived-length sequence over the flat
+        pool — with its own dwell floor (longer: this layer is ambience, and a
+        bed that changes every few seconds reads as flicker) and its own salt."""
+        if not self.bg_video_paths:
+            return
+        spec.bg_video_clips, spec.bg_video_clip_repeats = self._deal_dwell_sequence(
+            spec, self.bg_video_paths, 0xB6D,
+            max(0.1, float(self.config.bg_video_min_seconds or BG_VIDEO_MIN_SECONDS)),
+            BG_VIDEO_MAX_TOTAL_CLIPS, "Background videos", "background video")
 
     def _paint_text(self, target: Image.Image, ax: float, ay: float, element: TextSpec,
                     what: str = "full", fill: Optional[tuple] = None) -> None:
@@ -2519,13 +2609,16 @@ class VideoGenerator:
               cta_fade_duration later.
 
           Z-order: the overlay layers — promo video [vidB], optional gifs [gifl],
-          optional CTA video [ctav], optional CTA image [cta], texts — are stacked
-          onto [anchored] in ascending order of their sidebar z-index (video_z /
-          gif_z / cta_video_z / cta_image_z / text_z; higher = on top). The
-          background is always the base. Equal z-indexes fall back to a fixed
-          priority (promo < gifs < CTA video < CTA image < texts) so the order is
-          deterministic. The topmost overlay also converts to yuv420p — required
-          for maximum player/social-platform compatibility.
+          optional CTA video [ctav], optional CTA image [cta], the optional
+          translucent background sequence [bgv], texts — stacked onto [anchored]
+          in ascending order of their sidebar z-index (video_z / gif_z /
+          cta_video_z / cta_image_z / text_z; higher = on top). The background
+          is always the base. Equal z-indexes fall back to a fixed priority
+          (promo < gifs < CTA video < CTA image < background beds < texts) so
+          the order is deterministic; [bgv] has no z knob — it shares text_z
+          with a lower tie-break, pinning it directly beneath the texts. The
+          topmost overlay also converts to yuv420p — required for maximum
+          player/social-platform compatibility.
 
         INPUT INDICES. Every input is claimed through add_input(), which appends
         it and returns the index it took; the filter graph is then written using
@@ -2550,6 +2643,15 @@ class VideoGenerator:
         gifs = list(spec.gif_clips or [])
         gif_reps = list(spec.gif_clip_repeats or [])
         has_gif = bool(self._has_gifs and gifs)
+        bgvs = list(spec.bg_video_clips or [])
+        bgv_reps = list(spec.bg_video_clip_repeats or [])
+        has_bgv = bool(self._has_bg_videos and bgvs
+                       and (cfg.bg_video_opacity or 0) > 0)
+        # Same normalisation as the gifs, for the same reason: zip() truncates,
+        # so a length mismatch would emit fewer -i than the filter graph
+        # references and shift every later input by one.
+        if len(bgv_reps) != len(bgvs):
+            bgv_reps = (bgv_reps + [1] * len(bgvs))[:len(bgvs)]
         sub_layers = sub_layers or []
         # These two are built together and stay aligned by construction, but a
         # mismatch here would be silent and expensive: zip() truncates, so the
@@ -2585,6 +2687,12 @@ class VideoGenerator:
         gif_ix = [add_input("-stream_loop", str(max(1, int(r)) - 1), "-i", str(p))
                   for p, r in zip(gifs, gif_reps)]
         sub_ix = [add_still(sl["png"]) for sl in sub_layers]
+        # Background beds, claimed like the gifs: -stream_loop N replays a clip
+        # before decoding, which is what holds a short bed for the dwell floor.
+        # Finite by construction — an unbounded -stream_loop -1 was measured
+        # running away when no -t bounded the output.
+        bgv_ix = ([add_input("-stream_loop", str(max(1, int(r)) - 1), "-i", str(p))
+                   for p, r in zip(bgvs, bgv_reps)] if has_bgv else [])
 
         if n_inputs > MAX_TOTAL_FFMPEG_INPUTS:
             # Two independent per-layer caps are not enough — they land in one
@@ -2594,7 +2702,8 @@ class VideoGenerator:
             raise RuntimeError(
                 f"This row needs {n_inputs} FFmpeg inputs, over the "
                 f"{MAX_TOTAL_FFMPEG_INPUTS} limit: {len(clips)} CTA clip(s), "
-                f"{len(gifs)} gif(s), {len(sub_layers)} subliminal layer(s). "
+                f"{len(gifs)} gif(s), {len(sub_layers)} subliminal layer(s), "
+                f"{len(bgvs) if has_bgv else 0} background video(s). "
                 "Raise the gif dwell time so fewer gifs are needed, use fewer "
                 "CTA clips, or shorten the promo video.")
 
@@ -2669,6 +2778,32 @@ class VideoGenerator:
                 )
             else:
                 parts.append(f"{gseq}null[gifl];")
+        if has_bgv:
+            # Translucent background sequence. Each clip is crop-first
+            # cover-filled to the box (crop to the box's aspect, then scale —
+            # same visible region as scale-then-crop at 4-6x less CPU, which
+            # matters at full canvas), which also gives every clip the identical
+            # size concat demands. format=rgba must precede the alpha multiply
+            # or it lands on opaque yuv; it goes on each clip because concat
+            # rejects inputs whose pixel formats differ.
+            bw, bh = spec.bg_video_w, spec.bg_video_h
+            labels = []
+            for k, idx in enumerate(bgv_ix):
+                parts.append(
+                    f"[{idx}:v]fps={fps},"
+                    f"crop='min(iw,ih*{bw}/{bh})':'min(ih,iw*{bh}/{bw})',"
+                    f"scale={bw}:{bh},setsar=1,format=rgba[bv{k}];")
+                labels.append(f"[bv{k}]")
+            if len(labels) > 1:
+                parts.append(
+                    f"{''.join(labels)}concat=n={len(labels)}:v=1:a=0[bseq];")
+                bseq = "[bseq]"
+            else:
+                bseq = labels[0]
+            # One alpha multiply over the joined timeline rather than per clip:
+            # cheaper, and it cannot drift between clips.
+            parts.append(
+                f"{bseq}colorchannelmixer=aa={cfg.bg_video_opacity:.3f}[bgv];")
         if has_cta:
             parts.append(
                 f"[{cta_i}:v]format=rgba,"
@@ -2693,6 +2828,15 @@ class VideoGenerator:
             # under-fills. The promo's own anchor plus -t bound the render.
             layers.append((cfg.gif_z, 1, "[gifl]",
                            f"{spec.gif_x}:{spec.gif_y}"))
+        if has_bgv:
+            # The translucent background sequence shares texts' z with a lower
+            # tie-break, so it sits IMMEDIATELY below the texts (priority 4)
+            # and subliminals (priority 5) whatever z values the sidebar holds,
+            # and above every layer with z <= text_z. There is deliberately no
+            # bg_video_z knob: "under the texts, over everything else" is the
+            # layer's contract, not a preference.
+            layers.append((cfg.text_z, 3.9, "[bgv]",
+                           f"{spec.bg_video_x}:{spec.bg_video_y}"))
         # Subliminal text: each partial is a looped-still input painted at 0,0 but
         # timeline-gated to one frame slot of the cycle via `enable`, so per output
         # frame exactly one partial shows and no frame carries the whole text. They
@@ -3069,8 +3213,26 @@ class VideoGenerator:
                 "video": self.config.video_z, "gif": self.config.gif_z,
                 "cta_video": self.config.cta_video_z,
                 "cta_image": self.config.cta_image_z, "text": self.config.text_z,
+                # No bg_video entry: that layer has no z knob — the editor uses
+                # Z.text directly, with DOM order breaking the tie the same way
+                # the render's 3.9 tie-break does (directly beneath the texts).
             },
         }
+        if self._has_bg_videos and spec.bg_video_clips:
+            # Cover-fit poster frame of the FIRST clip in this row's sequence,
+            # shown at the render opacity via CSS so the translucency is honest.
+            # Like the gif box, a caption admits what a still cannot show: the
+            # sequence rotates through several beds during the video.
+            bv = self._cover_frame(spec.bg_video_w, spec.bg_video_h,
+                                   spec.bg_video_clips[0])
+            payload["bg_video"] = {
+                "x": spec.bg_video_x, "y": spec.bg_video_y,
+                "w": spec.bg_video_w, "h": spec.bg_video_h,
+                "frame": _img_to_data_uri(bv.convert("RGB"), "JPEG"),
+                "frame_w": bv.width, "frame_h": bv.height,
+                "opacity": self.config.bg_video_opacity,
+                "count": len(spec.bg_video_clips),
+            }
         if self._has_cta:
             payload["cta"] = {
                 "x": spec.cta_x, "y": spec.cta_y, "w": spec.cta_w, "h": spec.cta_h,

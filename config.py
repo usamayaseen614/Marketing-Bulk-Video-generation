@@ -291,12 +291,12 @@ FILENAME_KEEP_EMOJI = _bool("BVG_FILENAME_KEEP_EMOJI", False)
 # How long a generated caption may be.
 #
 # This is derived from the filename budget, not picked arbitrarily. A name is
-# capped at 90 characters and the long form also carries five hashtags — about
-# 38 characters — leaving roughly 50 for the caption. Asking the model for
-# anything longer just means cutting its sentence in half at naming time, so
-# the limit is imposed at generation instead: the caption Gemini writes is the
-# caption that ships.
-CAPTION_MAX_CHARS = _int("BVG_CAPTION_MAX_CHARS", 50)
+# capped at 90 characters and carries one ending beside the caption: either
+# hashtags (five is about 38 characters) or a fixed CTA line (the longest in
+# naming.FIXED_TAILS is 47). 40 clears BOTH — the caption Gemini writes is the
+# caption that ships, whichever ending the batch uses. Asking the model for
+# anything longer just means cutting its sentence in half at naming time.
+CAPTION_MAX_CHARS = _int("BVG_CAPTION_MAX_CHARS", 40)
 
 CAPTION_POOL_SIZE = _int("BVG_CAPTION_POOL_SIZE", 2000)
 HASHTAG_POOL_SIZE = _int("BVG_HASHTAG_POOL_SIZE", 500)

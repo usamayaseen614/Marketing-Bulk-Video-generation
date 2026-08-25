@@ -157,10 +157,17 @@ def _render_body(job: dict, status: str, result: dict) -> str:
                 f"selected; nothing already uploaded is re-sent.")
     elif uploaded is not None:
         drive_files = result.get("drive_files", uploaded * 2)
+        # How the two names differ depends on the job: hashtags normally, but a
+        # fixed call-to-action line replaces them and makes both names the same.
+        tailed = ((result.get("captions") or {}).get("hashtag_source")
+                  == "fixed_tail")
+        how = ("under the same name in both platform folders — this batch used "
+               "a fixed call-to-action line instead of hashtags"
+               if tailed else
+               "once with a single hashtag and once with all of them")
         lines.append(
             f"{uploaded:,} of {rendered:,} uploaded to Google Drive "
-            f"({drive_files:,} files — each video is published twice, once "
-            f"with a single hashtag and once with all of them)")
+            f"({drive_files:,} files — each video is published twice, {how})")
     lines.append(f"Elapsed: {_duration(result.get('elapsed'))}")
 
     mix = result.get("mix") or {}
