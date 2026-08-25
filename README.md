@@ -338,7 +338,7 @@ So the video made from **row 2** on **video 3.mp4** reads `sakfjn`.
 | Music volume | The music's share of the mix (0–100%, default 0 = off). The promo video's own audio takes the rest: 10% music leaves the original at 90%. Linear gain, so 10% is about −20 dB. A promo with **no** audio track of its own plays the music at full volume instead, and says so in the row's warnings — there is nothing to mix it against |
 | Minimum seconds per track | The music dwell floor (default 30, longest of the three). A track shorter than this repeats **itself** a whole number of times to clear it; one already longer plays once. Sidebar-only, like the other two floors |
 | Split the audio track (random speed) | Cuts the promo video's **own** audio into equal chunks and replays each at its own random speed — fast in places, slow in others, and still ending exactly with the picture. Sound and vision drift apart mid-video by design. Pitch is preserved (`atempo`), so voices do not go chipmunk. Seeded per row, so every output in the batch warps differently and re-running a sheet reproduces it exactly. Off by default, and off means the audio path is exactly what it was before this setting existed |
-| Chunks / Speed variation | Split-audio only. **Chunks** (2–24, default 8) is how many pieces the audio is cut into — more chunks means the speed changes more often, and the change is audible at each seam. **Speed variation** (5–60%, default 35) is how far each chunk strays from normal: 35% gives roughly 0.74×–1.54×. Past about 50% the slow parts smear and the fast parts gabble |
+| Chunks / Speed variation | Split-audio only. **Chunks** (2–24, default 8) is how many pieces the audio is cut into — more chunks means the speed changes more often, and the change is audible at each seam. **Speed variation** (5–60%, default 35) is how far each chunk strays from normal: 35% keeps every chunk between 0.74× and 1.54×, 60% between 0.63× and 2.5×. The band is a guarantee rather than an average — see below. Past about 50% the slow parts smear and the fast parts gabble |
 | Layer order (z-index) | Which layer sits on top: promo video (1), **GIFs (2)**, CTA video (3), CTA image (4), texts (5). Higher = nearer the front; the background is always at the back. Raise the gif number above the promo video's to float a gif over the video instead of behind it. The **background videos have no number**: they always sit directly beneath the texts, over any layer numbered at or below the texts — a layer raised *above* the texts also rises above the veil |
 | Default font | The font used when a text's `*_Font` cell is blank — a bundled family, the system font, or your uploaded font |
 | Default artistic style | The style used when a text's `*_Style` cell is blank — `classic`, `outline`, `shadow`, or `neon` |
@@ -473,6 +473,15 @@ single pooled Drive folder (downloaded straight into `assets/music/`).
   normalised so their playback times add back up to the original length exactly, so the
   warped track is neither short nor long however the dice fall. Any residue from `atempo`'s
   internal rounding (tens of milliseconds over a 20-second clip) is made up by `apad`.
+* **...and every chunk stays inside the advertised band.** Normalising to a mean of 1 moves
+  every draw by one factor that depends on how the sample landed, so a few percent of chunks
+  would otherwise finish *outside* the range the spread promises — measured 0.62×–1.79× at
+  spread 0.35, and 0.44× at spread 0.60, which is under `atempo`'s hard 0.5 floor and fails
+  the row outright. So after normalising, all the deviations are pulled toward 1 by one
+  shared factor until the worst offender is back in band. Scaling deviations about a mean of
+  exactly 1 leaves the mean at exactly 1, so this costs the exact-duration property nothing —
+  which is why it is a rescale and not a clamp. A clamp would fix the range and silently
+  break the length.
 * **Split audio desyncs on purpose.** Picture and sound drift apart in the middle and land
   together at the end. If lip-sync matters, leave it off.
 * **Split audio does nothing to a silent promo.** There is no audio to cut, so the row
@@ -507,8 +516,11 @@ downloaded.
 The scraper's *What to pull* switch has a second setting: **Overlay music**, which gives you
 a folder of MP3s to drop into the generator's Music uploader (or to point the Music source
 at, as a Drive link) rather than a clip bank. Batch layout and the trim window are ignored —
-tracks land whole, in one flat `music_<date>` folder — and the sheet leads with
-`Track` / `Artist` / `Album` instead of the clip columns.
+tracks land whole by default, in one flat `music_<date>` folder — and the sheet leads
+with `Track` / `Artist` / `Album` instead of the clip columns. The trim window is opt-in
+(*Trim each track*): off, every track is kept at its full length; on, each track is cut to
+the window — a trim, not a filter, so a track shorter than the window keeps whatever length
+it has. Unlike the video trim there is no segmenting: one track in, one (shorter) track out.
 
 Three things about it are worth knowing before you run one:
 

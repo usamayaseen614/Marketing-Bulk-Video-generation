@@ -60,20 +60,35 @@ def streams(path: Path) -> str:
 # This is the whole feature in one property: however the tempos come out, the
 # playback times must add back up to the source length. Checked directly here
 # because a render can only ever show it to a few milliseconds.
-for n in (2, 3, 8, 24):
-    for spread in (0.0, 0.1, 0.35, SPLIT_AUDIO_MAX_SPREAD):
-        tempos = split_audio_tempos(n, spread, random.Random(n * 100 + int(spread * 10)))
-        assert len(tempos) == n
-        chunk = PROMO_DUR / n
-        played = sum(chunk / t for t in tempos)
-        assert abs(played - PROMO_DUR) < 1e-9, (n, spread, played)
-        # atempo accepts 0.5-100; the spread cap has to keep every tempo inside
-        # it with room to spare, or a row fails at render time instead of here.
-        assert all(0.5 < t < 3.0 for t in tempos), (n, spread, tempos)
-# An over-wide spread is clamped, not obeyed.
+# Many seeds, not a handful. The failure this guards against is statistical: the
+# normalisation moves every draw by a factor that depends on how the sample
+# landed, so a few percent of chunks escape the nominal band and only a wide
+# sweep sees them. A five-seed version of this test passed while spread=0.6 was
+# still producing atempo=0.44 — under FFmpeg's hard 0.5 floor, which fails the
+# row outright rather than sounding wrong.
+ATEMPO_FLOOR = 0.5
+for n in (2, 3, 8, 16, 24):
+    for spread in (0.0, 0.1, 0.35, 0.5, SPLIT_AUDIO_MAX_SPREAD):
+        lo_band, hi_band = 1.0 / (1.0 + spread), 1.0 / (1.0 - spread)
+        for seed in range(400):
+            tempos = split_audio_tempos(n, spread, random.Random(seed))
+            assert len(tempos) == n
+            chunk = PROMO_DUR / n
+            played = sum(chunk / t for t in tempos)
+            # The invariant the whole feature rests on, at full float precision.
+            assert abs(played - PROMO_DUR) < 1e-9, (n, spread, seed, played)
+            # Every tempo inside the band the UI advertises for that spread.
+            # This is what the deviation rescale buys, and asserting the band
+            # rather than a loose 0.5-3.0 window is what makes it a real check.
+            for t in tempos:
+                assert lo_band - 1e-9 <= t <= hi_band + 1e-9, (n, spread, seed, t)
+                assert t >= ATEMPO_FLOOR, ("FFmpeg refuses atempo below 0.5",
+                                           n, spread, seed, t)
+# An over-wide spread is clamped to the cap, not obeyed.
 wild = split_audio_tempos(6, 5.0, random.Random(1))
-assert all(0.5 < t < 3.0 for t in wild), wild
-print("ok: tempo arithmetic is exact and bounded")
+assert all(1 / (1 + SPLIT_AUDIO_MAX_SPREAD) - 1e-9 <= t
+           <= 1 / (1 - SPLIT_AUDIO_MAX_SPREAD) + 1e-9 for t in wild), wild
+print("ok: tempo arithmetic is exact, and every tempo stays in the advertised band")
 
 
 # ------------------------------------------------------------------- fixtures

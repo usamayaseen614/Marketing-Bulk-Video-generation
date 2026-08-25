@@ -251,4 +251,50 @@ assert f"music_{stamp}" in folders, folders
 assert not any(f.startswith("dump_") for f in folders), folders
 print(f"ok: music uploads to music_{stamp}, not dump_{stamp}")
 
+# --------------------------------------------------- 5. the opt-in trim window
+#
+# Whole tracks are the default; a trim happens only when asked for. The failure
+# worth guarding is the default falling back to the VIDEO trim window (10s) for
+# a job submitted without the params — every track silently cut short.
+import re as _re
+
+
+def _dur(path: Path) -> float:
+    proc = subprocess.run([FF, "-hide_banner", "-i", str(path)],
+                          capture_output=True, text=True, errors="replace")
+    m = _re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", proc.stderr)
+    h, mn, sec = m.groups()
+    return int(h) * 3600 + int(mn) * 60 + float(sec)
+
+
+# trim_audio directly: the trim-not-filter contract, on a real MP3.
+whole = mp3(TMP / "whole.mp3", 440, 4.0)
+tiktok.trim_audio(whole, 1.0, 2.0)
+assert abs(_dur(whole) - 2.0) < 0.2, _dur(whole)
+short = mp3(TMP / "short.mp3", 440, 1.5)
+tiktok.trim_audio(short, 1.0, 10.0)          # window longer than the track
+assert abs(_dur(short) - 0.5) < 0.2, _dur(short)
+tiny = mp3(TMP / "tiny.mp3", 440, 0.8)
+tiktok.trim_audio(tiny, 1.0, 10.0)           # start offset past the end
+assert abs(_dur(tiny) - 0.8) < 0.2, _dur(tiny)
+print("ok: trim_audio trims, and keeps short tracks whole rather than emptying them")
+
+# Through the runner: kept tracks come out at the window length...
+result5, job5 = run_music("music-5", account="https://www.tiktok.com/@trimmed",
+                          trim_start=0.5, trim_duration=1.0)
+assert result5["trimmed"] == 4, result5
+for f in (store.job_dir(job5) / "clips").iterdir():
+    if f.is_file():
+        assert _dur(f) <= 1.3, (f.name, _dur(f))
+print("ok: the opt-in window trims every kept track through the runner")
+
+# ...and a job with NO trim params keeps tracks whole — the video default (10s
+# from 1s) must not leak in. Tracks here are 2s, so a leaked start=1 alone
+# would measurably halve them.
+result6, job6 = run_music("music-6", account="https://www.tiktok.com/@untrimmed")
+durs = {f.name: _dur(f) for f in (store.job_dir(job6) / "clips").iterdir()
+        if f.is_file()}
+assert abs(durs["101.mp3"] - 2.0) < 0.2, durs
+print("ok: without trim params, tracks land whole — the video default doesn't leak")
+
 print("\nall music-scrape checks passed")

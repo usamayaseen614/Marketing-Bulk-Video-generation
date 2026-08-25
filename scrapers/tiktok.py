@@ -598,6 +598,45 @@ def trim_clip(src: Path, dest: Path, start: float, duration: float,
     return dest
 
 
+def trim_audio(src: Path, start: float, duration: float,
+               ffmpeg: Optional[str] = None) -> Path:
+    """Cut an audio file to `duration` seconds starting at `start`, in place.
+
+    NOT trim_clip: that re-encodes with libx264 into the source container, and
+    an MP3 container refuses both a video stream and AAC. Stream copy instead of
+    re-encoding, because unlike the video trim there is no keyframe problem to
+    dodge -- MP3 frames are ~26ms apart, so `-ss` with `-c copy` cuts to within
+    a frame, costs no quality, and is effectively free.
+
+    Same trim-not-filter contract as trim_clip: a track shorter than `start`
+    keeps its whole length (the window slides back to 0), and one shorter than
+    the window is kept at whatever length it has."""
+    ffmpeg = ffmpeg or find_ffmpeg()
+    src = Path(src)
+
+    probed = probe_duration(src, ffmpeg)
+    effective_start = start
+    if probed is not None and probed <= start:
+        effective_start = 0.0
+
+    dest = src.with_name(src.stem + ".trim" + src.suffix)
+    cmd = [
+        ffmpeg, "-y", "-loglevel", "error",
+        "-ss", f"{effective_start:.3f}",
+        "-i", str(src),
+        "-t", f"{duration:.3f}",
+        "-c", "copy",
+        str(dest),
+    ]
+    proc = subprocess.run(cmd, **_ff_capture(), timeout=180)
+    if proc.returncode != 0 or not dest.is_file() or dest.stat().st_size == 0:
+        dest.unlink(missing_ok=True)
+        tail = "\n".join((proc.stderr or "").strip().splitlines()[-10:])
+        raise ScrapeError(f"Trim failed for {src.name}: {tail}")
+    dest.replace(src)
+    return src
+
+
 _DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
 _AUDIO_STREAM_RE = re.compile(r"^\s*Stream #.*: Audio:", re.M)
 

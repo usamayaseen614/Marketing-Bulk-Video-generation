@@ -121,11 +121,29 @@ with tab_account:
 
     st.subheader("Trim window")
     if is_music:
-        # A track cut to a ten-second window is not a track. There is nothing
-        # here to configure, so the controls go rather than sit greyed out
-        # inviting a value that would be ignored.
-        trim_start, trim_duration = 0.0, 0.0
-        st.caption("Not used for music — each track is kept whole.")
+        # Opt-in where the video trim is mandatory: the default deliverable is
+        # the whole track, and a window is for cutting intros or capping length
+        # when you want it -- not something a default should do to every song.
+        trim_music = st.checkbox(
+            "Trim each track", value=False,
+            help="Off = every track lands whole (the default). On = each track "
+                 "is cut to the window below — a trim, not a filter, so a "
+                 "track shorter than the window is kept at whatever length it "
+                 "has, and one shorter than the start offset is kept whole.",
+        )
+        if trim_music:
+            mcol_start, mcol_dur = st.columns(2)
+            trim_start = mcol_start.number_input(
+                "Start at (s)", 0.0, 600.0, 0.0, 0.5,
+                help="Skip this much of each track's opening — e.g. a "
+                     "spoken intro before the beat.")
+            trim_duration = mcol_dur.number_input(
+                "Length (s)", 1.0, 600.0, 60.0, 1.0,
+                help="How much of each track to keep, from the start offset.")
+            st.caption(f"→ keeping {trim_start:g}s to "
+                       f"{trim_start + trim_duration:g}s of each track.")
+        else:
+            trim_start, trim_duration = 0.0, 0.0
     else:
         st.caption(
             "Every clip is cut to this window — a trim, not a filter, so nothing "

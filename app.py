@@ -314,9 +314,10 @@ with st.sidebar:
         split_audio_spread = st.slider(
             "Speed variation (%)", 5, int(SPLIT_AUDIO_MAX_SPREAD * 100),
             int(SPLIT_AUDIO_SPREAD * 100),
-            help="How far each chunk strays from normal speed. 35% gives "
-                 "roughly 0.74x-1.54x. Past about 50% the slow parts smear and "
-                 "the fast parts gabble.",
+            help="How far each chunk strays from normal speed. 35% keeps "
+                 "every chunk between 0.74x and 1.54x — the band is a "
+                 "guarantee, not an average. Past about 50% the slow parts "
+                 "smear and the fast parts gabble.",
         ) / 100.0
         st.caption(
             f"~{20 / max(1, split_audio_chunks):.1f}s per chunk on a 20-second "

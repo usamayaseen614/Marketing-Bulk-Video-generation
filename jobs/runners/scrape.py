@@ -155,8 +155,13 @@ def run(job: dict) -> dict:
     mode = "dump" if is_music else params.get("mode", "batch")
     n_batches = int(params.get("batches") or 1)
     limit = int(params.get("limit") or config.SCRAPE_MAX_VIDEOS)
-    trim_start = float(params.get("trim_start", config.SCRAPE_TRIM_START))
-    trim_duration = float(params.get("trim_duration", config.SCRAPE_TRIM_DURATION))
+    # Music defaults to NO trim (0 = whole track) where video defaults to the
+    # configured window. Falling back to the video default here would quietly
+    # cut every track to ten seconds for any job submitted without the param.
+    trim_start = float(params.get("trim_start",
+                                  0.0 if is_music else config.SCRAPE_TRIM_START))
+    trim_duration = float(params.get(
+        "trim_duration", 0.0 if is_music else config.SCRAPE_TRIM_DURATION))
     skip_known = bool(params.get("skip_known", True))
 
     work = store.work_dir(job_id)
@@ -256,6 +261,15 @@ def run(job: dict) -> dict:
                     _sleep_politely()
                     continue
                 seen_hashes.add(key)
+                # The trim window, when one was asked for. Opt-in for music
+                # (0 = keep the whole track, the default) where it is mandatory
+                # for videos -- a track cut to ten seconds is not a track unless
+                # cutting it is exactly what was requested. Applied only to
+                # KEPT tracks, after dedup, so the sound hash stays that of the
+                # full download and a re-scrape with different trim settings
+                # still recognises what it already has.
+                if trim_duration > 0:
+                    tiktok.trim_audio(raw, trim_start, trim_duration, ffmpeg)
                 trimmed += 1
                 store.update_item(
                     job_id, item["idx"], name=raw.name,
