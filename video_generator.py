@@ -35,6 +35,8 @@ from typing import Iterable, Optional
 import pandas as pd
 from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont, ImageOps
 
+import config
+
 logger = logging.getLogger("video_generator")
 
 # --------------------------------------------------------------------------- constants
@@ -954,7 +956,9 @@ class RenderConfig:
     subliminal_phase: int = 0
     subliminal_granularity: str = "word"   # "word" | "char"
     subliminal_all_intra: bool = True
-    ffmpeg_timeout: int = 600     # seconds per row before a render is killed
+    # Seconds per row before a render is killed. Env-backed so it can be
+    # tuned without a rebuild — see config.RENDER_TIMEOUT.
+    ffmpeg_timeout: int = field(default_factory=lambda: config.RENDER_TIMEOUT)
 
 
 @dataclass

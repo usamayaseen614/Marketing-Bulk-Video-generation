@@ -138,6 +138,16 @@ JOB_MAX_ATTEMPTS = _int("BVG_JOB_MAX_ATTEMPTS", 3)
 # judgement that was already made wrongly once.
 RENDER_ATTEMPTS = _int("BVG_RENDER_ATTEMPTS", 2)
 
+# Seconds ONE ROW may spend inside FFmpeg before it is killed and marked failed.
+# Kept as an env knob rather than a literal because the right value depends
+# entirely on the sheet: a plain row renders in seconds, while one carrying
+# seven subliminal layers and frame-by-frame encoding at crf 18 was measured at
+# 552s for a 13-second video. Raising it stops slow rows being thrown away —
+# it does NOT make them faster, and it does nothing for rows the OOM killer
+# takes. Note the interaction with RENDER_ATTEMPTS: a row that always times out
+# now burns this twice before it is abandoned.
+RENDER_TIMEOUT = _int("BVG_RENDER_TIMEOUT", 600)
+
 
 # --------------------------------------------------------------------------- email
 
