@@ -46,10 +46,22 @@ print("after renders:", counts)
 assert counts == {"total": 5, "rendered": 3, "render_failed": 1,
                   "render_pending": 1, "uploaded": 0, "upload_failed": 0}, counts
 
-# --- resume semantics: only the untouched item is pending; the failed one is not retried
+# --- resume semantics: the untouched item is pending, and so is the failed one
+# while it is still under the attempts cap. Renders used to be treated as
+# deterministic and never retried, which stranded 832 rows of a 12,000-row
+# batch that had died to the OOM killer — a failure that says nothing about
+# the row. See config.RENDER_ATTEMPTS.
 pending = store.pending_render_items(job_id)
-assert [p["idx"] for p in pending] == [5], pending
-print("resume would re-render only:", [p["idx"] for p in pending])
+assert [p["idx"] for p in pending] == [4, 5], pending
+print("resume would re-render:", [p["idx"] for p in pending])
+
+# At the cap it is left alone, so a row that fails every time cannot loop.
+store.update_item(job_id, 4, render_attempts=config.RENDER_ATTEMPTS)
+assert [p["idx"] for p in store.pending_render_items(job_id)] == [5]
+# An explicit cap still overrides, the same way pending_upload_items allows.
+assert [p["idx"] for p in
+        store.pending_render_items(job_id, max_attempts=99)] == [4, 5]
+print("failed row retried under the cap, dropped at it")
 
 # --- uploads: only rendered items are candidates
 up = store.pending_upload_items(job_id)

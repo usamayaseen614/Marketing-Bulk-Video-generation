@@ -280,120 +280,142 @@ def _render_batches(job: dict, df: pd.DataFrame, ws, n_batches: int,
     base_config = params.get("render_config") or {}
     batch_warnings: list[str] = []
 
-    pending = store.pending_render_items(job_id)
-    if not pending:
-        logger.info("Job %s: nothing left to render", job_id)
-        return batch_warnings
-
-    by_batch: dict[int, list[dict]] = {}
-    for item in pending:
-        batch, _row = batching.split_index(item["idx"], n_rows)
-        by_batch.setdefault(batch, []).append(item)
-
-    total_pending = len(pending)
-    done = 0
-    last_beat = 0.0
-
     # Every video gets its own promo, spread evenly inside each batch — so a
     # batch is a mix of all of them rather than 1,000 variations of one.
     # Passed in by run(), which needs the same mapping to name the files.
+    # Hoisted above the pass loop below: it is deterministic, and every pass
+    # has to see the same mapping or a retried row would move promos.
     if promo_for is None:
         promo_for = batching.assign_promos(
             batching.plan_render(n_batches, n_rows),
             len(ws.video_paths) or 1, seed=f"promo-{job_id}")
 
-    for batch in sorted(by_batch):
-        items = by_batch[batch]
-        store.set_stage(job_id, f"rendering batch {batch}/{n_batches}")
+    last_beat = 0.0
+    # Passes, not one shot. pending_render_items hands back rows that failed
+    # under config.RENDER_ATTEMPTS, and every attempt increments that row's
+    # counter, so this terminates on its own — by the final pass each survivor
+    # has hit the cap and the list comes back empty.
+    #
+    # The retry earns its keep on exactly the failure that motivated it: a row
+    # the OOM killer took while fifteen siblings were mid-render will usually
+    # render fine once they have finished. Resuming a crashed worker gets the
+    # same treatment for free, since it re-enters here.
+    for attempt in range(max(1, config.RENDER_ATTEMPTS)):
+        pending = store.pending_render_items(job_id)
+        if not pending:
+            logger.info("Job %s: nothing left to render", job_id)
+            break
+        if attempt:
+            logger.info("Job %s: retry pass %d/%d — %d row(s) that failed earlier",
+                        job_id, attempt, config.RENDER_ATTEMPTS - 1, len(pending))
 
-        # variant_salt is what makes this pass differ from the others: the same
-        # row picks different sample clips in each batch.
-        cfg = RenderConfig(**base_config)
-        cfg.variant_salt = batch
-        cfg.font_path = str(ws.font_path) if ws.font_path else None
+        by_batch: dict[int, list[dict]] = {}
+        for item in pending:
+            batch, _row = batching.split_index(item["idx"], n_rows)
+            by_batch.setdefault(batch, []).append(item)
 
-        # Grouped by promo so one generator is built per promo rather than per
-        # row — constructing one probes the video with FFmpeg, which is far too
-        # expensive to repeat thousands of times.
-        by_promo: dict[int, list[dict]] = {}
-        for item in items:
-            _b, row_no = batching.split_index(item["idx"], n_rows)
-            by_promo.setdefault(
-                promo_for.get(Slot(batch=batch, row=row_no), 0), []).append(item)
+        total_pending = len(pending)
+        done = 0
 
-        for promo_idx in sorted(by_promo):
-            group = by_promo[promo_idx]
-            promo = ws.promo_for_batch(promo_idx)
+        for batch in sorted(by_batch):
+            items = by_batch[batch]
+            store.set_stage(job_id, f"rendering batch {batch}/{n_batches}")
 
-            generator = VideoGenerator(
-                config=cfg,
-                bg_dir=ws.bg_dir,
-                video_path=promo,
-                cta_path=ws.cta_path,
-                work_dir=ws.work_dir / f"b{batch:02d}_p{promo_idx:02d}",
-                output_dir=store.videos_dir(job_id) / batching.source_folder_name(batch),
-                cta_video_slots=ws.cta_video_slots,
-                gif_paths=ws.gif_paths,
-                bg_video_paths=ws.bg_video_paths,
-                music_paths=ws.music_paths,
-            )
-            for message in generator.input_warnings:
-                if message not in batch_warnings:
-                    batch_warnings.append(message)
+            # variant_salt is what makes this pass differ from the others: the same
+            # row picks different sample clips in each batch.
+            cfg = RenderConfig(**base_config)
+            cfg.variant_salt = batch
+            cfg.font_path = str(ws.font_path) if ws.font_path else None
 
-            # The one place per-promo text enters the render. Applied before
-            # assign_backgrounds so the frame handed to render_row is a normal
-            # sheet — RowSpec.from_row reads row['Headline'] and has no idea a
-            # grid was involved, which is why nothing downstream changed.
-            df_promo = text_grids.apply_overrides(df, overrides, promo_idx)
-            df_run, bg_warnings = generator.assign_backgrounds(df_promo)
-            for message in bg_warnings:
-                if message not in batch_warnings:
-                    batch_warnings.append(message)
+            # Grouped by promo so one generator is built per promo rather than per
+            # row — constructing one probes the video with FFmpeg, which is far too
+            # expensive to repeat thousands of times.
+            by_promo: dict[int, list[dict]] = {}
+            for item in items:
+                _b, row_no = batching.split_index(item["idx"], n_rows)
+                by_promo.setdefault(
+                    promo_for.get(Slot(batch=batch, row=row_no), 0), []).append(item)
 
-            logger.info("Job %s: batch %d/%d — %d row(s) on promo %s%s",
-                        job_id, batch, n_batches, len(group), promo.name,
-                        " (per-promo text)" if df_promo is not df else "")
+            for promo_idx in sorted(by_promo):
+                group = by_promo[promo_idx]
+                promo = ws.promo_for_batch(promo_idx)
 
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                futures = {}
-                for item in group:
-                    _b, row_no = batching.split_index(item["idx"], n_rows)
-                    row = df_run.iloc[row_no - 1]
-                    name = (item.get("meta") or {}).get("short_name") or None
-                    futures[pool.submit(generator.render_row, row_no, row, name)] = item
+                generator = VideoGenerator(
+                    config=cfg,
+                    bg_dir=ws.bg_dir,
+                    video_path=promo,
+                    cta_path=ws.cta_path,
+                    work_dir=ws.work_dir / f"b{batch:02d}_p{promo_idx:02d}",
+                    output_dir=store.videos_dir(job_id) / batching.source_folder_name(batch),
+                    cta_video_slots=ws.cta_video_slots,
+                    gif_paths=ws.gif_paths,
+                    bg_video_paths=ws.bg_video_paths,
+                    music_paths=ws.music_paths,
+                )
+                for message in generator.input_warnings:
+                    if message not in batch_warnings:
+                        batch_warnings.append(message)
 
-                for future in as_completed(futures):
-                    item = futures[future]
-                    meta = dict(item.get("meta") or {})
-                    meta["promo"] = promo.name
-                    try:
-                        res = future.result()
-                    except Exception as exc:  # noqa: BLE001
-                        logger.exception("Job %s item %s raised", job_id, item["idx"])
-                        store.update_item(job_id, item["idx"],
-                                          render_status=store.ITEM_FAILED,
-                                          render_error=str(exc), render_attempts=1,
-                                          meta=meta)
-                    else:
-                        store.update_item(
-                            job_id, item["idx"],
-                            name=res.filename or "",
-                            render_status=store.ITEM_DONE if res.ok else store.ITEM_FAILED,
-                            render_error=res.error,
-                            render_attempts=1,
-                            warnings=list(res.warnings or []),
-                            meta=meta,
-                            **({} if res.ok else {"upload_status": store.ITEM_SKIPPED}),
-                        )
-                    done += 1
-                    now = time.time()
-                    if now - last_beat > _HEARTBEAT_EVERY:
-                        last_beat = now
-                        store.heartbeat(
-                            job_id,
-                            stage=f"rendering batch {batch}/{n_batches} "
-                                  f"({done}/{total_pending})")
+                # The one place per-promo text enters the render. Applied before
+                # assign_backgrounds so the frame handed to render_row is a normal
+                # sheet — RowSpec.from_row reads row['Headline'] and has no idea a
+                # grid was involved, which is why nothing downstream changed.
+                df_promo = text_grids.apply_overrides(df, overrides, promo_idx)
+                df_run, bg_warnings = generator.assign_backgrounds(df_promo)
+                for message in bg_warnings:
+                    if message not in batch_warnings:
+                        batch_warnings.append(message)
+
+                logger.info("Job %s: batch %d/%d — %d row(s) on promo %s%s",
+                            job_id, batch, n_batches, len(group), promo.name,
+                            " (per-promo text)" if df_promo is not df else "")
+
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = {}
+                    for item in group:
+                        _b, row_no = batching.split_index(item["idx"], n_rows)
+                        row = df_run.iloc[row_no - 1]
+                        name = (item.get("meta") or {}).get("short_name") or None
+                        futures[pool.submit(generator.render_row, row_no, row, name)] = item
+
+                    for future in as_completed(futures):
+                        item = futures[future]
+                        meta = dict(item.get("meta") or {})
+                        meta["promo"] = promo.name
+                        attempts = int(item.get("render_attempts") or 0) + 1
+                        try:
+                            res = future.result()
+                        except Exception as exc:  # noqa: BLE001
+                            logger.exception("Job %s item %s raised", job_id, item["idx"])
+                            store.update_item(job_id, item["idx"],
+                                              render_status=store.ITEM_FAILED,
+                                              render_error=str(exc),
+                                              render_attempts=attempts,
+                                              meta=meta)
+                        else:
+                            store.update_item(
+                                job_id, item["idx"],
+                                name=res.filename or "",
+                                render_status=store.ITEM_DONE if res.ok else store.ITEM_FAILED,
+                                render_error=res.error,
+                                render_attempts=attempts,
+                                warnings=list(res.warnings or []),
+                                meta=meta,
+                                # PENDING on success, not just an absent key: an
+                                # earlier pass that failed set this to SKIPPED, and
+                                # leaving it there would render the row on the retry
+                                # and then never publish it.
+                                upload_status=(store.ITEM_PENDING if res.ok
+                                               else store.ITEM_SKIPPED),
+                            )
+                        done += 1
+                        now = time.time()
+                        if now - last_beat > _HEARTBEAT_EVERY:
+                            last_beat = now
+                            store.heartbeat(
+                                job_id,
+                                stage=f"rendering batch {batch}/{n_batches} "
+                                      f"({done}/{total_pending})")
 
     return batch_warnings
 

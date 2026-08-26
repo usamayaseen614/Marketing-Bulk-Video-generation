@@ -122,6 +122,22 @@ JOB_STALE_SECONDS = _float("BVG_JOB_STALE_SECONDS", 300.0)
 # Without this a job that reliably kills the worker would loop forever.
 JOB_MAX_ATTEMPTS = _int("BVG_JOB_MAX_ATTEMPTS", 3)
 
+# How many times ONE ROW may be rendered before it is left failed. Renders were
+# treated as deterministic for a long time — a background missing from the ZIP
+# will not appear on a retry — and on that reasoning a failed row was skipped
+# forever. An overnight batch disproved it: 832 of 12,000 rows died with
+# "FFmpeg exited with code -9" (the kernel's OOM killer) and "Render timed out
+# after 600s", both of which are the machine being busy rather than the row
+# being bad. Those rows render fine when the box is not thrashing, and there
+# was no way to retry them short of hand-editing SQLite.
+#
+# 2 means one retry. Deterministic failures cost one extra attempt and then
+# stick, which is the cheap direction to be wrong in: they fail before FFmpeg
+# is even invoked. Classifying the error string instead would be smaller in
+# the DB and far more brittle — "which errors are transient" is exactly the
+# judgement that was already made wrongly once.
+RENDER_ATTEMPTS = _int("BVG_RENDER_ATTEMPTS", 2)
+
 
 # --------------------------------------------------------------------------- email
 

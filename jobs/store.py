@@ -472,13 +472,22 @@ def list_items(job_id: str, stage: Optional[str] = STAGE_RENDER) -> list[dict]:
     return [_item_from_row(r) for r in rows]
 
 
-def pending_render_items(job_id: str, stage: str = STAGE_RENDER) -> list[dict]:
-    """Items still needing a render. Excludes ones that already failed — a row
-    that failed for a deterministic reason would only fail again."""
+def pending_render_items(job_id: str, max_attempts: Optional[int] = None,
+                         stage: str = STAGE_RENDER) -> list[dict]:
+    """Items still needing a render, including failed ones under the attempts
+    cap — the same shape as pending_upload_items, and now for the same reason.
+
+    This used to exclude failed rows outright, on the grounds that a render
+    failure is deterministic. That holds for a background missing from the ZIP
+    and not for "FFmpeg exited with code -9", which is the kernel's OOM killer
+    and says nothing about the row. See config.RENDER_ATTEMPTS."""
+    cap = config.RENDER_ATTEMPTS if max_attempts is None else max_attempts
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM job_items WHERE job_id=? AND stage=? AND render_status=? "
-            "ORDER BY idx", (job_id, stage, ITEM_PENDING)).fetchall()
+            "SELECT * FROM job_items WHERE job_id=? AND stage=? "
+            "AND (render_status=? OR (render_status=? AND render_attempts < ?)) "
+            "ORDER BY idx",
+            (job_id, stage, ITEM_PENDING, ITEM_FAILED, cap)).fetchall()
     return [_item_from_row(r) for r in rows]
 
 
