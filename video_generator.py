@@ -58,6 +58,12 @@ FPS_CHOICES = (30, 60)
 # word/char granularity or the hide percentage chosen elsewhere.
 SUBLIMINAL_TAIL_CHARS = 4
 SUBLIMINAL_TAIL_MAX_SHOWN = 2
+# Ceiling on the subliminal cycle length. Each frame of the cycle is a separate
+# full-canvas FFmpeg input, so K is a memory knob as much as a visual one. The
+# sidebar's own slider stops at 8; this bounds the paths that DERIVE K instead
+# of reading it (CUSTOM_SUBLIMINAL_SCHEDULES takes an lcm), so no schedule can
+# quietly claim thirty-odd inputs.
+SUBLIMINAL_MAX_K = 8
 
 # Hand-authored subliminal schedules for specific known texts. When a subliminal
 # text matches a key (lowercased, whitespace collapsed, curly quotes
@@ -2027,7 +2033,15 @@ class VideoGenerator:
                     nb = len(custom["body_frames"])
                     no = len(custom["overlay_frames"])
                     element.subliminal = True
-                    element.sub_k = nb * no // math.gcd(nb, no)
+                    # lcm, capped. Every K costs one full-canvas FFmpeg input
+                    # (see add_still in build_ffmpeg_command for what those cost
+                    # in RAM), and an lcm grows fast enough to be a landmine:
+                    # a 5-frame body against a 7-frame overlay is 35 stills, which
+                    # clears MAX_TOTAL_FFMPEG_INPUTS and would take the box down.
+                    # The cap truncates the cycle rather than the text — every
+                    # piece still shows, just on a shorter period.
+                    element.sub_k = min(nb * no // math.gcd(nb, no),
+                                        SUBLIMINAL_MAX_K)
                     element.sub_rects = rects
                     element.sub_custom = custom
                     spec.warnings.append(
@@ -2900,9 +2914,44 @@ class VideoGenerator:
             cmd.extend(args)
             return index
 
+        # Every still is a `-loop 1` stream, and the OUTPUT -t / -shortest at the
+        # end of this command do NOT bound the INPUT side — FFmpeg keeps reading
+        # and buffering them regardless. With one sink that is survivable:
+        # overlay's framesync backpressure holds the stills in step with the
+        # promo. Add a SECOND sink — the [aout] audio chain, fed by a music input
+        # demuxed independently of every video input — and FFmpeg 7's scheduler
+        # alternates between sinks, letting the infinite stills run ahead into
+        # unbounded filtergraph FIFOs.
+        #
+        # It is the input COUNT that tips it, because each buffered frame is
+        # 1080*1920*4 = 8.3 MB and a subliminal row claims K stills on top of the
+        # base and the text overlay. Measured on one 20s row, K=7, music bed on:
+        #
+        #     stills  peak RSS   result
+        #        2     1.3 GB    ok, 42s          (no subliminal, no music)
+        #        9     3.6 GB    ok, 69s          (subliminal, no music)
+        #        2     1.3 GB    ok, 10s          (music, no subliminal)
+        #        9    18.8 GB    LIVELOCK         (both — encoder frozen at
+        #                                          frame 13, RSS still climbing)
+        #        9     4.6 GB    ok, 65s          (both, with the -t below)
+        #
+        # Sixteen of the livelocked case in parallel is what the OOM killer
+        # answered with "FFmpeg exited with code -9"; the rows that swapped
+        # instead of dying hit ffmpeg_timeout. K=3 (the shipped default) survives
+        # at 2.9 GB, which is why this went unnoticed until a job raised K.
+        #
+        # An input-side -t ends each still with the promo, so nothing can run
+        # ahead. The margin is slack for container-vs-stream duration rounding:
+        # the base still feeds an overlay with shortest=1, so it must OUTLAST the
+        # promo or the whole render would be truncated to the still.
+        still_dur = self._probe_duration(self.video_path)  # cached per path
+        still_args = (["-t", f"{still_dur + 1.0:.3f}"] if still_dur else [])
+
         def add_still(path) -> int:
-            """A still image as an endless stream at the output rate."""
-            return add_input("-loop", "1", "-framerate", str(fps), "-i", str(path))
+            """A still image as a stream at the output rate, bounded to the
+            promo's length so it cannot run ahead of the encoder."""
+            return add_input("-loop", "1", "-framerate", str(fps), *still_args,
+                             "-i", str(path))
 
         base_i = add_still(base_png)
         promo_i = add_input("-i", str(self.video_path))
