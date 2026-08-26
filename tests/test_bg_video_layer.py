@@ -90,14 +90,22 @@ assert loops == [r - 1 for r in spec.bg_video_clip_repeats], loops
 if len(spec.bg_video_clips) > 1:
     assert f"concat=n={len(spec.bg_video_clips)}:v=1:a=0[bseq]" in fc, fc
 assert "colorchannelmixer=aa=0.500" in fc
-# Alpha: every clip carries format=rgba (concat rejects mixed pixel formats,
-# and without it the alpha multiply lands on opaque yuv), and the multiply is
-# applied ONCE, to the joined sequence.
+# Alpha: every clip agrees on ONE pixel format (concat rejects mixed ones) and
+# that format is yuv420p, not rgba. This is the check that keeps the layer from
+# eating the box: rgba is 4 bytes a pixel against yuv420p's 1.5, every open
+# branch holds buffered frames of it, and at full canvas with a long promo
+# there are dozens of branches — measured 3.7GB against 2.8GB peak at 14 clips
+# over a 1.5GB baseline, i.e. the layer's own cost down 41%. The rgba version
+# got whole batches SIGKILLed. The conversion belongs after the concat, where
+# it happens once, so a `format=rgba` creeping back onto the per-clip branches
+# is a regression even though it looks like a no-op.
 for k in range(len(spec.bg_video_clips)):
-    assert f"setsar=1,format=rgba[bv{k}];" in fc, fc
+    assert f"setsar=1,format=yuv420p[bv{k}];" in fc, fc
+assert "format=rgba[bv" not in fc, "rgba belongs after the concat, not per clip"
 assert fc.count("colorchannelmixer") == 1, "one alpha multiply, after the concat"
+assert fc.count("format=rgba,colorchannelmixer") == 1, "one rgba, at the join"
 _alpha_src = "[bseq]" if len(spec.bg_video_clips) > 1 else "[bv0]"
-assert f"{_alpha_src}colorchannelmixer=aa=0.500[bgv];" in fc, fc
+assert f"{_alpha_src}format=rgba,colorchannelmixer=aa=0.500[bgv];" in fc, fc
 # Z-order: inside the sorted stack, above the promo and directly below texts.
 assert fc.index("[vidB]overlay") < fc.index("[bgv]overlay"), \
     "the layer must stack ABOVE the promo video"

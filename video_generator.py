@@ -1822,6 +1822,14 @@ class VideoGenerator:
                                   "BG_Video_Width")
         spec.bg_video_h = box_dim(spec.bg_video_h, cfg.bg_video_h, CANVAS_H,
                                   "BG_Video_Height")
+        # Even box, for the same class of reason the gif box gets an even
+        # origin: the sequence is carried through the graph as yuv420p (see
+        # build_ffmpeg_command), whose chroma planes are half-resolution, and
+        # scaling to an odd width or height has no valid chroma size. The
+        # sidebar's own values are even; an Excel BG_Video_Width cell is what
+        # can be odd, and one such cell would otherwise fail every row using it.
+        spec.bg_video_w -= spec.bg_video_w % 2
+        spec.bg_video_h -= spec.bg_video_h % 2
         if spec.bg_video_x is None:
             spec.bg_video_x = cfg.bg_video_x
         if spec.bg_video_y is None:
@@ -3028,16 +3036,46 @@ class VideoGenerator:
             # cover-filled to the box (crop to the box's aspect, then scale —
             # same visible region as scale-then-crop at 4-6x less CPU, which
             # matters at full canvas), which also gives every clip the identical
-            # size concat demands. format=rgba must precede the alpha multiply
-            # or it lands on opaque yuv; it goes on each clip because concat
-            # rejects inputs whose pixel formats differ.
+            # size concat demands.
+            #
+            # The per-clip format is yuv420p, NOT rgba, and that is a memory
+            # decision rather than a cosmetic one. concat rejects inputs whose
+            # pixel formats differ, so every branch has to agree on one — but
+            # every branch also holds buffered frames of it, and this layer runs
+            # at FULL CANVAS with as many branches open as the promo is long:
+            # one per clip in the sequence, up to the input ceiling.
+            #
+            # rgba is 4 bytes a pixel against yuv420p's 1.5, and the difference
+            # is not marginal. Measured on one row (76s promo, 1080x1920, the
+            # bed at 846x1614), peak RSS with the per-clip rgba against this:
+            #
+            #     clips   rgba     yuv420p    the layer's own cost
+            #        0   1.5 GB     -          (baseline, no bed)
+            #        7   3.2 GB    2.9 GB      1.6 -> 1.4 GB
+            #       14   3.7 GB    2.8 GB      2.2 -> 1.3 GB   (-41%)
+            #       23   4.9 GB    3.6 GB      3.3 -> 2.0 GB   (-39%)
+            #
+            # It grows with the clip count either way — that is the design —
+            # but the slope decides how many of these fit in the box at once,
+            # and the renderer runs up to 16 in parallel. Over the top the
+            # kernel kills them, which surfaces as "FFmpeg exited with code -9"
+            # and an EMPTY stderr; the survivors swap and hit ffmpeg_timeout.
+            # yuv444p is not the safe middle it looks like — 3.7GB at 14 clips,
+            # i.e. three bytes a pixel is too close to four to be worth it.
+            #
+            # Nothing is lost by waiting: h264 hands these over as yuv420p
+            # already, so this is a no-op per branch, and the format=rgba below
+            # converts the joined timeline once instead of once per clip. The
+            # one real difference is that the bed is now scaled with subsampled
+            # chroma rather than in RGB — 48.9 dB PSNR against the old output,
+            # on a layer composited at a few percent opacity.
             bw, bh = spec.bg_video_w, spec.bg_video_h
             labels = []
             for k, idx in enumerate(bgv_ix):
                 parts.append(
                     f"[{idx}:v]fps={fps},"
                     f"crop='min(iw,ih*{bw}/{bh})':'min(ih,iw*{bh}/{bw})',"
-                    f"scale={bw}:{bh},setsar=1,format=rgba[bv{k}];")
+                    f"scale={bw}:{bh},setsar=1,format=yuv420p[bv{k}];")
                 labels.append(f"[bv{k}]")
             if len(labels) > 1:
                 parts.append(
@@ -3046,9 +3084,12 @@ class VideoGenerator:
             else:
                 bseq = labels[0]
             # One alpha multiply over the joined timeline rather than per clip:
-            # cheaper, and it cannot drift between clips.
+            # cheaper, and it cannot drift between clips. format=rgba has to
+            # precede it or the alpha lands on opaque yuv — see the branches
+            # above for why it is here and not there.
             parts.append(
-                f"{bseq}colorchannelmixer=aa={cfg.bg_video_opacity:.3f}[bgv];")
+                f"{bseq}format=rgba,"
+                f"colorchannelmixer=aa={cfg.bg_video_opacity:.3f}[bgv];")
         if has_cta:
             parts.append(
                 f"[{cta_i}:v]format=rgba,"
