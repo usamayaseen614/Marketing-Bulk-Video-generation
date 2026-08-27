@@ -2969,9 +2969,10 @@ class VideoGenerator:
         # full-canvas looped stills gated with per-frame enable expressions —
         # K full-frame PNG inflates per output frame plus gigabytes of
         # framesync buffering, for pixels that were mostly transparent.
-        # The 600s fallback keeps the loop finite when the promo can't be
-        # probed — the same failure that silently strips still_args' -t.
-        loop_secs = (still_dur or 600.0) + 1.0
+        # The 3600s fallback keeps the loop finite when the promo can't be
+        # probed — the same failure that silently strips still_args' -t. Only
+        # the -stream_loop COUNT grows with it, never the raw file.
+        loop_secs = (still_dur or 3600.0) + 1.0
 
         def add_sub(sl: dict) -> int:
             frames = max(1, math.ceil(loop_secs * fps))
@@ -3198,10 +3199,15 @@ class VideoGenerator:
         # Subliminal text: one K-frame looping clip per text, overlaid at its
         # crop offset. The cycle lives in the clip's frame order, so per output
         # frame exactly one partial shows and no frame carries the whole text.
-        # They sit at text_z (just above the static texts).
+        # They sit at text_z (just above the static texts). eof_action=pass:
+        # the clip is looped past the promo's length, but if the promo outruns
+        # it anyway (unprobeable promo longer than the loop fallback) the
+        # effect must VANISH, not freeze one readable partial on screen —
+        # overlay's default repeatlast would burn in a fixed fragment of the
+        # hidden text.
         for m, sl in enumerate(sub_layers):
             layers.append((cfg.text_z, 5, f"[{sub_ix[m]}:v]",
-                           f"{sl['x']}:{sl['y']}"))
+                           f"{sl['x']}:{sl['y']}:eof_action=pass"))
         layers.sort(key=lambda layer: (layer[0], layer[1]))
 
         # crop_to_panels (split only): the finished composite is cropped to

@@ -346,7 +346,7 @@ So the video made from **row 2** on **video 3.mp4** reads `sakfjn`.
 | Text opacity / Highlight box opacity | Batch defaults for how solid the texts and their `*_BgColor` boxes are (0–100%). Below 100 the video shows through. Overridable per text via `*_Opacity` / `*_BgOpacity`, and per-text sliders in the preview editor |
 | Quality (CRF) | 16 = near-lossless, 28 = small files. 18 is great for social media |
 | Encoder speed | x264 preset; `medium` balances speed and file size |
-| Parallel renders | Concurrent FFmpeg processes (up to min(16, CPU cores)). One render only keeps ~8–10 threads busy, so on a many-core VM set ~1 per 3 cores (e.g. 10 on 32 cores) to saturate the CPU — roughly a 3–5× throughput jump over the old cap of 4 |
+| Parallel renders | Concurrent FFmpeg processes (up to the machine's core count). One render only keeps 1–2 cores busy (the compositing pipeline is serial), so on a many-core VM set ~1 per 2 cores (e.g. 48 on 112 cores). RAM is the real ceiling — budget ~2–6 GB per render when subliminal texts are on |
 | Custom font | Optional TTF/OTF; pick **Custom upload** as the default font (or in a `*_Font` cell) to use it |
 
 ## Workflow
