@@ -269,11 +269,14 @@ combo_row = pd.Series({"BG_Image": "b.png", "Headline": "Secret Code XYZW",
                        "Subheading": "Sub", "Footer": "Foot"})
 combo_spec = RowSpec.from_row(combo_row, 1)
 combo._resolve_positions(combo_spec)
-subs = []
-for j in range(combo_cfg.subliminal_k):
-    p = TMP / f"sub{j}.png"
-    Image.new("RGBA", (1080, 1920), (0, 0, 0, 0)).save(p)
-    subs.append({"png": p, "enable": f"eq(mod(n+0,{combo_cfg.subliminal_k}),{j})"})
+# A subliminal text ships as ONE raw rgba clip: K cropped frames concatenated,
+# with the crop box carried alongside so the overlay lands at the right offset.
+sub_raw = TMP / "sub0.raw"
+with open(sub_raw, "wb") as fh:
+    for j in range(combo_cfg.subliminal_k):
+        fh.write(Image.new("RGBA", (200, 100), (255, 255, 255, 255)).tobytes())
+subs = [{"raw": sub_raw, "w": 200, "h": 100, "x": 100, "y": 800,
+         "k": combo_cfg.subliminal_k}]
 combo_cmd = combo.build_ffmpeg_command(combo_spec, TMP / "b.png", TMP / "o.png",
                                        cta_png, TMP / "combo.mp4", subs)
 combo_n = sum(1 for a in combo_cmd if a == "-i")
@@ -282,15 +285,43 @@ refs = sorted(int(x) for x in vg.re.findall(r"\[(\d+):v\]", combo_fc))
 assert refs == list(range(combo_n)), (refs, combo_n)
 VideoGenerator._check_filter_inputs(combo_fc, combo_n)
 assert "[cseq]" in combo_fc and "[gseq]" in combo_fc, "a concat chain is missing"
-# -stream_loop is a gif-only option; attaching it to a CTA clip would silently
-# repeat that clip instead.
-looped = {Path(combo_cmd[i + 3]).name
-          for i, a in enumerate(combo_cmd) if a == "-stream_loop"}
-assert looped <= {p.name for p in gif_paths}, looped
+# The subliminal clip is overlaid at its crop offset, cycle baked into the
+# frames — no per-frame enable gating in the graph any more.
+assert "overlay=100:800" in combo_fc, combo_fc
+assert "enable=" not in combo_fc, "stray enable gate in the graph"
+# -stream_loop belongs only to gifs and subliminal clips; attaching it to a CTA
+# clip would silently repeat that clip instead. (Music/beds aren't in this test.)
+looped = set()
+for i, a in enumerate(combo_cmd):
+    if a == "-stream_loop":
+        looped.add(Path(combo_cmd[combo_cmd.index("-i", i) + 1]).name)
+assert looped <= {p.name for p in gif_paths} | {sub_raw.name}, looped
+# -stream_loop on a rawvideo input is the load-bearing primitive: if it
+# quietly failed, overlay's repeatlast would freeze the LAST partial and the
+# whole effect would vanish with exit 0. Prove a 3-frame raw clip cycles:
+# output frame 4 must show frame 4 % 3 = 1 (green), not a held frame 2 (blue).
+lraw = TMP / "loopcheck.raw"
+for c in [(255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255)]:
+    with open(lraw, "ab") as fh:
+        fh.write(Image.new("RGBA", (64, 64), c).tobytes())
+lpng = TMP / "loopcheck.png"
+subprocess.run(
+    [FF, "-y", "-hide_banner", "-loglevel", "error",
+     "-f", "rawvideo", "-pixel_format", "rgba", "-video_size", "64x64",
+     "-framerate", "30", "-stream_loop", "3", "-t", "1", "-i", str(lraw),
+     "-vf", "select=eq(n\\,4)", "-frames:v", "1", "-update", "1", str(lpng)],
+    check=True, capture_output=True)
+px = Image.open(lpng).convert("RGB").getpixel((32, 32))
+assert px[1] > 200 and px[0] < 60 and px[2] < 60, \
+    f"raw clip does not cycle under -stream_loop: frame 4 is {px}, not green"
+print("raw rgba clip cycles under -stream_loop: frame 4 wrapped to frame 1")
+
+# render_row builds the raw clip itself (real partials, real crop box) — the
+# end-to-end proof that the cropped looping clip renders.
 assert combo.render_row(1, combo_row, "combo.mp4").ok
 print(f"all five layers at once: {combo_n} inputs (CTA image + "
       f"{len(combo_spec.cta_video_clips)} clips + {len(combo_spec.gif_clips)} gifs "
-      f"+ {len(subs)} subliminal), indices intact, renders")
+      f"+ {len(subs)} subliminal clip), indices intact, renders")
 
 # ---------- 7. no pool = the layer vanishes ----------
 plain_gen = VideoGenerator(cfg, bg_dir, promo, None, TMP / "work2", TMP / "out2")

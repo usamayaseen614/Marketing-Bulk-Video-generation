@@ -2963,7 +2963,26 @@ class VideoGenerator:
         # 3s gif into the 6s the dwell floor asks for.
         gif_ix = [add_input("-stream_loop", str(max(1, int(r)) - 1), "-i", str(p))
                   for p, r in zip(gifs, gif_reps)]
-        sub_ix = [add_still(sl["png"]) for sl in sub_layers]
+        # Each subliminal text is ONE tiny K-frame raw rgba clip (cropped to
+        # the text's painted box, cycle and phase pre-baked into the frame
+        # order by render_row), looped for the promo's length. This replaced K
+        # full-canvas looped stills gated with per-frame enable expressions —
+        # K full-frame PNG inflates per output frame plus gigabytes of
+        # framesync buffering, for pixels that were mostly transparent.
+        # The 600s fallback keeps the loop finite when the promo can't be
+        # probed — the same failure that silently strips still_args' -t.
+        loop_secs = (still_dur or 600.0) + 1.0
+
+        def add_sub(sl: dict) -> int:
+            frames = max(1, math.ceil(loop_secs * fps))
+            loops = max(0, math.ceil(frames / int(sl["k"])) - 1)
+            return add_input(
+                "-f", "rawvideo", "-pixel_format", "rgba",
+                "-video_size", f"{sl['w']}x{sl['h']}",
+                "-framerate", str(fps), "-stream_loop", str(loops),
+                *still_args, "-i", str(sl["raw"]))
+
+        sub_ix = [add_sub(sl) for sl in sub_layers]
         # Music is claimed before the background beds, and for the same reason
         # they are claimed last: the beds have a graceful degradation (a short
         # sequence holds its last frame) and the music does not. A bed that
@@ -3151,7 +3170,7 @@ class VideoGenerator:
         # Stack the overlay layers by their sidebar z-index (higher = on top; the
         # background is always the base). Ties fall back to the fixed priority in
         # the second tuple field so the order stays deterministic. Each tuple:
-        # (z-index, tie-break priority, overlay input, overlay position, enable?).
+        # (z-index, tie-break priority, overlay input, overlay position).
         layers = [
             (cfg.video_z, 0, "[vidB]", video_pos),
             (cfg.text_z, 4, f"[{text_i}:v]", "0:0"),
@@ -3176,13 +3195,13 @@ class VideoGenerator:
             # layer's contract, not a preference.
             layers.append((cfg.text_z, 3.9, "[bgv]",
                            f"{spec.bg_video_x}:{spec.bg_video_y}"))
-        # Subliminal text: each partial is a looped-still input painted at 0,0 but
-        # timeline-gated to one frame slot of the cycle via `enable`, so per output
-        # frame exactly one partial shows and no frame carries the whole text. They
-        # sit at text_z (just above the static texts).
+        # Subliminal text: one K-frame looping clip per text, overlaid at its
+        # crop offset. The cycle lives in the clip's frame order, so per output
+        # frame exactly one partial shows and no frame carries the whole text.
+        # They sit at text_z (just above the static texts).
         for m, sl in enumerate(sub_layers):
-            layers.append((cfg.text_z, 5, f"[{sub_ix[m]}:v]", "x=0:y=0",
-                           sl["enable"]))
+            layers.append((cfg.text_z, 5, f"[{sub_ix[m]}:v]",
+                           f"{sl['x']}:{sl['y']}"))
         layers.sort(key=lambda layer: (layer[0], layer[1]))
 
         # crop_to_panels (split only): the finished composite is cropped to
@@ -3197,13 +3216,11 @@ class VideoGenerator:
         last = "anchored"
         for i, layer in enumerate(layers):
             label, pos = layer[2], layer[3]
-            enable = layer[4] if len(layer) > 4 else None
             top = i == len(layers) - 1
             out = "out" if top else f"z{i}"
             fmt = final if top else ""
             sep = "" if top else ";"  # the final [out] feeds -map, no trailing ;
-            en = f":enable='{enable}'" if enable else ""
-            parts.append(f"[{last}]{label}overlay={pos}{en}{fmt}[{out}]{sep}")
+            parts.append(f"[{last}]{label}overlay={pos}{fmt}[{out}]{sep}")
             last = out
 
         # ---- audio ----------------------------------------------------------
@@ -3373,7 +3390,7 @@ class VideoGenerator:
         filename = filename or safe_filename(
             row_number, _clean_str(row.get("Caption")) or spec.headline.text)
         out_path = self.output_dir / filename
-        sub_pngs: list[Path] = []
+        sub_files: list[Path] = []
         try:
             self.build_base_image(spec).save(base_png)
             # resolves positions; the CTA ships as its own input so FFmpeg
@@ -3382,21 +3399,34 @@ class VideoGenerator:
             if cta_png is not None:
                 self._get_cta(spec.cta_w, spec.cta_h).save(cta_png)
 
-            # Subliminal texts: save each partial and hand FFmpeg the input path
-            # plus its per-frame enable expression (one cycle slot each).
+            # Subliminal texts: crop each element's K partials to the union of
+            # their painted pixels (measured with getbbox, so shadows and
+            # outlines are covered without geometry bookkeeping) and write them
+            # as ONE raw rgba clip whose frame order bakes in the cycle and the
+            # phase. FFmpeg loops that tiny clip instead of decoding K
+            # full-canvas PNGs per output frame — see add_sub in
+            # build_ffmpeg_command. Offsets and sizes are even-aligned so the
+            # chroma of the composite below stays stable.
             sub_layers = []
             phase = int(self.config.subliminal_phase)
             for e, item in enumerate(self.build_subliminal_layers(spec)):
                 k = item["k"]
-                for j, img in enumerate(item["images"]):
-                    png = self.work_dir / f"row_{row_number:04d}_sub{e}_{j}.png"
-                    img.save(png)
-                    sub_pngs.append(png)
-                    # Commas stay bare — build_ffmpeg_command wraps the whole
-                    # expression in single quotes, which protects them in the
-                    # filtergraph (like ffmpeg's own enable='between(t,4,6)').
-                    sub_layers.append(
-                        {"png": png, "enable": f"eq(mod(n+{phase},{k}),{j})"})
+                images = item["images"]
+                boxes = [box for box in (im.getbbox() for im in images) if box]
+                if not boxes:
+                    continue   # nothing painted — skip the layer entirely
+                x0 = min(b[0] for b in boxes) & ~1
+                y0 = min(b[1] for b in boxes) & ~1
+                w = min(CANVAS_W - x0, (max(b[2] for b in boxes) - x0 + 1) & ~1)
+                h = min(CANVAS_H - y0, (max(b[3] for b in boxes) - y0 + 1) & ~1)
+                raw = self.work_dir / f"row_{row_number:04d}_sub{e}.raw"
+                with open(raw, "wb") as fh:
+                    for j in range(k):
+                        fh.write(images[(j + phase) % k]
+                                 .crop((x0, y0, x0 + w, y0 + h)).tobytes())
+                sub_files.append(raw)
+                sub_layers.append(
+                    {"raw": raw, "w": w, "h": h, "x": x0, "y": y0, "k": k})
 
             cmd = self.build_ffmpeg_command(spec, base_png, overlay_png, cta_png,
                                             out_path, sub_layers)
@@ -3430,8 +3460,8 @@ class VideoGenerator:
             overlay_png.unlink(missing_ok=True)
             if cta_png is not None:
                 cta_png.unlink(missing_ok=True)
-            for png in sub_pngs:
-                png.unlink(missing_ok=True)
+            for f in sub_files:
+                f.unlink(missing_ok=True)
 
     # ------------------------------------------------------------- duration probe
 

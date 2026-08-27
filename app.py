@@ -662,15 +662,16 @@ with st.sidebar:
         value="medium",
         help="Faster presets render quicker but produce slightly larger files.",
     )
-    # One render only keeps ~8-10 threads busy, so many-core machines need
-    # several concurrent renders to saturate. Cap at min(16, cores) — enough for
-    # a 32-core VM without letting a laptop launch 16 FFmpegs.
-    max_workers = min(16, max(4, os.cpu_count() or 4))
+    # One render only keeps 1-2 cores busy (the compositing pipeline inside
+    # FFmpeg is serial), so many-core machines need many concurrent renders to
+    # saturate. The slider tops out at the core count; RAM is the real
+    # ceiling — budget roughly 2-6 GB per render when subliminal texts are on.
+    max_workers = max(4, os.cpu_count() or 4)
     workers = st.slider(
         "Parallel renders", 1, max_workers, min(2, max_workers),
         help="Concurrent FFmpeg processes. 2 is a good default on office "
-             "machines; on a many-core VM push this to ~1 per 3 cores "
-             "(e.g. 10 on 32 cores) to keep the CPU fully busy.",
+             "machines; on a many-core VM push toward ~1 per 2 cores "
+             "(e.g. 48 on 112 cores). Watch RAM: ~2-6 GB per render.",
     )
     font_file = st.file_uploader(
         "Custom font (TTF/OTF, optional)", type=["ttf", "otf"],
