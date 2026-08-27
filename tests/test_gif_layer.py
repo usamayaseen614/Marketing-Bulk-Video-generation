@@ -323,6 +323,59 @@ print(f"all five layers at once: {combo_n} inputs (CTA image + "
       f"{len(combo_spec.cta_video_clips)} clips + {len(combo_spec.gif_clips)} gifs "
       f"+ {len(subs)} subliminal clip), indices intact, renders")
 
+# ---------- 6c. every clip input is bounded to the promo ----------
+# The run-ahead that OOM-killed ffmpeg at 62-81 GB was NOT the stills (already
+# bounded): a long CTA sample cover-filled to a 540x1920 rgba panel is 4.1 MB a
+# frame, and five decoded ahead of a slow composite is tens of GB. Every clip
+# input now carries -t. The speed factor is the part that can silently cut
+# content: at 3x, three seconds of source make one second of screen time, so
+# the SOURCE bound must scale with it or the clip ends early on screen.
+slow_promo = mk(TMP / "sp.mp4", "color=c=white:s=540x960:r=30", 4.0)
+long_clip = mk(TMP / "clips" / "long.mp4", "color=c=0x00FFFF:s=400x400:r=30", 20.0)
+speed_cfg = RenderConfig(bg_color="#FF00FF", include_audio=False, preset="ultrafast",
+                         crf=30, cta_video_speeds=[3.0])
+speed_gen = VideoGenerator(speed_cfg, bg_dir, slow_promo, None, TMP / "sw",
+                           TMP / "so", cta_video_slots=[[long_clip]])
+speed_spec = RowSpec.from_row(pd.Series({"BG_Image": "b.png", "Headline": "H"}), 1)
+speed_gen._resolve_positions(speed_spec)
+speed_cmd = speed_gen.build_ffmpeg_command(speed_spec, TMP / "b.png", TMP / "o.png",
+                                           None, TMP / "speed.mp4")
+# Split the command into one block per input: options, then -i, then the path.
+blocks, cur = [], []
+for a in speed_cmd[1:speed_cmd.index("-filter_complex")]:
+    cur.append(a)
+    if len(cur) > 1 and cur[-2] == "-i":
+        blocks.append(cur); cur = []
+# The promo is the ONE input that must stay unbounded — it defines the length
+# every other bound is derived from.
+promo_blocks = [b for b in blocks if b[-1] == str(slow_promo)]
+assert len(promo_blocks) == 1 and "-t" not in promo_blocks[0], \
+    "the promo input must not be time-bounded"
+for b in blocks:
+    if b is promo_blocks[0]:
+        continue
+    assert "-t" in b, f"unbounded input: {' '.join(b)}"
+# The promo is 4s, so stills bound at 5.0s and the 3x CTA clip at 15.0s.
+clip_block = [b for b in blocks if b[-1] == str(long_clip)][0]
+clip_t = float(clip_block[clip_block.index("-t") + 1])
+assert abs(clip_t - 15.0) < 0.01, f"3x CTA clip bounded at {clip_t}s, expected 15.0"
+assert abs(float(blocks[0][blocks[0].index("-t") + 1]) - 5.0) < 0.01
+print(f"every input except the promo is bounded: stills 5.0s, 3x CTA clip {clip_t}s")
+
+# ...and the bound must not cut anything VISIBLE: a 20s clip at 3x covers the
+# whole 4s render, so the last frame still shows cyan, not the background.
+assert speed_gen.render_row(1, pd.Series({"BG_Image": "b.png", "Headline": "H"}),
+                            "speed.mp4").ok
+last_png = TMP / "speedlast.png"
+subprocess.run([FF, "-y", "-hide_banner", "-loglevel", "error", "-sseof", "-0.1",
+                "-i", str(TMP / "so" / "speed.mp4"), "-frames:v", "1", "-update",
+                "1", str(last_png)], check=True, capture_output=True)
+lf = Image.open(last_png).convert("RGB")
+cta_px = lf.getpixel((speed_spec.cta_video_x + 10, speed_spec.cta_video_y + 10))
+assert cta_px[1] > 120 and cta_px[2] > 120 and cta_px[0] < 120, \
+    f"the sped-up CTA clip was cut short: last frame shows {cta_px}, not cyan"
+print(f"no visible truncation: the CTA panel still plays on the final frame {cta_px}")
+
 # ---------- 7. no pool = the layer vanishes ----------
 plain_gen = VideoGenerator(cfg, bg_dir, promo, None, TMP / "work2", TMP / "out2")
 assert not plain_gen._has_gifs

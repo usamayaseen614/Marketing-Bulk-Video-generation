@@ -51,6 +51,7 @@ with instead of scattering files that were already uploaded.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -280,6 +281,15 @@ def _render_batches(job: dict, df: pd.DataFrame, ws, n_batches: int,
     base_config = params.get("render_config") or {}
     batch_warnings: list[str] = []
 
+    # x264 sizes its thread pool from the MACHINE's core count and knows nothing
+    # about the rows rendering beside it, so every one of `workers` encoders
+    # tries to claim the whole box: at 112 workers on a 112-core VM that is
+    # ~14,000 encoder threads, each carrying its own frame buffers. Keep the
+    # product near the core count instead. config.FFMPEG_THREADS overrides when
+    # the derived value is wrong for a particular sheet.
+    ffmpeg_threads = config.FFMPEG_THREADS or max(
+        1, (os.cpu_count() or 1) // max(1, workers))
+
     # Every video gets its own promo, spread evenly inside each batch — so a
     # batch is a mix of all of them rather than 1,000 variations of one.
     # Passed in by run(), which needs the same mapping to name the files.
@@ -316,106 +326,159 @@ def _render_batches(job: dict, df: pd.DataFrame, ws, n_batches: int,
 
         total_pending = len(pending)
         done = 0
+        store.set_stage(job_id, f"rendering ({done}/{total_pending})")
 
-        for batch in sorted(by_batch):
-            items = by_batch[batch]
-            store.set_stage(job_id, f"rendering batch {batch}/{n_batches}")
+        # ONE pool for the whole pass, not one per batch. A pool per batch was a
+        # barrier: ThreadPoolExecutor joins on exit, so a batch could not advance
+        # until its SLOWEST row returned. A single row that hangs inside FFmpeg
+        # until config.RENDER_TIMEOUT therefore idled every other worker for up
+        # to that long, once per batch — on a 20-batch job that is hours of a
+        # fully provisioned box doing nothing, and it was measured: 112 workers,
+        # a 24-minute flat-zero window per batch, ended by the timeout firing
+        # rather than by the work finishing. Submitting every batch into one pool
+        # means a stuck row costs one of `workers` slots instead of the pass.
+        #
+        # Submission is deliberately interleaved with rendering rather than
+        # hoisted above the pool: pool.submit returns immediately, so the workers
+        # are already on batch 1 while this thread builds batch 2's generator and
+        # walks the background tree for it. That serial preamble used to be paid
+        # with the box idle.
+        #
+        # Batches interleave now, so nothing below may read the batch or the
+        # promo off a loop variable — both travel in the future's value.
+        pool = ThreadPoolExecutor(max_workers=workers)
+        futures: dict = {}
+        try:
+            for batch in sorted(by_batch):
+                items = by_batch[batch]
 
-            # variant_salt is what makes this pass differ from the others: the same
-            # row picks different sample clips in each batch.
-            cfg = RenderConfig(**base_config)
-            cfg.variant_salt = batch
-            cfg.font_path = str(ws.font_path) if ws.font_path else None
+                # variant_salt is what makes this pass differ from the others: the same
+                # row picks different sample clips in each batch.
+                cfg = RenderConfig(**base_config)
+                cfg.variant_salt = batch
+                cfg.font_path = str(ws.font_path) if ws.font_path else None
+                cfg.ffmpeg_threads = ffmpeg_threads
 
-            # Grouped by promo so one generator is built per promo rather than per
-            # row — constructing one probes the video with FFmpeg, which is far too
-            # expensive to repeat thousands of times.
-            by_promo: dict[int, list[dict]] = {}
-            for item in items:
-                _b, row_no = batching.split_index(item["idx"], n_rows)
-                by_promo.setdefault(
-                    promo_for.get(Slot(batch=batch, row=row_no), 0), []).append(item)
+                # Grouped by promo so one generator is built per promo rather than per
+                # row — constructing one probes the video with FFmpeg, which is far too
+                # expensive to repeat thousands of times.
+                by_promo: dict[int, list[dict]] = {}
+                for item in items:
+                    _b, row_no = batching.split_index(item["idx"], n_rows)
+                    by_promo.setdefault(
+                        promo_for.get(Slot(batch=batch, row=row_no), 0), []).append(item)
 
-            for promo_idx in sorted(by_promo):
-                group = by_promo[promo_idx]
-                promo = ws.promo_for_batch(promo_idx)
+                for promo_idx in sorted(by_promo):
+                    group = by_promo[promo_idx]
+                    promo = ws.promo_for_batch(promo_idx)
 
-                generator = VideoGenerator(
-                    config=cfg,
-                    bg_dir=ws.bg_dir,
-                    video_path=promo,
-                    cta_path=ws.cta_path,
-                    work_dir=ws.work_dir / f"b{batch:02d}_p{promo_idx:02d}",
-                    output_dir=store.videos_dir(job_id) / batching.source_folder_name(batch),
-                    cta_video_slots=ws.cta_video_slots,
-                    gif_paths=ws.gif_paths,
-                    bg_video_paths=ws.bg_video_paths,
-                    music_paths=ws.music_paths,
-                )
-                for message in generator.input_warnings:
-                    if message not in batch_warnings:
-                        batch_warnings.append(message)
+                    # Preparing a group now happens with EARLIER batches already
+                    # in flight, so an exception escaping here would take the
+                    # pool's finally with it and discard every result this pass
+                    # had not yet collected — up to n_batches worth of finished
+                    # renders that are on disk but unrecorded, and so re-rendered
+                    # from scratch on resume. When the per-batch pool made this
+                    # safe, only one batch was ever in flight. Skip the group
+                    # instead: its items stay pending, the retry pass and any
+                    # resume pick them up, and the reason is named in the render
+                    # log. Same per-item isolation render_row already gives rows.
+                    try:
+                        generator = VideoGenerator(
+                            config=cfg,
+                            bg_dir=ws.bg_dir,
+                            video_path=promo,
+                            cta_path=ws.cta_path,
+                            work_dir=ws.work_dir / f"b{batch:02d}_p{promo_idx:02d}",
+                            output_dir=store.videos_dir(job_id) / batching.source_folder_name(batch),
+                            cta_video_slots=ws.cta_video_slots,
+                            gif_paths=ws.gif_paths,
+                            bg_video_paths=ws.bg_video_paths,
+                            music_paths=ws.music_paths,
+                        )
+                        for message in generator.input_warnings:
+                            if message not in batch_warnings:
+                                batch_warnings.append(message)
 
-                # The one place per-promo text enters the render. Applied before
-                # assign_backgrounds so the frame handed to render_row is a normal
-                # sheet — RowSpec.from_row reads row['Headline'] and has no idea a
-                # grid was involved, which is why nothing downstream changed.
-                df_promo = text_grids.apply_overrides(df, overrides, promo_idx)
-                df_run, bg_warnings = generator.assign_backgrounds(df_promo)
-                for message in bg_warnings:
-                    if message not in batch_warnings:
-                        batch_warnings.append(message)
+                        # The one place per-promo text enters the render. Applied before
+                        # assign_backgrounds so the frame handed to render_row is a normal
+                        # sheet — RowSpec.from_row reads row['Headline'] and has no idea a
+                        # grid was involved, which is why nothing downstream changed.
+                        df_promo = text_grids.apply_overrides(df, overrides, promo_idx)
+                        df_run, bg_warnings = generator.assign_backgrounds(df_promo)
+                    except Exception as exc:  # noqa: BLE001 — see above
+                        logger.exception("Job %s: batch %d/%d could not be prepared "
+                                         "on promo %s", job_id, batch, n_batches,
+                                         promo.name)
+                        message = (f"Batch {batch}: could not be set up on promo "
+                                   f"'{promo.name}' ({exc}) — its {len(group)} row(s) "
+                                   "were left unrendered.")
+                        if message not in batch_warnings:
+                            batch_warnings.append(message)
+                        continue
+                    for message in bg_warnings:
+                        if message not in batch_warnings:
+                            batch_warnings.append(message)
 
-                logger.info("Job %s: batch %d/%d — %d row(s) on promo %s%s",
-                            job_id, batch, n_batches, len(group), promo.name,
-                            " (per-promo text)" if df_promo is not df else "")
+                    logger.info("Job %s: batch %d/%d — %d row(s) queued on promo %s%s",
+                                job_id, batch, n_batches, len(group), promo.name,
+                                " (per-promo text)" if df_promo is not df else "")
 
-                with ThreadPoolExecutor(max_workers=workers) as pool:
-                    futures = {}
                     for item in group:
                         _b, row_no = batching.split_index(item["idx"], n_rows)
                         row = df_run.iloc[row_no - 1]
                         name = (item.get("meta") or {}).get("short_name") or None
-                        futures[pool.submit(generator.render_row, row_no, row, name)] = item
+                        futures[pool.submit(generator.render_row, row_no, row, name)] = (
+                            item, promo.name)
 
-                    for future in as_completed(futures):
-                        item = futures[future]
-                        meta = dict(item.get("meta") or {})
-                        meta["promo"] = promo.name
-                        attempts = int(item.get("render_attempts") or 0) + 1
-                        try:
-                            res = future.result()
-                        except Exception as exc:  # noqa: BLE001
-                            logger.exception("Job %s item %s raised", job_id, item["idx"])
-                            store.update_item(job_id, item["idx"],
-                                              render_status=store.ITEM_FAILED,
-                                              render_error=str(exc),
-                                              render_attempts=attempts,
-                                              meta=meta)
-                        else:
-                            store.update_item(
-                                job_id, item["idx"],
-                                name=res.filename or "",
-                                render_status=store.ITEM_DONE if res.ok else store.ITEM_FAILED,
-                                render_error=res.error,
-                                render_attempts=attempts,
-                                warnings=list(res.warnings or []),
-                                meta=meta,
-                                # PENDING on success, not just an absent key: an
-                                # earlier pass that failed set this to SKIPPED, and
-                                # leaving it there would render the row on the retry
-                                # and then never publish it.
-                                upload_status=(store.ITEM_PENDING if res.ok
-                                               else store.ITEM_SKIPPED),
-                            )
-                        done += 1
-                        now = time.time()
-                        if now - last_beat > _HEARTBEAT_EVERY:
-                            last_beat = now
-                            store.heartbeat(
-                                job_id,
-                                stage=f"rendering batch {batch}/{n_batches} "
-                                      f"({done}/{total_pending})")
+            logger.info(
+                "Job %s: %d row(s) queued across %d batch(es), %d worker(s), "
+                "%s encoder thread(s) each",
+                job_id, len(futures), len(by_batch), workers,
+                ffmpeg_threads or "auto")
+
+            for future in as_completed(futures):
+                item, promo_name = futures[future]
+                meta = dict(item.get("meta") or {})
+                meta["promo"] = promo_name
+                attempts = int(item.get("render_attempts") or 0) + 1
+                try:
+                    res = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("Job %s item %s raised", job_id, item["idx"])
+                    store.update_item(job_id, item["idx"],
+                                      render_status=store.ITEM_FAILED,
+                                      render_error=str(exc),
+                                      render_attempts=attempts,
+                                      meta=meta)
+                else:
+                    store.update_item(
+                        job_id, item["idx"],
+                        name=res.filename or "",
+                        render_status=store.ITEM_DONE if res.ok else store.ITEM_FAILED,
+                        render_error=res.error,
+                        render_attempts=attempts,
+                        warnings=list(res.warnings or []),
+                        meta=meta,
+                        # PENDING on success, not just an absent key: an
+                        # earlier pass that failed set this to SKIPPED, and
+                        # leaving it there would render the row on the retry
+                        # and then never publish it.
+                        upload_status=(store.ITEM_PENDING if res.ok
+                                       else store.ITEM_SKIPPED),
+                    )
+                done += 1
+                now = time.time()
+                if now - last_beat > _HEARTBEAT_EVERY:
+                    last_beat = now
+                    store.heartbeat(job_id,
+                                    stage=f"rendering ({done}/{total_pending})")
+        finally:
+            # cancel_futures because the queue is now the whole pass rather than
+            # one batch: without it, an error here (or a worker being stopped)
+            # would sit in shutdown draining thousands of QUEUED rows instead of
+            # only the ones already running. A clean finish has nothing left to
+            # cancel, so this is a no-op on the happy path.
+            pool.shutdown(wait=True, cancel_futures=True)
 
     return batch_warnings
 

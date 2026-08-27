@@ -965,6 +965,10 @@ class RenderConfig:
     # Seconds per row before a render is killed. Env-backed so it can be
     # tuned without a rebuild — see config.RENDER_TIMEOUT.
     ffmpeg_timeout: int = field(default_factory=lambda: config.RENDER_TIMEOUT)
+    # Encoder threads for THIS row's FFmpeg. 0 = x264's own auto-detect, which
+    # reads the machine's core count and ignores every sibling render. The
+    # batch job overwrites this from its worker count; see config.FFMPEG_THREADS.
+    ffmpeg_threads: int = field(default_factory=lambda: config.FFMPEG_THREADS)
 
 
 @dataclass
@@ -2947,6 +2951,30 @@ class VideoGenerator:
         still_dur = self._probe_duration(self.video_path)  # cached per path
         still_args = (["-t", f"{still_dur + 1.0:.3f}"] if still_dur else [])
 
+        def clip_args(speed: float = 1.0) -> list:
+            """The same bound for a real CLIP input (CTA sample, gif, bed,
+            music), which the stills' `-t` never covered.
+
+            The stills were bounded because an infinite `-loop 1` could run
+            ahead forever. A finite clip can do the same damage without being
+            infinite: a 60s CTA sample cover-filled to a 540x1920 panel and
+            carried in rgba is 4.1 MB per frame, and five of them decoded ahead
+            of a slow composite is tens of GB — measured on this box as ffmpeg
+            processes OOM-killed at 62-81 GB RSS on rows whose promo was under
+            ten seconds. Bounding each input to the promo's length caps the
+            run-ahead at (promo x fps) frames per input instead of (clip x fps).
+
+            Nothing visible can be lost: the OUTPUT ends with the promo, and
+            these layers are concatenated in order, so any source past the
+            promo's length would be painted after the last output frame.
+            `speed` is the CTA clip's setpts multiplier — at 2x, two seconds of
+            source make one second of screen time, so the source bound has to
+            scale with it. Slower clips need less source, never more, hence the
+            max(). No bound when the promo can't be probed, exactly as before."""
+            if not still_dur:
+                return []
+            return ["-t", f"{(still_dur + 1.0) * max(1.0, speed):.3f}"]
+
         def add_still(path) -> int:
             """A still image as a stream at the output rate, bounded to the
             promo's length so it cannot run ahead of the encoder."""
@@ -2957,11 +2985,18 @@ class VideoGenerator:
         promo_i = add_input("-i", str(self.video_path))
         text_i = add_still(overlay_png)
         cta_i = add_still(cta_png) if has_cta else None
-        clip_ix = [add_input("-i", str(p)) for p in clips]
-        # Gifs are the only inputs carrying an input-level option. -stream_loop N
-        # replays the file N extra times before decoding, which is what turns a
-        # 3s gif into the 6s the dwell floor asks for.
-        gif_ix = [add_input("-stream_loop", str(max(1, int(r)) - 1), "-i", str(p))
+        # Each CTA sample is bounded by its own speed: the filter graph below
+        # replays this same per-clip speed with setpts, and the two must agree
+        # or a sped-up clip would be cut short. Read exactly as there.
+        cta_speeds = spec.cta_video_clip_speeds or []
+        clip_ix = [add_input(*clip_args(cta_speeds[k] if k < len(cta_speeds) else 1.0),
+                             "-i", str(p))
+                   for k, p in enumerate(clips)]
+        # -stream_loop N replays the file N extra times before decoding, which
+        # is what turns a 3s gif into the 6s the dwell floor asks for. The -t
+        # then caps the looped total at the promo's length.
+        gif_ix = [add_input("-stream_loop", str(max(1, int(r)) - 1), *clip_args(),
+                            "-i", str(p))
                   for p, r in zip(gifs, gif_reps)]
         # Each subliminal text is ONE tiny K-frame raw rgba clip (cropped to
         # the text's painted box, cycle and phase pre-baked into the frame
@@ -2989,7 +3024,8 @@ class VideoGenerator:
         # sequence holds its last frame) and the music does not. A bed that
         # under-fills is cosmetic; a track dropped for want of an input slot is
         # a gap of silence.
-        music_ix = ([add_input("-stream_loop", str(max(1, int(r)) - 1), "-i", str(p))
+        music_ix = ([add_input("-stream_loop", str(max(1, int(r)) - 1), *clip_args(),
+                               "-i", str(p))
                      for p, r in zip(music, music_reps)] if has_music else [])
         # Background beds, claimed like the gifs: -stream_loop N replays a clip
         # before decoding, which is what holds a short bed for the dwell floor.
@@ -3015,7 +3051,8 @@ class VideoGenerator:
                 bgvs = bgvs[:room]
                 bgv_reps = bgv_reps[:room]
                 has_bgv = bool(bgvs)
-        bgv_ix = ([add_input("-stream_loop", str(max(1, int(r)) - 1), "-i", str(p))
+        bgv_ix = ([add_input("-stream_loop", str(max(1, int(r)) - 1), *clip_args(),
+                             "-i", str(p))
                    for p, r in zip(bgvs, bgv_reps)] if has_bgv else [])
 
         if n_inputs > MAX_TOTAL_FFMPEG_INPUTS:
@@ -3351,6 +3388,16 @@ class VideoGenerator:
             "-crf", str(cfg.crf),
             "-r", str(fps),
         ]
+        if cfg.ffmpeg_threads:
+            # x264 picks min(1.5 * ncores, 128) frame threads from the MACHINE's
+            # core count, so every parallel row asks for the whole box. Sixteen
+            # rows on a 112-core VM is ~2,000 encoder threads; 112 rows is
+            # ~14,000, and each frame thread carries its own frame buffers — the
+            # memory and the context switching are both charged per thread, not
+            # per row. Capping it is what makes workers * threads track the
+            # cores actually available. 0 keeps x264's own auto-detect, which is
+            # the right answer for a single preview render.
+            cmd += ["-threads", str(cfg.ffmpeg_threads)]
         # Bound the output to the main video's exact length. The looped base /
         # overlay / subliminal stills are infinite streams; the muxer -shortest
         # only trims them when the promo has an audio track to anchor against

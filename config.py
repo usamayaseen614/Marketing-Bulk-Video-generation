@@ -148,6 +148,14 @@ RENDER_ATTEMPTS = _int("BVG_RENDER_ATTEMPTS", 2)
 # now burns this twice before it is abandoned.
 RENDER_TIMEOUT = _int("BVG_RENDER_TIMEOUT", 600)
 
+# Encoder threads ONE FFmpeg process may use. 0 = leave it to x264, which sizes
+# its pool as min(1.5 * ncores, 128) from the MACHINE's core count and has no
+# idea how many renders are running beside it — 112 parallel rows on a
+# 112-core box then ask for ~14,000 encoder threads between them, each
+# carrying its own frame buffers. The render job derives a value from the
+# worker count (see jobs/runners/render.py); set this to pin it instead.
+FFMPEG_THREADS = _int("BVG_FFMPEG_THREADS", 0)
+
 
 # --------------------------------------------------------------------------- email
 
