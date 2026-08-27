@@ -156,6 +156,16 @@ RENDER_TIMEOUT = _int("BVG_RENDER_TIMEOUT", 600)
 # worker count (see jobs/runners/render.py); set this to pin it instead.
 FFMPEG_THREADS = _int("BVG_FFMPEG_THREADS", 0)
 
+# Decoder threads per FFmpeg INPUT. This is the knob that actually pays: one row
+# claims up to MAX_TOTAL_FFMPEG_INPUTS inputs (promo, CTA clips, gifs,
+# background videos, music), and each decoder otherwise sizes its own thread
+# pool from the machine's core count. One measured row held 1,070 threads and
+# 5.5 GB for a fifteen-second promo. Capping to 1 measured ~30% less peak RSS,
+# and FASTER on the two shapes this renderer runs (subliminal on, audio split
+# on) — the decode threads were competing with the encoder, not helping.
+# 0 restores FFmpeg's auto-detect.
+FFMPEG_DECODE_THREADS = _int("BVG_FFMPEG_DECODE_THREADS", 1)
+
 
 # --------------------------------------------------------------------------- email
 

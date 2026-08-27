@@ -51,7 +51,6 @@ with instead of scattering files that were already uploaded.
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -281,14 +280,21 @@ def _render_batches(job: dict, df: pd.DataFrame, ws, n_batches: int,
     base_config = params.get("render_config") or {}
     batch_warnings: list[str] = []
 
-    # x264 sizes its thread pool from the MACHINE's core count and knows nothing
-    # about the rows rendering beside it, so every one of `workers` encoders
-    # tries to claim the whole box: at 112 workers on a 112-core VM that is
-    # ~14,000 encoder threads, each carrying its own frame buffers. Keep the
-    # product near the core count instead. config.FFMPEG_THREADS overrides when
-    # the derived value is wrong for a particular sheet.
-    ffmpeg_threads = config.FFMPEG_THREADS or max(
-        1, (os.cpu_count() or 1) // max(1, workers))
+    # Deriving this from the worker count (cpu // workers) was a REGRESSION and
+    # is deliberately not done any more. Measured on a 22-input graph, one row,
+    # idle box:
+    #
+    #     as-is (x264 auto)          20.1s    2934 MB
+    #     -threads 1 on the encoder  72.5s    2578 MB   <-- 3.6x SLOWER
+    #
+    # x264 frame threading is most of a row's speed, and the box is NOT actually
+    # saturated while rows sit stalled — so capping the encoder to one thread
+    # gives up real parallelism to buy a little memory, and 112 workers made the
+    # derived value exactly 1. Encoder threads are not where the memory goes;
+    # the DECODERS are (see config.FFMPEG_DECODE_THREADS, applied per input in
+    # build_ffmpeg_command). Auto is the right default here. The knob stays for
+    # pinning a specific box.
+    ffmpeg_threads = config.FFMPEG_THREADS
 
     # Every video gets its own promo, spread evenly inside each batch — so a
     # batch is a mix of all of them rather than 1,000 variations of one.

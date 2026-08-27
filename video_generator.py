@@ -966,9 +966,13 @@ class RenderConfig:
     # tuned without a rebuild — see config.RENDER_TIMEOUT.
     ffmpeg_timeout: int = field(default_factory=lambda: config.RENDER_TIMEOUT)
     # Encoder threads for THIS row's FFmpeg. 0 = x264's own auto-detect, which
-    # reads the machine's core count and ignores every sibling render. The
-    # batch job overwrites this from its worker count; see config.FFMPEG_THREADS.
+    # is the right default: capping it was measured 2-4x SLOWER, because frame
+    # threading is most of a row's speed. See config.FFMPEG_THREADS.
     ffmpeg_threads: int = field(default_factory=lambda: config.FFMPEG_THREADS)
+    # Decoder threads per INPUT. This is the one that pays: a row claiming
+    # dozens of inputs otherwise gives each its own core-count-sized decoder
+    # pool. 0 = auto (the old behaviour). See config.FFMPEG_DECODE_THREADS.
+    decode_threads: int = field(default_factory=lambda: config.FFMPEG_DECODE_THREADS)
 
 
 @dataclass
@@ -2911,10 +2915,34 @@ class VideoGenerator:
         n_inputs = 0
 
         def add_input(*args: str) -> int:
-            """Append one input to `cmd` and return the index it claimed."""
+            """Append one input to `cmd` and return the index it claimed.
+
+            Each input gets its own decoder thread cap. `-threads` BEFORE a -i is
+            an input option, so it sizes that input's DECODER; the one in the
+            output options sizes the encoder. Every decoder otherwise
+            auto-detects from the machine's core count, and this command claims
+            up to MAX_TOTAL_FFMPEG_INPUTS of them — one measured row held 1,070
+            threads and 5.5 GB for a fifteen-second promo, and the renderer runs
+            many of these at once.
+
+            Measured on one row, 22-25 inputs, idle box (wall / peak RSS):
+
+                                       no subliminal   subliminal, 3 layers
+                as-is (auto decoders)  20.1s 2934 MB   17.8s 3120 MB
+                decoders capped to 1   23.0s 1944 MB   15.8s 2189 MB
+                as-is, +audio split    31.5s 3041 MB
+                capped to 1, +split    24.2s 2070 MB
+
+            So it is ~30% less memory across the board, and on the two shapes
+            this renderer actually runs — subliminal on, audio split on — it is
+            also FASTER, because the decoder threads were competing with the
+            encoder rather than helping. Capping the ENCODER is the opposite
+            trade and was measured 2-4x SLOWER; see config.FFMPEG_THREADS."""
             nonlocal n_inputs
             index = n_inputs
             n_inputs += 1
+            if cfg.decode_threads:
+                cmd.extend(("-threads", str(cfg.decode_threads)))
             cmd.extend(args)
             return index
 
