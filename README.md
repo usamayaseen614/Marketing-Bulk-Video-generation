@@ -548,10 +548,23 @@ Three things about it are worth knowing before you run one:
 ### Batches, mixing, and the two filenames
 
 One sheet becomes **`batches × rows`** videos. Set *Batches to render* and the sheet is
-rendered that many times — each pass uses the **next promo video** (upload up to 20) and
+rendered that many times — each pass uses the **next promo video** (upload up to 100) and
 a different variant salt, so every pass picks different CTA clips. The finished videos
 are then **mixed evenly across the output folders**, so no folder is just one promo
 video, and each folder gets an equal share of every batch.
+
+The mix is stratified rather than shuffled, so how many copies of one promo end up in a
+single folder is not luck — it is fixed by four numbers:
+
+```
+copies of one promo, in one folder = ceil(batches / promos) × ceil(rows / folders)
+```
+
+which is roughly `videos-per-folder ÷ promos`. Set *Max copies of one promo per folder*
+and the app raises the folder count (never lowers it) until that holds, and shows the
+resulting number either way. When no folder count can satisfy it, the limit is telling you
+something the folder knob cannot fix: a **600-video folder that may hold at most 10 copies
+of any promo needs at least 60 promo videos**. The app says which number you need.
 
 Every video is published to Drive **twice**, under two names built from its caption:
 

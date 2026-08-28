@@ -173,12 +173,18 @@ def _render_body(job: dict, status: str, result: dict) -> str:
     mix = result.get("mix") or {}
     if len(mix) > 1:
         lines.append("")
-        lines.append("Folder contents (videos per source batch):")
+        lines.append("Folder contents:")
         for folder in sorted(mix)[:12]:
+            # The per-batch breakdown used to be spelled out here. At 100 source
+            # batches that is a 700-character line, twelve times over — and the
+            # only thing anyone read it for was "is one promo clustered in
+            # there?", which max_per_promo answers in one number.
             spread = mix[folder].get("from_batch") or {}
-            detail = ", ".join(f"b{b}:{n}" for b, n in sorted(spread.items()))
             lines.append(f"  batch_{int(folder):02d}: "
-                         f"{mix[folder].get('total', 0):,} videos ({detail})")
+                         f"{mix[folder].get('total', 0):,} videos from "
+                         f"{len(spread)} source batches, at most "
+                         f"{mix[folder].get('max_per_promo', 0)} copies of any "
+                         f"one promo")
 
     drive_link = result.get("drive_link")
     if drive_link:

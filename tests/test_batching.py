@@ -107,4 +107,51 @@ assert batching.folder_name(3) == "batch_03"
 assert batching.folder_name(12) == "batch_12"
 print("\nfolder naming:", batching.folder_name(1), batching.folder_name(10))
 
+# ---------- assign_promos: complete row x promo coverage ----------
+# Had zero coverage anywhere, and the property its docstring is built around
+# (every row rendered once with every promo) was never asserted.
+sl = batching.plan_render(5, 5)
+pm = batching.assign_promos(sl, 5)
+assert len({(x.row, pm[x]) for x in sl}) == 25, "every row x promo pairing, once"
+assert set(pm.values()) == set(range(5)), pm
+assert batching.assign_promos(batching.plan_render(3, 2), 5)[Slot(3, 1)] == 2
+assert set(batching.assign_promos(sl, 0).values()) == {0}, "n_promos=0 clamps to 1"
+print()
+print("assign_promos: 5 rows x 5 promos gives all 25 pairings exactly once")
+
+# ---------- the predicted bound must hold against the REAL mixer ----------
+# max_copies_per_promo is arithmetic app.py shows the user BEFORE a run. It is
+# worth something only while it tracks what mix_into_folders actually does.
+SHAPES = [(20, 30, 1, 20), (20, 30, 3, 20), (60, 10, 1, 60), (100, 6, 1, 100),
+          (100, 60, 10, 100), (100, 60, 6, 100), (200, 60, 10, 100),
+          (100, 37, 7, 100), (5, 7, 3, 2), (7, 13, 4, 3), (1, 100, 10, 1)]
+for nb, nr, nf, n_promos in SHAPES:
+    sl = batching.plan_render(nb, nr)
+    place = batching.mix_into_folders(sl, nf)
+    promo = batching.assign_promos(sl, n_promos)
+    real = max(Counter((place[x], promo[x]) for x in sl).values())
+    bound = batching.max_copies_per_promo(nb, nr, nf, n_promos)
+    assert real <= bound, (nb, nr, nf, n_promos, real, bound)
+    # Exact, not merely safe, whenever folders divide rows or each promo owns
+    # one batch — the two shapes a real render is normally set up as.
+    if nr % nf == 0 or nb <= n_promos:
+        assert real == bound, (nb, nr, nf, n_promos, real, bound)
+    # summarize must measure after the fact what the formula predicted before.
+    assert max(v["max_per_promo"]
+               for v in batching.summarize(place, nf, promo).values()) == real
+print(f"max_copies_per_promo holds over {len(SHAPES)} shapes, exact when folders "
+      "divide rows or each promo owns one batch")
+
+# The 600-videos-per-folder case the copies limit exists for: 20 promos cannot
+# do it at any folder size, 60 can.
+assert batching.max_copies_per_promo(20, 30, 1, 20) == 30
+assert batching.max_copies_per_promo(60, 10, 1, 60) == 10
+assert batching.max_copies_per_promo(100, 60, 10, 100) == 6
+print("600-video folder: 20 promos gives 30 copies each, 60 gives 10, 100 gives 6")
+
+# Old callers pass no promo map and must see exactly what they always saw.
+assert "max_per_promo" not in batching.summarize(
+    batching.mix_into_folders(batching.plan_render(2, 4), 2), 2)[1]
+print("summarize stays backwards compatible without promo_for")
+print()
 print("\nALL BATCHING TESTS PASSED")

@@ -16,6 +16,7 @@ import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
 
+import batching
 # Aliased: this module already binds `config` to the per-batch RenderConfig.
 import config as settings
 import text_grids
@@ -742,6 +743,25 @@ with col1:
              "multi-batch render gives each batch its own promo video, cycling "
              "if there are fewer promos than batches.",
     )
+    # Truncated HERE, not in stage_uploads, because everything below reads this
+    # list: the "Batches to render" DEFAULT (Streamlit raises rather than clamps
+    # when a default lands above max_value, so an over-long upload took the page
+    # down), the promo names the text grids are matched against (a column
+    # matched to a dropped promo resolved to an index that was never staged —
+    # wrong words on real videos, reported as success), and the pairing table.
+    # One guard at the source keeps all of them agreeing with what is staged.
+    if len(promo_files or []) > MAX_PROMO_VIDEOS:
+        st.warning(
+            f"{len(promo_files)} promo videos uploaded — only the first "
+            f"{MAX_PROMO_VIDEOS} are used. The rest are dropped."
+        )
+        promo_files = promo_files[:MAX_PROMO_VIDEOS]
+    if promo_files:
+        # Every one of these stays resident in this Streamlit session for as
+        # long as the tab is open, AND is copied into the job's assets/ folder
+        # on submit. Worth seeing before waiting out a multi-gigabyte upload.
+        _promo_gb = sum(getattr(f, "size", 0) for f in promo_files) / 1024 ** 3
+        st.caption(f"{len(promo_files)} promo video(s), {_promo_gb:,.1f} GB")
     # Preview and Render Row work off a single promo — the first one.
     video_file = promo_files[0] if promo_files else None
 with col2:
@@ -1366,13 +1386,13 @@ st.subheader("5. Generate")
 # One sheet becomes `batches x rows` videos: the same rows rendered once per
 # batch, each pass with a different promo video and different clip picks.
 #
-# Never below MAX_PROMO_VIDEOS: the batch count's DEFAULT is however many
-# promos were uploaded, and Streamlit raises rather than clamps when a default
-# lands above max_value — so a promo cap above this limit would take the whole
-# page down on the upload that crossed it, not merely refuse the extra passes.
+# Never below MAX_PROMO_VIDEOS, so the batch count can always reach one pass
+# per promo (that is its default). The floor of 20 keeps the widgets usable if
+# the promo cap is ever lowered. Also the ceiling the copies-per-promo solver
+# below searches up to, since folders and passes share this range.
 MAX_PASSES = max(20, MAX_PROMO_VIDEOS)
 
-col_b, col_f = st.columns(2)
+col_b, col_f, col_c = st.columns(3)
 # Default to one pass per promo, which is the pairing people expect: every row
 # rendered once with every promo.
 _n_promos = max(1, len(promo_files or []))
@@ -1391,8 +1411,35 @@ if _n_promos > 1 and int(n_batches) < _n_promos:
 n_folders = col_f.number_input(
     "Output folders", 1, MAX_PASSES, int(n_batches), 1, disabled=not ready,
     help="Finished videos are mixed evenly across this many Drive folders, so "
-         "no folder is just one promo video. Usually the same as the batch count.",
+         "no folder is just one promo video. Usually the same as the batch "
+         "count. A minimum when a copies limit is set beside it.",
 )
+max_per_folder = col_c.number_input(
+    "Max copies of one promo per folder", 0, 10_000, 0, 1, disabled=not ready,
+    help="0 = off. When set, the output-folder count is raised (never lowered) "
+         "until no folder holds more videos made from any one promo than this. "
+         "More folders means SMALLER folders — if you need big folders at this "
+         "limit, upload more promo videos instead.",
+)
+
+# The folder count actually submitted. `n_folders` above is a floor, not the
+# answer: raising it is the only lever that shrinks the per-promo count without
+# more promos, so a copies limit searches upward from whatever was typed.
+#
+# The widget is deliberately NOT written back through session_state — Streamlit
+# refuses to have a widget's value changed after it was instantiated, and the
+# derived number is shown in the caption below instead.
+n_folders_eff = int(n_folders)
+if max_per_folder and df is not None and len(df):
+    n_folders_eff = next(
+        (f for f in range(int(n_folders), MAX_PASSES + 1)
+         if batching.max_copies_per_promo(
+             int(n_batches), len(df), f, max(1, len(promo_files or [])))
+         <= max_per_folder),
+        # Unsatisfiable at any folder count: too few promos for a folder this
+        # size. Keep what was typed; the warning below says how many are needed.
+        int(n_folders),
+    )
 _PLATFORM_CHOICES = {
     "yt,tk": "Both — yt.zip and tk.zip",
     "tk": "TikTok only — tk.zip (long names)",
@@ -1413,7 +1460,7 @@ if ready and df is not None:
     promo_count = len(promo_files or [])
     _n_names = len(upload_platforms.split(","))
     note = (f"**{len(df):,} rows x {int(n_batches)} passes = "
-            f"{total_videos:,} videos**, mixed across {int(n_folders)} folders, "
+            f"{total_videos:,} videos**, mixed across {n_folders_eff} folders, "
             + (("each published twice under the SAME name — the fixed "
                 "call-to-action leaves the two forms identical, so one "
                 "platform's set is enough unless you want both folders."
@@ -1428,6 +1475,44 @@ if ready and df is not None:
                  f"{int(n_batches)} passes — each pairing occurs "
                  f"{int(n_batches) // promo_count}x.")
     st.caption(note)
+
+    # What every folder will actually hold. Derived, not chosen: mix_into_folders
+    # is stratified rather than shuffled, so this number was always guaranteed —
+    # it just had nowhere to be read. See batching.max_copies_per_promo.
+    _worst = batching.max_copies_per_promo(int(n_batches), len(df),
+                                           n_folders_eff, max(1, promo_count))
+    _per_folder = total_videos // max(1, n_folders_eff)
+    st.caption(f"{n_folders_eff} folder(s) x ~{_per_folder:,} videos, at most "
+               f"{_worst} copies of any one promo in any one folder.")
+    if n_folders_eff != int(n_folders):
+        st.info(
+            f"Output folders raised {int(n_folders)} → {n_folders_eff} to keep "
+            f"every folder at ≤{int(max_per_folder)} copies of one promo. "
+            f"Folders are smaller as a result (~{_per_folder:,} videos each)."
+        )
+    elif max_per_folder and _worst > max_per_folder:
+        # No folder count fixes this, so say which of the TWO factors is over
+        # budget rather than guessing. _worst is their product:
+        #   ceil(batches / promos)  how often one promo is reused across passes
+        #                           — more folders cannot touch this at all.
+        #   ceil(rows / folders)    how thinly one pass spreads — already at its
+        #                           floor, since the solver searched to the max.
+        _reuse = -(-int(n_batches) // max(1, promo_count))
+        _floor = batching.max_copies_per_promo(int(n_batches), len(df),
+                                               MAX_PASSES, max(1, promo_count))
+        _need = -(-int(n_batches) // int(max_per_folder))
+        st.warning(
+            f"**{_worst} copies of one promo per folder, above your limit of "
+            f"{int(max_per_folder)}** — and no folder count fixes it: even at "
+            f"the {MAX_PASSES}-folder maximum it is {_floor}.  \n"
+            + (f"{promo_count} promo(s) across {int(n_batches)} passes means "
+               f"each one is reused {_reuse}x, so it lands at least {_reuse} "
+               f"times in some folder however the videos are split. Upload at "
+               f"least {_need} promo videos and set batches to match."
+               if _reuse > max_per_folder else
+               f"{len(df):,} sheet rows is too many to thin out across "
+               f"{MAX_PASSES} folders. Use a shorter sheet, or raise the limit.")
+        )
 
     # Captions are the other quantity that has to reach `batches x rows`: one
     # per video, never reused. Without this check the shortfall only surfaces
@@ -1780,7 +1865,10 @@ if generate_clicked and ready:
                 "render_config": asdict(config),
                 "workers": int(workers),
                 "batches": int(n_batches),
-                "folders": int(n_folders),
+                # The EFFECTIVE count, which a copies limit may have raised
+                # above the widget. The worker enforces nothing; it renders
+                # into however many folders it is told.
+                "folders": n_folders_eff,
                 "make_zip": True,
                 "upload_platforms": upload_platforms.split(","),
                 "excel_name": excel_file.name,

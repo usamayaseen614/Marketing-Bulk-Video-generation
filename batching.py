@@ -17,6 +17,7 @@ a posting queue and you do not want one promo video clustered in it.
 
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,6 +105,32 @@ def assign_promos(slots: list[Slot], n_promos: int,
     simply produced more than once."""
     n_promos = max(1, int(n_promos))
     return {slot: (slot.batch - 1) % n_promos for slot in slots}
+
+
+def max_copies_per_promo(n_batches: int, n_rows: int,
+                         n_folders: int, n_promos: int) -> int:
+    """Most times ONE promo can land in ONE output folder.
+
+    Arithmetic, not a measurement. mix_into_folders is stratified rather than
+    shuffled, so this quantity is already determined by the four numbers below
+    — there is no randomness here to control, only a figure nobody could see:
+
+      a promo is used by  ceil(n_batches / n_promos)  source batches, and each
+      batch's n_rows videos are dealt round-robin across the folders, giving
+      any one folder at most  ceil(n_rows / n_folders)  of them.
+
+    Exact whenever n_folders divides n_rows, or each promo owns a single batch.
+    Otherwise an upper bound: the continuing offset in mix_into_folders rotates
+    each batch's remainder onto a different folder, so ragged shapes come out
+    at or below this. That is the safe direction for a "no more than" promise.
+
+    A formula rather than a preflight because app.py re-runs top to bottom on
+    every widget interaction: counting the real answer means building n_batches
+    x n_rows frozen Slots and shuffling them (~200ms at 100 x 1,000), every
+    rerun, and the folder solver in app.py needs a hundred of those. The bound
+    is pinned to the real mixer by tests/test_batching.py."""
+    return (math.ceil(int(n_batches) / max(1, int(n_promos)))
+            * math.ceil(int(n_rows) / max(1, int(n_folders))))
 
 
 def select_clips(clips: list[dict], slots: int, per_slot: int,
@@ -198,14 +225,34 @@ def source_folder_name(batch_no: int) -> str:
     return f"source_{int(batch_no):02d}"
 
 
-def summarize(placement: dict[Slot, int], n_folders: int) -> dict[int, dict]:
+def summarize(placement: dict[Slot, int], n_folders: int,
+              promo_for: Optional[dict] = None) -> dict[int, dict]:
     """Per-folder counts and the batch spread inside each — used to report the
-    mix back, so 'mixed' is a verifiable claim rather than an assertion."""
+    mix back, so 'mixed' is a verifiable claim rather than an assertion.
+
+    Given `promo_for` (from assign_promos) each folder also carries
+    `max_per_promo`: the most copies of any ONE promo it actually holds. That
+    is what max_copies_per_promo predicted in the UI, measured after the fact.
+
+    Deliberately one integer and not a per-promo dict: `from_batch` already
+    stores n_batches entries per folder, and at 100 batches x 100 folders a
+    second such map doubles a 10,000-entry blob in the stored job result to say
+    nothing new. The maximum IS the claim."""
     out: dict[int, dict] = {
         f: {"total": 0, "from_batch": {}} for f in range(1, int(n_folders) + 1)
     }
+    per_promo: dict[tuple, int] = {}
+    maxima: dict[int, int] = {}
     for slot, folder in placement.items():
         entry = out.setdefault(folder, {"total": 0, "from_batch": {}})
         entry["total"] += 1
         entry["from_batch"][slot.batch] = entry["from_batch"].get(slot.batch, 0) + 1
+        if promo_for is not None:
+            key = (folder, promo_for.get(slot, 0))
+            count = per_promo[key] = per_promo.get(key, 0) + 1
+            if count > maxima.get(folder, 0):
+                maxima[folder] = count
+    if promo_for is not None:
+        for folder, entry in out.items():
+            entry["max_per_promo"] = maxima.get(folder, 0)
     return out

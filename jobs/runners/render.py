@@ -296,8 +296,10 @@ def _render_batches(job: dict, df: pd.DataFrame, ws, n_batches: int,
     # pinning a specific box.
     ffmpeg_threads = config.FFMPEG_THREADS
 
-    # Every video gets its own promo, spread evenly inside each batch — so a
-    # batch is a mix of all of them rather than 1,000 variations of one.
+    # ONE promo per whole batch, not per video — a source batch really is N
+    # variations of a single promo, and the mixing that makes a delivered
+    # folder hold all of them happens later, in mix_into_folders. (An earlier
+    # per-video version is reverted; see assign_promos' docstring for why.)
     # Passed in by run(), which needs the same mapping to name the files.
     # Hoisted above the pass loop below: it is deterministic, and every pass
     # has to see the same mapping or a retried row would move promos.
@@ -1267,7 +1269,9 @@ def run(job: dict) -> dict:
         "sheet_path": str(manifest) if manifest.is_file() else None,
         "log_path": str(log_path),
         "captions": caption_info,
-        "mix": batching.summarize(placement, n_folders),
+        # promo_for so each folder can report max_per_promo — the number the
+        # UI predicted before the run, measured after it.
+        "mix": batching.summarize(placement, n_folders, promo_for),
     }
     result.update(drive_result)
     return result
