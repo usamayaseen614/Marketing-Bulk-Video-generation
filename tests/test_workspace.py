@@ -105,4 +105,32 @@ assert ws4.cta_video_slots == [] and ws4.bg_dir.is_dir()
 assert not any(ws4.bg_dir.iterdir()), "no ZIP -> empty backgrounds dir"
 print("minimal upload set ok (no zip / cta / font / clips)")
 
+# --- a full-cap upload round-trips in UPLOAD order, not lexicographic order
+# At MAX_PROMO_VIDEOS = 600 the staged names run three digits deep, where a
+# plain sorted() would put input_600.mp4 before input_60.mp4 and hand batch 60
+# the wrong promo -- silently, on finished videos. promo_for_batch indexes this
+# list positionally, so the order IS the promo-to-batch mapping.
+from workspace import MAX_PROMO_VIDEOS
+
+t4 = Path(tempfile.mkdtemp(prefix="fullcap_"))
+promos = [Fake(f"promo_{i}.mp4", f"promo-{i}".encode())
+          for i in range(1, MAX_PROMO_VIDEOS + 1)]
+stage_uploads(t4 / "assets", promos, None, None, None, None)
+ws5 = workspace_from_dir(t4 / "assets", t4 / "work")
+assert len(ws5.video_paths) == MAX_PROMO_VIDEOS, len(ws5.video_paths)
+# Each staged file still holds the bytes of the promo uploaded in that position.
+assert [q.read_bytes() for q in ws5.video_paths] == [f._data for f in promos]
+# And the batch mapping agrees: batch N gets the Nth promo uploaded.
+assert ws5.promo_for_batch(0).read_bytes() == b"promo-1"
+assert ws5.promo_for_batch(59).read_bytes() == b"promo-60"
+assert ws5.promo_for_batch(MAX_PROMO_VIDEOS - 1).read_bytes() == (
+    f"promo-{MAX_PROMO_VIDEOS}".encode())
+# One past the cap is dropped, not staged under a 601st name.
+stage_uploads(t4 / "over", promos + [Fake("extra.mp4", b"extra")],
+              None, None, None, None)
+assert len(workspace_from_dir(t4 / "over", t4 / "work2").video_paths) == (
+    MAX_PROMO_VIDEOS)
+print(f"{MAX_PROMO_VIDEOS} promos stage and rehydrate in upload order "
+      "(input_60 before input_600), and the cap holds")
+
 print("\nALL WORKSPACE TESTS PASSED")

@@ -24,17 +24,20 @@ from typing import Optional
 
 
 # How many promo videos one render may cycle through, one per batch. They are
-# staged as input.mp4, input_2.mp4 … input_100.mp4 (see stage_uploads).
+# staged as input.mp4, input_2.mp4 … input_600.mp4 (see stage_uploads).
 #
 # app.py derives MAX_PASSES from this so the batch/folder widgets can always
 # reach one pass per promo. app.py also truncates the uploader's list to this
 # straight away, so nothing upstream ever counts promos that were dropped —
 # stage_uploads' own slice below is the backstop, not the only guard.
 #
-# Raising it is cheap in code and expensive in bytes: every promo is held in
-# the Streamlit session for the whole browser session AND staged into each
-# job's assets/ folder. At 30 MB apiece, 100 promos is ~3 GB in both places.
-MAX_PROMO_VIDEOS = 100
+# Cheap in code, expensive in bytes: every promo is held in the Streamlit
+# session for the whole browser session AND staged into the job's assets/
+# folder. At 30 MB apiece, 600 promos is ~18 GB in both places — nothing on a
+# c3d-standard-180 (720 GB RAM), and the staged copy is reclaimed by the
+# purge-on-finish in jobs/store.py. The real cost is the upload itself: 18 GB
+# through one browser tab, which Streamlit cannot resume if the tab reloads.
+MAX_PROMO_VIDEOS = 600
 
 # What counts as a clip once it is sitting on disk. One definition, because
 # three places have to agree: the Drive downloader deciding what to fetch, the
@@ -207,7 +210,7 @@ def workspace_from_dir(assets: Path, work_dir: Path) -> Workspace:
         (f for f in gif_dir.iterdir() if f.is_file() and is_video(f))
     ) if gif_dir.is_dir() else []
 
-    # input.mp4 first, then input_2.mp4 … input_100.mp4 in numeric order.
+    # input.mp4 first, then input_2.mp4 … input_600.mp4 in numeric order.
     video_paths = [assets / "input.mp4"] if (assets / "input.mp4").is_file() else []
     video_paths += sorted(
         (p for p in assets.glob("input_*.mp4") if p.is_file()),
