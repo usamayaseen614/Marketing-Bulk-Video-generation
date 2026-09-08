@@ -1,0 +1,465 @@
+"""
+config.py — environment-driven settings for the automation layer.
+
+Everything the background worker, Drive uploader, mailer, Gemini caption pool
+and TikTok scraper need to be told about the outside world lives here, read
+from environment variables (optionally via a `.env` file beside this module).
+
+Nothing in the original rendering path reads this module — `app.py`,
+`video_generator.py` and `preview_editor.py` keep working with no environment
+set at all. Features whose settings are missing report themselves as
+unconfigured (see the `*_configured()` helpers) so the worker can skip them
+with a clear log line instead of crashing a batch that otherwise succeeded.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+# A .env file is a convenience, not a requirement.
+#
+# BVG_IGNORE_DOTENV exists for the test suite. Without it, a developer's real
+# .env — with live SMTP credentials and a real Shared Drive — silently becomes
+# the configuration under test, so tests could send actual email or write to
+# actual Drive. Tests set this before importing config, and everything then
+# reports itself as unconfigured unless the test says otherwise.
+if not os.environ.get("BVG_IGNORE_DOTENV"):
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(Path(__file__).parent / ".env")
+    except ImportError:  # pragma: no cover - python-dotenv missing is survivable
+        pass
+
+
+# --------------------------------------------------------------------------- helpers
+
+def _str(name: str, default: str = "") -> str:
+    return (os.environ.get(name) or default).strip()
+
+
+def _int(name: str, default: int) -> int:
+    try:
+        return int(_str(name) or default)
+    except ValueError:
+        return default
+
+
+def _float(name: str, default: float) -> float:
+    try:
+        return float(_str(name) or default)
+    except ValueError:
+        return default
+
+
+def _bool(name: str, default: bool) -> bool:
+    raw = _str(name).lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _list(name: str, default: str = "") -> list[str]:
+    """Comma-separated env var to a clean list (empty entries dropped)."""
+    return [part.strip() for part in _str(name, default).split(",") if part.strip()]
+
+
+# --------------------------------------------------------------------------- storage
+
+# Persistent root for job records, uploaded assets and rendered output.
+#
+# In the container this MUST point at a host-mounted volume — the live VM is a
+# Container-Optimized OS box, so anything on the container filesystem is lost
+# on `gcloud compute instances update-container`. Locally it defaults to a
+# gitignored folder beside the repo.
+JOBS_ROOT = Path(_str("BVG_JOBS_ROOT") or (Path(__file__).parent / "_jobs")).resolve()
+
+# The SQLite job database. WAL mode lets the Streamlit process (which writes on
+# submit) and the worker process (which writes progress) share it safely.
+DB_PATH = Path(_str("BVG_DB_PATH") or (JOBS_ROOT / "jobs.db"))
+
+# Finished job folders older than this are deleted by the worker's reaper.
+# Outputs are in Drive by then; this only reclaims local disk.
+JOB_RETENTION_DAYS = _int("BVG_JOB_RETENTION_DAYS", 7)
+
+# Delete a job's folder the moment its output is confirmed in Drive, instead of
+# letting it sit until the retention window above expires.
+#
+# This is the difference between a VM that needs enough disk for a week of
+# nights and one that needs enough for a single night. It is a switch rather
+# than a constant only because the deletion is irreversible: an operator who
+# suspects the purge took something it should not have can set this false in
+# .env and restart, with no image rebuild. store.outputs_published() decides
+# what "confirmed" means, and refuses to confirm anything it cannot prove.
+JOB_PURGE_ON_FINISH = _bool("BVG_JOB_PURGE_ON_FINISH", True)
+
+# The one place the app writes bulk data OUTSIDE JOBS_ROOT: the Jobs page moves
+# a result ZIP over 5 GB here so Tornado can stream it from disk rather than
+# buffering it in Python memory.
+#
+# Named here rather than in ui_common because the headless worker has to delete
+# these and ui_common imports streamlit. Worth stating plainly: every reaper in
+# this codebase has only ever walked JOBS_ROOT/<job_id>, so a ZIP that moved
+# here was immortal — and under Docker it lands on the container's writable
+# layer, filling the VM's boot disk rather than the mounted data volume.
+STATIC_DOWNLOADS = Path(__file__).parent / "static" / "downloads"
+
+
+# --------------------------------------------------------------------------- worker
+
+# How often the worker looks for queued work. A few seconds is plenty at ~7
+# jobs/day and keeps the submit→start latency imperceptible.
+WORKER_POLL_SECONDS = _float("BVG_WORKER_POLL_SECONDS", 3.0)
+
+# A running job writes a heartbeat while it works. If one goes quiet for longer
+# than this the worker assumes the process died and requeues it — per-item state
+# means it resumes rather than restarting.
+JOB_HEARTBEAT_SECONDS = _float("BVG_JOB_HEARTBEAT_SECONDS", 30.0)
+JOB_STALE_SECONDS = _float("BVG_JOB_STALE_SECONDS", 300.0)
+
+# How many times a job may be requeued after a crash before it is marked failed.
+# Without this a job that reliably kills the worker would loop forever.
+JOB_MAX_ATTEMPTS = _int("BVG_JOB_MAX_ATTEMPTS", 3)
+
+# How many times ONE ROW may be rendered before it is left failed. Renders were
+# treated as deterministic for a long time — a background missing from the ZIP
+# will not appear on a retry — and on that reasoning a failed row was skipped
+# forever. An overnight batch disproved it: 832 of 12,000 rows died with
+# "FFmpeg exited with code -9" (the kernel's OOM killer) and "Render timed out
+# after 600s", both of which are the machine being busy rather than the row
+# being bad. Those rows render fine when the box is not thrashing, and there
+# was no way to retry them short of hand-editing SQLite.
+#
+# 2 means one retry. Deterministic failures cost one extra attempt and then
+# stick, which is the cheap direction to be wrong in: they fail before FFmpeg
+# is even invoked. Classifying the error string instead would be smaller in
+# the DB and far more brittle — "which errors are transient" is exactly the
+# judgement that was already made wrongly once.
+RENDER_ATTEMPTS = _int("BVG_RENDER_ATTEMPTS", 2)
+
+# Seconds ONE ROW may spend inside FFmpeg before it is killed and marked failed.
+# Kept as an env knob rather than a literal because the right value depends
+# entirely on the sheet: a plain row renders in seconds, while one carrying
+# seven subliminal layers and frame-by-frame encoding at crf 18 was measured at
+# 552s for a 13-second video. Raising it stops slow rows being thrown away —
+# it does NOT make them faster, and it does nothing for rows the OOM killer
+# takes. Note the interaction with RENDER_ATTEMPTS: a row that always times out
+# now burns this twice before it is abandoned.
+RENDER_TIMEOUT = _int("BVG_RENDER_TIMEOUT", 600)
+
+# Encoder threads ONE FFmpeg process may use. 0 = leave it to x264, which sizes
+# its pool as min(1.5 * ncores, 128) from the MACHINE's core count and has no
+# idea how many renders are running beside it — 112 parallel rows on a
+# 112-core box then ask for ~14,000 encoder threads between them, each
+# carrying its own frame buffers. The render job derives a value from the
+# worker count (see jobs/runners/render.py); set this to pin it instead.
+FFMPEG_THREADS = _int("BVG_FFMPEG_THREADS", 0)
+
+# Decoder threads per FFmpeg INPUT. This is the knob that actually pays: one row
+# claims up to MAX_TOTAL_FFMPEG_INPUTS inputs (promo, CTA clips, gifs,
+# background videos, music), and each decoder otherwise sizes its own thread
+# pool from the machine's core count. One measured row held 1,070 threads and
+# 5.5 GB for a fifteen-second promo. Capping to 1 measured ~30% less peak RSS,
+# and FASTER on the two shapes this renderer runs (subliminal on, audio split
+# on) — the decode threads were competing with the encoder, not helping.
+# 0 restores FFmpeg's auto-detect.
+FFMPEG_DECODE_THREADS = _int("BVG_FFMPEG_DECODE_THREADS", 1)
+
+
+# --------------------------------------------------------------------------- email
+
+SMTP_HOST = _str("BVG_SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = _int("BVG_SMTP_PORT", 587)
+SMTP_USER = _str("BVG_SMTP_USER")
+# A Google Workspace *app password*, not the account password. Spaces are
+# allowed in the value Google shows you; strip them so a copy-paste works.
+SMTP_PASSWORD = _str("BVG_SMTP_PASSWORD").replace(" ", "")
+SMTP_STARTTLS = _bool("BVG_SMTP_STARTTLS", True)
+
+MAIL_FROM = _str("BVG_MAIL_FROM") or SMTP_USER
+MAIL_TO = _list("BVG_MAIL_TO")
+
+# Attach the updated Excel when it is under this size; link to Drive otherwise.
+MAIL_MAX_ATTACHMENT_BYTES = _int("BVG_MAIL_MAX_ATTACHMENT_BYTES", 15 * 1024 * 1024)
+
+
+def mail_configured() -> bool:
+    """True when the transport itself is usable.
+
+    MAIL_TO is deliberately NOT required here. A batch can carry its own
+    recipient typed into the UI, and send() already refuses a message with no
+    recipients — so requiring a server-wide default at this level would
+    silently disable those per-job addresses."""
+    return bool(SMTP_HOST and SMTP_USER and SMTP_PASSWORD and MAIL_FROM)
+
+
+# --------------------------------------------------------------------------- drive
+
+# The Shared Drive the service account uploads into. A Shared Drive is required:
+# a service account has no personal Drive storage, so uploading into a *My Drive*
+# folder shared with it fails outright.
+DRIVE_SHARED_DRIVE_ID = _str("BVG_DRIVE_SHARED_DRIVE_ID")
+
+# Optional folder inside that Shared Drive to act as the root for everything the
+# app writes. Blank = the Shared Drive root.
+DRIVE_ROOT_FOLDER_ID = _str("BVG_DRIVE_ROOT_FOLDER_ID")
+
+# Path to a service-account JSON key. Leave blank on the GCP VM: Application
+# Default Credentials pick up the VM's attached service account, so there is no
+# key file to store, rotate or leak.
+DRIVE_CREDENTIALS_FILE = _str("BVG_DRIVE_CREDENTIALS_FILE")
+
+# Publish as a DIFFERENT service account than the VM runs as, by impersonating
+# it. Full email, e.g. video-uploads-2@PROJECT.iam.gserviceaccount.com.
+#
+# This exists for Drive's 750 GB per rolling 24 hours, which is charged **per
+# user** — and a service account is a user. A second identity has its own
+# untouched allowance, so a night too big for one account can be published by
+# two. Impersonation rather than a second key file: the VM's own service
+# account is granted `roles/iam.serviceAccountTokenCreator` on the target and
+# mints short-lived tokens for it, so there is no long-lived secret sitting on
+# the disk. See DEPLOYMENT.md section 5b.
+DRIVE_IMPERSONATE = _str("BVG_DRIVE_IMPERSONATE")
+
+# Where publishing continues when the account above runs out of allowance.
+# Comma-separated, tried in order. Blank = no failover, which is what every
+# deployment does today.
+#
+# The app starts on DRIVE_IMPERSONATE (blank = the VM's own account) and only
+# moves to the next address once Drive has refused a transfer for the FULL
+# retry budget AND a 2-byte test upload is refused too — see
+# drive._with_failover. Every address here needs the same setup as
+# DRIVE_IMPERSONATE: the token-creator binding, and Content Manager on the
+# Shared Drive. See DEPLOYMENT.md section 5b-bis.
+DRIVE_IMPERSONATE_FALLBACKS = _list("BVG_DRIVE_IMPERSONATE_FALLBACKS")
+
+# How finished videos are published.
+#
+#   zip    one `yt.zip` and one `tk.zip` per output folder (the default). A
+#          16,000-video night becomes ~32 archives instead of 32,000 files.
+#   files  every video as its own Drive file under batch_NN/yt/ and
+#          batch_NN/tk/, the second made with a server-side copy.
+#
+# `files` moves the bytes once and `zip` moves them twice: a ZIP is opaque to
+# files.copy, so the archive holding the long names cannot be cloned from the
+# one holding the short names. That is the price of the archives, and it is
+# paid knowingly — see packing.py.
+UPLOAD_MODE = _str("BVG_UPLOAD_MODE", "zip").lower()
+
+# Which of the two names to publish: `yt`, `tk`, or both.
+#
+# This exists because of Drive's 750 GB per rolling 24 hours (see README). Each
+# video is published under two names, so a night that renders 500 GB of MP4s
+# moves a terabyte into Drive and cannot finish in one day. Publishing ONE
+# platform halves that to something that fits, and the other can go the next
+# day — the videos are kept on the VM until every selected platform has been
+# published, and a requeued job skips what already landed.
+UPLOAD_PLATFORMS = _list("BVG_UPLOAD_PLATFORMS", "yt,tk")
+
+# In `zip` mode, delete an output folder's MP4s once BOTH of its archives are
+# verified in Drive. Rendering 16,000 videos needs ~500 GB of disk; this keeps
+# a long run from also needing room for the archives on top of it. Set false to
+# keep the MP4s on the VM (the local ZIP fallback then still works).
+#
+# Setting this false also suppresses JOB_PURGE_ON_FINISH for that job, so it
+# means "keep this job's bytes on this machine" in both senses. Without that,
+# the MP4s would survive packing and then be deleted thirty seconds later by a
+# different mechanism, which is the opposite of what the name promises.
+UPLOAD_FREE_LOCAL = _bool("BVG_UPLOAD_FREE_LOCAL", True)
+
+DRIVE_UPLOAD_CONCURRENCY = _int("BVG_DRIVE_UPLOAD_CONCURRENCY", 8)
+DRIVE_UPLOAD_ATTEMPTS = _int("BVG_DRIVE_UPLOAD_ATTEMPTS", 3)
+DRIVE_CHUNK_BYTES = _int("BVG_DRIVE_CHUNK_BYTES", 8 * 1024 * 1024)
+
+# Uploads are sent a chunk at a time and every chunk is its own HTTP request.
+# 8 MB was sized for ~8 MB videos; a 30 GB archive at that size is ~3,750
+# requests, which is slow and an efficient way to get rate-limited. Must stay a
+# multiple of 256 KB — Drive's resumable protocol requires it — and costs this
+# much memory per upload in flight.
+DRIVE_UPLOAD_CHUNK_BYTES = _int("BVG_DRIVE_UPLOAD_CHUNK_BYTES", 64 * 1024 * 1024)
+
+# How patiently a throttled Drive call is retried before giving up.
+#
+# googleapiclient's own `num_retries` handles 5xx and 429 but gives up after a
+# few seconds, and Drive answers a sustained transfer with 403
+# userRateLimitExceeded — a *retryable* 403 that reads like a permission error
+# and is not one. The budget is per chunk, so a transfer that keeps making
+# progress is never abandoned for being slow. Ten attempts backing off to two
+# minutes rides out about eight minutes of throttling (the nine sleeps sum to
+# 486s).
+#
+# Reaching the end of that budget is also what starts an identity failover when
+# BVG_DRIVE_IMPERSONATE_FALLBACKS is set, so raising this delays the switch by
+# the same amount.
+DRIVE_RETRY_ATTEMPTS = _int("BVG_DRIVE_RETRY_ATTEMPTS", 10)
+DRIVE_RETRY_MAX_SLEEP = _float("BVG_DRIVE_RETRY_MAX_SLEEP", 120.0)
+
+# Pulling CTA clips from a Drive folder instead of uploading them through the
+# browser. The VM's link to Google is an order of magnitude faster than a home
+# connection, so this is server-to-server work the browser never touches.
+DRIVE_DOWNLOAD_CONCURRENCY = _int("BVG_DRIVE_DOWNLOAD_CONCURRENCY", 8)
+
+# A guard against pointing the app at someone's entire Drive by accident.
+# Deliberately an error rather than a silent truncation — quietly using the
+# "first 5,000" of a folder is how you get a batch built from the wrong clips.
+DRIVE_MAX_SOURCE_FILES = _int("BVG_DRIVE_MAX_SOURCE_FILES", 5000)
+
+
+def drive_configured(override: str = "") -> bool:
+    """True when there is somewhere to upload to.
+
+    `override` is a job's own folder link, which beats the env default —
+    the VM's .env cannot be edited per batch."""
+    return bool((override or "").strip() or DRIVE_SHARED_DRIVE_ID)
+
+
+# --------------------------------------------------------------------------- gemini
+
+# Vertex AI on the project that already runs the VM — same service account, no
+# separate API key to manage. Model IDs are settings rather than constants
+# because Google retires them on a schedule.
+GCP_PROJECT = _str("BVG_GCP_PROJECT") or _str("GOOGLE_CLOUD_PROJECT")
+VERTEX_LOCATION = _str("BVG_VERTEX_LOCATION", "us-central1")
+
+# Pool generation is a handful of calls where quality matters — Pro tier.
+# Nothing calls a model per video, so there is no bulk-tier model here.
+GEMINI_POOL_MODEL = _str("BVG_GEMINI_POOL_MODEL", "gemini-2.5-pro")
+
+# Emoji are stripped from captions and filenames. They are legal on every
+# filesystem the videos touch, but they are not wanted here — so they are
+# removed at the source (when a caption is generated) as well as when a
+# filename is built. Set true to keep them.
+FILENAME_KEEP_EMOJI = _bool("BVG_FILENAME_KEEP_EMOJI", False)
+
+# How long a generated caption may be.
+#
+# This is derived from the filename budget, not picked arbitrarily. A name is
+# capped at 90 characters and carries one ending beside the caption: either
+# hashtags (five is about 38 characters) or a fixed CTA line (the longest in
+# naming.FIXED_TAILS is 47). 40 clears BOTH — the caption Gemini writes is the
+# caption that ships, whichever ending the batch uses. Asking the model for
+# anything longer just means cutting its sentence in half at naming time.
+CAPTION_MAX_CHARS = _int("BVG_CAPTION_MAX_CHARS", 40)
+
+CAPTION_POOL_SIZE = _int("BVG_CAPTION_POOL_SIZE", 2000)
+HASHTAG_POOL_SIZE = _int("BVG_HASHTAG_POOL_SIZE", 500)
+CAPTION_THEME = _str("BVG_CAPTION_THEME")
+
+# The most a pool may be asked for in one go — the upper bound on the UI's
+# number inputs, not a default.
+#
+# A pool is a consumable: one caption per video, never reused, so a job of
+# `batches x rows` videos needs that many captions. 1,000 rows across 16 promos
+# is 16,000 videos and therefore 16,000 captions, which the old 5,000 ceiling
+# simply refused. The limit exists to catch a typo'd 500000, so it is set well
+# above any plausible real batch rather than near it.
+CAPTION_POOL_MAX = _int("BVG_CAPTION_POOL_MAX", 50000)
+
+# Hashtags repeat freely — with the caption already unique per video they carry
+# no naming duty — so this rarely needs to be large.
+HASHTAG_POOL_MAX = _int("BVG_HASHTAG_POOL_MAX", 5000)
+
+# A pool is built in chunks of ~100, and the chunks are independent — each is a
+# single-turn request that knows nothing of the others. Running them one after
+# another made a 5,000-caption pool a 30-minute wait for a machine doing
+# nothing but waiting. 8 in flight is the same total token spend, roughly an
+# eighth of the wall-clock, and gentle enough not to trip Vertex's throttling.
+CAPTION_CONCURRENCY = _int("BVG_CAPTION_CONCURRENCY", 8)
+
+# Attempts per chunk before it is given up on. Without this a single 429 threw
+# away the whole pool — which mattered far more once chunks run concurrently
+# and there are more of them in flight to be throttled.
+CAPTION_MAX_ATTEMPTS = _int("BVG_CAPTION_MAX_ATTEMPTS", 4)
+
+
+def gemini_configured() -> bool:
+    return bool(GCP_PROJECT)
+
+
+# --------------------------------------------------------------------------- scraper
+
+SCRAPE_MAX_VIDEOS = _int("BVG_SCRAPE_MAX_VIDEOS", 1500)
+SCRAPE_BATCH_SIZE = _int("BVG_SCRAPE_BATCH_SIZE", 50)
+SCRAPE_SLOTS = _int("BVG_SCRAPE_SLOTS", 5)
+
+# Every clip is trimmed to a fixed window — a trim, not a filter, so no video is
+# ever dropped for being too long. The default skips the first second, which is
+# where creator intro branding and on-screen text usually sit.
+SCRAPE_TRIM_START = _float("BVG_SCRAPE_TRIM_START", 1.0)
+SCRAPE_TRIM_DURATION = _float("BVG_SCRAPE_TRIM_DURATION", 10.0)
+
+# ~1 video per 1-2s. Faster than this gets the IP blocked.
+SCRAPE_MIN_DELAY = _float("BVG_SCRAPE_MIN_DELAY", 1.0)
+SCRAPE_MAX_DELAY = _float("BVG_SCRAPE_MAX_DELAY", 2.0)
+
+# Optional Netscape-format cookies file. TikTok increasingly requires a logged-in
+# session, especially from datacenter IPs like the VM's.
+SCRAPE_COOKIES_FILE = _str("BVG_SCRAPE_COOKIES_FILE")
+
+# yt-dlp format selection, and the reason there are two of them.
+#
+# TikTok advertises `acodec: aac` on EVERY format it offers, including its
+# bytevc1 (H.265) renditions — some of which are delivered with no audio track
+# whatsoever. Measured on one post: h264_540p carried real AAC, bytevc1_540p
+# from the same post, the same minute, carried none. yt-dlp's default codec
+# preference ranks H.265 ABOVE H.264, so plain `best` picks the silent one.
+#
+# It is NOT as simple as banning H.265: on a different post the bytevc1_720p
+# rendition had perfectly good audio and was the only 720p on offer, so banning
+# it outright would have cost real resolution for nothing. And the format
+# metadata is identical either way — abr, asr, audio_channels and audio_ext
+# look the same on a silent stream as on a real one, so nothing can be decided
+# before the bytes arrive.
+#
+# So: take the best format, then look at what actually landed, and only fall
+# back to the no-H.265 selector when the file turns out to be silent.
+SCRAPE_FORMAT = _str("BVG_SCRAPE_FORMAT") or "mp4/best"
+SCRAPE_FORMAT_WITH_AUDIO = (_str("BVG_SCRAPE_FORMAT_WITH_AUDIO")
+                            or "best[vcodec!*=h265][vcodec!*=hev]/best")
+
+# Set false to skip the audio check and the recovery re-download entirely —
+# the clips are for an ASMR bank, so silence is a defect, but a caller who only
+# wants footage should not pay for a second fetch.
+SCRAPE_REQUIRE_AUDIO = _bool("BVG_SCRAPE_REQUIRE_AUDIO", True)
+
+# The music scrape. `bestaudio/best` lets yt-dlp take an audio-only rendition
+# when TikTok offers one and fall back to the muxed MP4 when it does not; the
+# extract-audio postprocessor strips the sound out either way. MP3 rather than
+# the native m4a because the output is a bed to drop into a timeline, and mp3
+# is the format every editor and every phone opens without asking.
+SCRAPE_AUDIO_FORMAT = _str("BVG_SCRAPE_AUDIO_FORMAT") or "bestaudio/best"
+SCRAPE_AUDIO_CODEC = _str("BVG_SCRAPE_AUDIO_CODEC") or "mp3"
+SCRAPE_AUDIO_QUALITY = _str("BVG_SCRAPE_AUDIO_QUALITY") or "192"
+
+# Single-video fetches from the scraper page land here, one folder per browser
+# session. They are synchronous and have no job row, so they need a home the
+# orphan sweep in store.reap_old_jobs() will not pull out from under a user
+# mid-download — the leading `_` is exactly what exempts a folder from it.
+#
+# Which also means nothing else ever cleans these up, hence the TTL below: the
+# page prunes stale session folders itself on every load.
+SINGLE_FETCH_ROOT = JOBS_ROOT / "_single"
+SINGLE_FETCH_TTL_HOURS = _float("BVG_SINGLE_FETCH_TTL_HOURS", 6.0)
+
+# How many times a single-link fetch re-asks TikTok before giving up.
+#
+# Extraction is genuinely flaky — measured live, one link downloaded fine and
+# then failed "Unable to extract universal data for rehydration" on the very
+# next request, seconds later. The profile scrape rides that out because a
+# failure is never recorded as "seen", so next month's scrape tries again. A
+# one-off fetch has no next scrape: without a retry the user is simply told
+# their video is a photo carousel, which it is not.
+SINGLE_FETCH_ATTEMPTS = _int("BVG_SINGLE_FETCH_ATTEMPTS", 3)
+SINGLE_FETCH_RETRY_DELAY = _float("BVG_SINGLE_FETCH_RETRY_DELAY", 2.0)
+
+
+# --------------------------------------------------------------------------- paths
+
+def job_dir(job_id: str) -> Path:
+    return JOBS_ROOT / job_id
+
+
+def ensure_dirs() -> None:
+    """Create the storage root. Safe to call repeatedly."""
+    JOBS_ROOT.mkdir(parents=True, exist_ok=True)

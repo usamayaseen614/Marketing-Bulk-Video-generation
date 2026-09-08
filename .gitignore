@@ -21,6 +21,8 @@ env/
 .env
 .env.*
 *.env
+# ...but the template carries no secrets and should be committed
+!.env.example
 
 # Temporary / scratch files
 _tmp_*.py
@@ -31,6 +33,13 @@ _tmp_*.py
 output/
 outputs/
 generated_videos/
+
+# Background job storage (records, staged assets, rendered videos)
+_jobs/
+
+# Service-account keys — the VM uses ADC, but a local key may be mounted
+*-key.json
+service-account*.json
 
 # Sample / test assets (keep the directory, ignore large media)
 sample_assets/*.mp4
@@ -53,3 +62,6 @@ desktop.ini
 
 # Claude Code
 .claude/
+
+#recovered files
+_recovered

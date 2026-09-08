@@ -3,3 +3,10 @@ pandas>=2.0
 openpyxl>=3.1
 Pillow>=10.0
 imageio-ffmpeg>=0.4.9
+
+# --- automation layer (background jobs, Drive, captions, scraping)
+python-dotenv>=1.0                  # optional .env for the settings in config.py
+google-api-python-client>=2.100     # Drive v3
+google-auth>=2.30                   # ADC / the VM's attached service account
+yt-dlp>=2025.1                      # TikTok scraping; keep this one current
+google-genai>=1.0                   # Gemini via Vertex AI (caption pools)
