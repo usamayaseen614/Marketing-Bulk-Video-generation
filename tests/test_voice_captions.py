@@ -161,7 +161,11 @@ off_gen = VideoGenerator(RenderConfig(**{**BASE, "voice_enabled": False}),
                          bg_dir, promo, None, TMP / "w_off", TMP / "o_off")
 off_spec = RowSpec.from_row(ROW, 1)
 off_gen.attach_voice(off_spec, off_gen._voice_entry(off_spec))
+# Off means off for the CAPTIONS as well, not just the audio: one switch gates
+# the whole feature, so filling Screen_Text cannot start captioning a batch
+# whose author never turned captions on.
 assert off_spec.beats == [], off_spec.beats
+assert off_spec.screen_text.text == "", off_spec.screen_text.text
 off_gen._resolve_positions(off_spec)
 cmd = " ".join(off_gen.build_ffmpeg_command(
     off_spec, bg_dir / "b.png", bg_dir / "b.png", None, TMP / "o_off" / "x.mp4"))
@@ -358,18 +362,65 @@ silent_row = pd.Series({
     "Headline_Color": "#FFFFFF",
     "Screen_Text": "Silent captions still work across the whole clip",
     "Screen_Text_Y": "1420", "Screen_Text_Color": "#FFFFFF"})
-quiet_gen = VideoGenerator(RenderConfig(**{**BASE, "voice_enabled": False}),
-                           bg_dir, promo, None, TMP / "w_quiet", TMP / "o_quiet")
+quiet_gen = VideoGenerator(RenderConfig(**BASE), bg_dir, promo, None,
+                           TMP / "w_quiet", TMP / "o_quiet")
 quiet_spec = RowSpec.from_row(silent_row, 1)
 quiet_gen.attach_voice(quiet_spec, quiet_gen._voice_entry(quiet_spec))
 assert len(quiet_spec.beats) >= 2, quiet_spec.beats
 assert quiet_spec.beats[0][0] == 0.0
 assert abs(quiet_spec.beats[-1][1] - PROMO_DUR) < 0.2, quiet_spec.beats[-1]
+assert quiet_spec.voice_wav is None, "a Screen_Text row must not narrate"
 quiet = quiet_gen.render_row(1, silent_row, filename="quiet.mp4")
 assert quiet.ok, quiet.error
 assert abs(duration(quiet.output_path) - PROMO_DUR) < 0.35
 assert bright_pixels(frame_at(quiet.output_path, 1.0), CAPTION_BOX) > 300
 print(f"ok: Screen_Text with no narration — {len(quiet_spec.beats)} beats paced "
-      f"across the promo, voiceover feature off")
+      f"across the promo, no audio touched")
+
+# ------------------- 9. the preview and the editor, which were silently blank
+#
+# Every entry point has to bind the narration, not just render_row. The preview
+# and the editor built their spec with a bare RowSpec.from_row, so a row whose
+# words come from its Voiceover had NO beats there: no caption in the preview,
+# no caption element in the editor, and nothing to drag. It looked like the
+# columns did nothing at all.
+prev_gen = VideoGenerator(RenderConfig(**BASE), bg_dir, promo, None,
+                          TMP / "w_prev", TMP / "o_prev",
+                          voice_cache_dir=VOICE_CACHE)
+prev_spec = prev_gen._spec_for(ROW, 1)
+assert prev_spec.beats, "the preview path must bind the voice too"
+preview = prev_gen.render_preview(ROW, 1)
+assert bright_pixels(preview, CAPTION_BOX) > 300, (
+    "the static preview shows no caption band")
+payload = prev_gen.build_editor_payload(ROW, 1)
+roles = {t.get("role") for t in payload.get("texts", [])}
+assert "Screen_Text" in roles, roles
+print(f"ok: preview and editor both carry the caption band "
+      f"({len(prev_spec.beats)} beats, roles={sorted(roles)})")
+
+# The video render must still LEAVE IT OUT of the always-on overlay, or the
+# caption would burn in under the moving one.
+still = prev_gen.build_overlay_image(prev_spec, include_cta=False)
+assert bright_pixels(still.convert("RGB"), CAPTION_BOX) < 300, (
+    "the render's static overlay must not bake the caption in")
+print("ok: the video render still keeps the caption out of the static overlay")
+
+# ------------------------- 10. captions work with no speech engine at all
+#
+# Kokoro cannot install on every machine (it needs Python < 3.13). A Voiceover
+# that cannot be spoken should still be SHOWN — the words are right there in the
+# cell, and silent captions beat a blank band. Without this the whole feature
+# looked broken on a dev box.
+mute_gen = VideoGenerator(RenderConfig(**BASE), bg_dir, promo, None,
+                          TMP / "w_mute", TMP / "o_mute")   # no voice cache at all
+mute_spec = mute_gen._spec_for(ROW, 1)
+assert mute_spec.beats, "a Voiceover with no TTS should still produce captions"
+assert mute_spec.voice_wav is None and mute_spec.voice_duration == 0.0
+assert abs(mute_spec.beats[-1][1] - PROMO_DUR) < 0.5, mute_spec.beats[-1]
+mute = mute_gen.render_row(1, ROW, filename="mute.mp4")
+assert mute.ok, mute.error
+assert bright_pixels(frame_at(mute.output_path, 1.0), CAPTION_BOX) > 300
+print(f"ok: no speech engine -> {len(mute_spec.beats)} silent caption beats, "
+      f"paced across the promo")
 
 print("\nOK - timed captions + voiceover")

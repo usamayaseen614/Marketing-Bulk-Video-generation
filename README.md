@@ -513,8 +513,21 @@ What that means in practice:
 * **Synthesis happens once per unique script, before any row renders.** A 16,000-video batch
   dealt from a 60-script pool does 60 syntheses, not 16,000 — and none of it happens inside
   the render pool.
-* **It is an enhancement, never a failure.** If the voice model is missing or a line cannot
-  be synthesized, that row renders silent and the batch carries on.
+* **It is an enhancement, never a failure.** If a line cannot be synthesized, that row
+  renders silent and the batch carries on.
+* **Captions work without a speech engine.** Kokoro needs Python 3.10-3.12, so it will not
+  install on every machine. Where it is missing, the sidebar offers *Show timed captions
+  (no narration here)* instead: the `Voiceover` text still appears on screen, paced across
+  the video, so you can build and preview the caption layer locally. Deploy — or install
+  Kokoro — and the same sheet starts speaking, with the captions synced to the speech
+  rather than paced.
+* **One switch gates the whole thing.** With the checkbox off, neither `Voiceover` nor
+  `Screen_Text` renders anything, so filling either column cannot start captioning a batch
+  by surprise.
+* **Preview and Render row work too.** Both show the caption band, and both synthesize that
+  one row on the spot rather than waiting for a batch. The static preview shows the
+  **longest** caption line, so you can check the widest case fits before committing to a
+  batch.
 
 ### What to expect from the audio features
 

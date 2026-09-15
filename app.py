@@ -72,12 +72,39 @@ def make_generator(ws: Workspace, config: RenderConfig, output_dir: Path) -> Vid
         gif_paths=ws.gif_paths,
         bg_video_paths=ws.bg_video_paths,
         music_paths=ws.music_paths,
+        # The preview and the single-row render are interactive: one row, driven
+        # by a click, so this one is allowed to synthesize on the spot rather
+        # than read a cache some earlier stage filled. The batch does the
+        # opposite (a pre-render stage, lookup only) because sixteen parallel
+        # renders must not each load a PyTorch model.
+        #
+        # The cache lives outside any job folder so a second preview of the same
+        # row is instant, and so it survives the job purge. It is
+        # content-addressed, so sharing it across jobs is safe.
+        voice_cache_dir=settings.JOBS_ROOT / "_voice",
+        voice_allow_synthesis=True,
     )
     # Bad uploads caught at construction (e.g. an audio-only "video" clip that
     # would crash FFmpeg mid-render) — show them wherever a generator is built.
     for message in generator.input_warnings:
         st.warning(message)
     return generator
+
+
+def apply_script_pool(frame, script_bytes, script_name, config: RenderConfig):
+    """Deal pooled scripts into the frame the way the batch's voice stage will.
+
+    The preview exists to show what the batch would produce, so a row whose
+    Voiceover comes from the pool has to be narrated here too — otherwise
+    previewing it shows an empty caption band and the batch shows a full one.
+    Idempotent and non-destructive (a cell the sheet already filled always
+    wins), so running it here and again in the stage changes nothing."""
+    if not config.voice_enabled:
+        return frame
+    from speech.pool import apply_to_frame, parse_scripts
+    scripts = parse_scripts(script_bytes, script_name) if script_bytes else []
+    filled, _ = apply_to_frame(frame, scripts, config.voice_set)
+    return filled
 
 
 def hashtag_template_bytes() -> bytes:
@@ -344,9 +371,7 @@ with st.sidebar:
     screen_text_y = settings.SCREEN_TEXT_Y
     voice_enabled = False
 
-    if not _voice_ok:
-        st.caption(f"Not available here — {_voice_why}")
-    else:
+    if _voice_ok:
         voice_enabled = st.checkbox(
             "Speak the script and caption it on screen", value=False,
             help="Reads each row's `Voiceover` text aloud and puts the words on "
@@ -356,7 +381,21 @@ with st.sidebar:
                  "script pool below; use `Screen_Text` to show different words "
                  "than the ones being said.",
         )
-    if voice_enabled:
+    else:
+        # No speech engine here, but the CAPTION half needs none — the words are
+        # in the sheet. Offering it anyway is what lets the timed-caption layer
+        # be built and previewed on a machine that cannot run the voice model
+        # (Kokoro needs Python < 3.13), instead of the whole feature looking
+        # broken.
+        st.caption(f"No speech engine on this machine — {_voice_why}")
+        voice_enabled = st.checkbox(
+            "Show timed captions (no narration here)", value=False,
+            help="Puts each row's `Voiceover` (or `Screen_Text`) on screen a few "
+                 "words at a time, paced across the video. Identical to the full "
+                 "feature minus the voice — install Kokoro, or deploy, and the "
+                 "same sheet starts speaking and syncs the captions to it.",
+        )
+    if voice_enabled and _voice_ok:
         voice_set = st.multiselect(
             "Voices", speech_synth.VOICES, default=list(settings.VOICE_SET),
             help="Rows rotate through these, so one posting folder is not all "
@@ -412,6 +451,19 @@ with st.sidebar:
             help="A script that outruns the promo makes the video longer, "
                  "looping the clip until the narration finishes. Off instead "
                  "cuts the narration where the promo ends, and warns the row.",
+        )
+    elif voice_enabled:
+        # Captions without a voice: only the controls that still mean something.
+        beat_max_words = st.slider(
+            "Words per caption", 1, 8, int(settings.BEAT_MAX_WORDS),
+            help="How many words sit on screen at once. Three or four is the "
+                 "usual short-form look; higher reads more like a subtitle.",
+        )
+        screen_text_y = st.slider(
+            "Caption height (px from top)", 200, CANVAS_H - 200,
+            int(settings.SCREEN_TEXT_Y), 10,
+            help="Where the caption band sits. Fixed rather than randomised per "
+                 "row. `Screen_Text_X`/`Screen_Text_Y` cells override it.",
         )
 
     st.subheader("Video placement")
@@ -1738,6 +1790,10 @@ if preview_clicked and ready:
                 # all for a row whose only Headline comes from a grid.
                 df_preview, _ = generator.assign_backgrounds(
                     text_grids.apply_overrides(df, grid_overrides, promo_choice))
+                df_preview = apply_script_pool(
+                    df_preview,
+                    script_file.getvalue() if script_file else None,
+                    script_file.name if script_file else "", config)
                 payload = generator.build_editor_payload(
                     df_preview.iloc[int(preview_row) - 1], int(preview_row))
                 st.session_state["preview_payload"] = payload
@@ -1775,6 +1831,10 @@ if render_row_clicked and ready:
                 # pairing the batch would produce.
                 df_render, bg_warnings = generator.assign_backgrounds(
                     text_grids.apply_overrides(df, grid_overrides, promo_choice))
+                df_render = apply_script_pool(
+                    df_render,
+                    script_file.getvalue() if script_file else None,
+                    script_file.name if script_file else "", config)
                 for message in bg_warnings:
                     st.warning(message)
                 res = generator.render_row(

@@ -1294,6 +1294,7 @@ class VideoGenerator:
         bg_video_paths: Optional[list] = None,
         music_paths: Optional[list] = None,
         voice_cache_dir: Optional[Path] = None,
+        voice_allow_synthesis: bool = False,
     ):
         self.config = config
         # Where the pre-render voice stage left its synthesized wavs. render_row
@@ -1301,6 +1302,12 @@ class VideoGenerator:
         # manifest to thread through the job — and a cache miss simply renders
         # the row silent.
         self.voice_cache_dir = Path(voice_cache_dir) if voice_cache_dir else None
+        # Interactive callers (the preview and the single-row render) set this
+        # so ONE row can be synthesized on the spot. The batch leaves it off:
+        # there, synthesis is a pre-render stage precisely so a PyTorch model is
+        # never loaded inside sixteen parallel render threads. One row driven by
+        # a click is the opposite situation — there is nothing to race.
+        self.voice_allow_synthesis = bool(voice_allow_synthesis)
         self.video_path = Path(video_path)
         # Optional CTA video: a list of slots (positions 1..N that play in fixed
         # order); each slot is a pool of sample clips, one of which is chosen per
@@ -2521,14 +2528,20 @@ class VideoGenerator:
         for element in spec.text_elements:
             if not element.text:
                 continue
-            if element.role == SCREEN_TEXT_ROLE and spec.beats:
-                # The caption band is motion, not a still: its words change with
-                # the narration, so they ship as the timed frames
-                # _caption_layers builds and are deliberately absent here. This
-                # keeps the always-on overlay correct by construction —
-                # otherwise it would bake in whichever beat happened to be
-                # sitting in `.text` (attach_voice leaves the LONGEST one there
-                # so the type is sized for the worst case).
+            if element.role == SCREEN_TEXT_ROLE and spec.beats and not include_cta:
+                # In the VIDEO render the caption band is motion, not a still:
+                # its words change with the narration, so they ship as the timed
+                # frames _caption_layers builds and are deliberately absent from
+                # the always-on overlay. Otherwise this layer would bake in
+                # whichever beat happened to be sitting in `.text`.
+                #
+                # include_cta is this method's existing "static composite"
+                # signal — the video render is the one caller that passes False
+                # (see the docstring). A still has no timeline to carry the
+                # caption, so it paints the beat attach_voice left in `.text`
+                # (the longest one) and the preview shows a representative
+                # caption at its real size and position. Without this the
+                # preview and the editor showed no caption band at all.
                 continue
             layer = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
             if element.subliminal:
@@ -2863,6 +2876,16 @@ class VideoGenerator:
         an error: the row renders silent, and a row carrying a Screen_Text still
         gets captions, paced for reading."""
         cfg = self.config
+        # One switch for the whole feature. Off means off: no beats, and the
+        # caption band's text is cleared so build_overlay_image cannot paint it
+        # as an ordinary static text either. Without this, filling Screen_Text
+        # would silently start captioning a batch whose author never turned
+        # captions on.
+        if not cfg.voice_enabled:
+            spec.beats = []
+            spec.screen_text.text = ""
+            return
+
         kw = {"max_words": cfg.beat_max_words, "max_chars": cfg.beat_max_chars,
               "min_duration": cfg.beat_min_duration, "max_beats": cfg.beat_max}
         shown = spec.screen_text.text.strip()
@@ -2884,11 +2907,20 @@ class VideoGenerator:
                     "it word by word. Leave Screen_Text blank to sync exactly.")
             else:
                 spec.beats = group_words(entry.get("words") or (), **kw)
-        elif shown:
-            # Silent captions: no narration to time against, so they are paced
-            # across the promo itself.
-            spec.beats = group_text(shown, self._probe_duration(self.video_path)
-                                    or 0.0, **kw)
+        elif shown or spoken:
+            # No narration to time against, so the words are paced across the
+            # promo itself. Two ways to land here, and both want captions:
+            #
+            #  * a Screen_Text with no Voiceover — captions on purpose;
+            #  * a Voiceover that could not be synthesized — no speech engine
+            #    on this machine, or that one line failed. The words are
+            #    sitting right there in the cell, so
+            #    showing them silently is far better than showing nothing —
+            #    and it means the caption side of this feature works on a
+            #    machine that cannot run the voice model at all.
+            spec.beats = group_text(shown or spoken,
+                                    self._probe_duration(self.video_path) or 0.0,
+                                    **kw)
         else:
             spec.beats = []
 
@@ -2922,8 +2954,13 @@ class VideoGenerator:
                                     else speech_synth.DEFAULT_VOICE)
         speed = (spec.voice_speed if spec.voice_speed is not None
                  else cfg.voice_speed)
-        return speech_synth.load_cached(spec.voiceover, voice, speed,
-                                        self.voice_cache_dir, cfg.voice_lang)
+        entry = speech_synth.load_cached(spec.voiceover, voice, speed,
+                                         self.voice_cache_dir, cfg.voice_lang)
+        if entry is None and self.voice_allow_synthesis:
+            entry = speech_synth.synthesize(
+                spec.voiceover, voice, speed, self.voice_cache_dir,
+                cfg.voice_lang, cfg.voice_lead_in)
+        return entry
 
     def _caption_layers(self, spec: RowSpec) -> tuple:
         """(frames, static) where frames is [(start, end, image), ...] — one
@@ -3918,6 +3955,19 @@ class VideoGenerator:
 
     # ------------------------------------------------------------- per-row render
 
+    def _spec_for(self, row: pd.Series,
+                  row_number: Optional[int] = None) -> RowSpec:
+        """A row's spec with its narration already bound.
+
+        Every entry point goes through here rather than calling
+        RowSpec.from_row directly. Binding the voice is not optional bookkeeping:
+        it sets the render length, and it is what turns a Voiceover into caption
+        beats — so a path that skipped it showed no captions at all, silently.
+        The preview and the editor did exactly that."""
+        spec = RowSpec.from_row(row, row_number)
+        self.attach_voice(spec, self._voice_entry(spec))
+        return spec
+
     def render_row(self, row_number: int, row: pd.Series,
                    filename: Optional[str] = None) -> RowResult:
         """Render one Excel row to an MP4. Never raises — failures are captured
@@ -3926,12 +3976,11 @@ class VideoGenerator:
         `filename` lets the caller name the output. Naming policy (captions,
         hashtags, length caps) lives with the caller, not in the render engine.
         Omit it for the historical Caption-or-Headline name."""
-        spec = RowSpec.from_row(row, row_number)
-        # Before anything reads a duration. The render length is max(promo,
-        # voice) and _resolve_positions deals every duration-dependent layer
-        # (CTA samples, gifs, music, background beds) against it, so binding the
-        # narration has to happen while all of those are still unresolved.
-        self.attach_voice(spec, self._voice_entry(spec))
+        # _spec_for binds the narration before anything reads a duration: the
+        # render length is max(promo, voice) and _resolve_positions deals every
+        # duration-dependent layer (CTA samples, gifs, music, background beds)
+        # against it.
+        spec = self._spec_for(row, row_number)
         # Repeated renders of one sheet must differ; see RenderConfig.variant_salt.
         # Guarded so the default (0) leaves every existing seed untouched.
         if self.config.variant_salt:
@@ -4184,7 +4233,7 @@ class VideoGenerator:
         """Static composite of one row — same layout math as the real render,
         with the video represented by its first frame. Pass the row's 1-based
         sheet number so the preview's random picks match render_row's."""
-        spec = RowSpec.from_row(row, row_number)
+        spec = self._spec_for(row, row_number)
         base = self.build_base_image(spec).convert("RGBA")
         overlay = self.build_overlay_image(spec)  # resolves positions first
 
@@ -4210,7 +4259,7 @@ class VideoGenerator:
         the video and CTA boxes carry their top-left corner. Pass the row's
         1-based sheet number so the preview's random picks (CTA clips, colors,
         …) match what render_row produces for that row."""
-        spec = RowSpec.from_row(row, row_number)
+        spec = self._spec_for(row, row_number)
         self._resolve_positions(spec)
 
         frame = self._fit_frame(spec.video_w, spec.video_h)
