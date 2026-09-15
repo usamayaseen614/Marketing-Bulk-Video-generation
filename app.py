@@ -21,6 +21,7 @@ import batching
 import config as settings
 import text_grids
 import ui_common
+from speech import synth as speech_synth
 from captions import naming as caption_naming
 from jobs import store
 from preview_editor import preview_editor
@@ -327,6 +328,91 @@ with st.sidebar:
     else:
         split_audio_chunks = SPLIT_AUDIO_CHUNKS
         split_audio_spread = SPLIT_AUDIO_SPREAD
+
+    st.subheader("Voiceover & captions")
+    _voice_ok, _voice_why = speech_synth.available()
+    # Every one of these has to exist whether or not the feature is usable —
+    # RenderConfig below reads them unconditionally.
+    voice_set = list(settings.VOICE_SET)
+    voice_speed = settings.VOICE_SPEED
+    voice_lead_in = settings.VOICE_LEAD_IN
+    voice_gain = settings.VOICE_GAIN
+    voice_duck = settings.VOICE_DUCK
+    voice_duck_ratio = settings.VOICE_DUCK_RATIO
+    voice_loop_promo = settings.VOICE_LOOP_PROMO
+    beat_max_words = settings.BEAT_MAX_WORDS
+    screen_text_y = settings.SCREEN_TEXT_Y
+    voice_enabled = False
+
+    if not _voice_ok:
+        st.caption(f"Not available here — {_voice_why}")
+    else:
+        voice_enabled = st.checkbox(
+            "Speak the script and caption it on screen", value=False,
+            help="Reads each row's `Voiceover` text aloud and puts the words on "
+                 "screen as they are spoken, a few at a time. The timing comes "
+                 "from the speech itself, so nothing has to be lined up by "
+                 "hand. Leave a row's `Voiceover` cell blank to pull from the "
+                 "script pool below; use `Screen_Text` to show different words "
+                 "than the ones being said.",
+        )
+    if voice_enabled:
+        voice_set = st.multiselect(
+            "Voices", speech_synth.VOICES, default=list(settings.VOICE_SET),
+            help="Rows rotate through these, so one posting folder is not all "
+                 "the same narrator. af_/am_ are American, bf_/bm_ British; "
+                 "*f_ female, *m_ male. A row's `Voiceover_Voice` cell wins.",
+        ) or [speech_synth.DEFAULT_VOICE]
+        voice_speed = st.slider(
+            "Speaking speed", 0.7, 1.4, float(settings.VOICE_SPEED), 0.05,
+            help="1.0 is the model's natural pace. A row's `Voiceover_Speed` "
+                 "cell overrides it.",
+        )
+        beat_max_words = st.slider(
+            "Words per caption", 1, 8, int(settings.BEAT_MAX_WORDS),
+            help="How many words sit on screen at once. Three or four is the "
+                 "usual short-form look; higher reads more like a subtitle.",
+        )
+        screen_text_y = st.slider(
+            "Caption height (px from top)", 200, CANVAS_H - 200,
+            int(settings.SCREEN_TEXT_Y), 10,
+            help="Where the caption band sits. Fixed rather than randomised "
+                 "per row — a caption that moved between videos in a folder "
+                 "would read as a fault. `Screen_Text_X`/`Screen_Text_Y` cells "
+                 "override it.",
+        )
+        voice_lead_in = st.number_input(
+            "Silence before the first word (s)", 0.0, 5.0,
+            float(settings.VOICE_LEAD_IN), 0.1,
+            help="A moment of promo before the narration starts. Reads far "
+                 "better than a voice that begins on frame one.",
+        )
+        voice_duck = st.checkbox(
+            "Duck the other audio under the voice", value=bool(settings.VOICE_DUCK),
+            help="Drops the promo's own sound and the music bed while the voice "
+                 "is talking, and lets them back up between phrases. Off mixes "
+                 "everything at fixed levels instead.",
+        )
+        if voice_duck:
+            voice_duck_ratio = st.slider(
+                "Ducking strength", 2.0, 20.0,
+                float(settings.VOICE_DUCK_RATIO), 0.5,
+                help="How hard the bed is pushed down under the voice. 8 is a "
+                     "normal voiceover duck; higher makes the narration the "
+                     "only thing you hear.",
+            )
+        voice_gain = st.slider(
+            "Voice level", 0.3, 1.0, float(settings.VOICE_GAIN), 0.05,
+            help="Kept below 1.0 on purpose: the promo and music already fill "
+                 "the mix between them, so a voice at full scale would clip on "
+                 "loud material.",
+        )
+        voice_loop_promo = st.checkbox(
+            "Loop the promo if the script is longer", value=bool(settings.VOICE_LOOP_PROMO),
+            help="A script that outruns the promo makes the video longer, "
+                 "looping the clip until the narration finishes. Off instead "
+                 "cuts the narration where the promo ends, and warns the row.",
+        )
 
     st.subheader("Video placement")
     if is_split:
@@ -693,6 +779,16 @@ config = RenderConfig(
     split_audio=bool(split_audio),
     split_audio_chunks=int(split_audio_chunks),
     split_audio_spread=float(split_audio_spread),
+    voice_enabled=bool(voice_enabled),
+    voice_set=list(voice_set),
+    voice_speed=float(voice_speed),
+    voice_lead_in=float(voice_lead_in),
+    voice_gain=float(voice_gain),
+    voice_duck=bool(voice_duck),
+    voice_duck_ratio=float(voice_duck_ratio),
+    voice_loop_promo=bool(voice_loop_promo),
+    beat_max_words=int(beat_max_words),
+    screen_text_y=int(screen_text_y),
     video_x=int(video_x), video_y=int(video_y),
     video_w=int(video_w), video_h=int(video_h),
     cta_x=int(cta_x), cta_y=int(cta_y),
@@ -1286,6 +1382,29 @@ if fixed_tail:
     # the fixed line has already replaced hashtags by the time naming runs.
     hashtag_source = "none"
 caption_params["hashtag_source"] = hashtag_source
+# The script pool. Only rows whose `Voiceover` cell is BLANK draw from it, so a
+# sheet that already carries its own scripts ignores this entirely.
+script_file = None
+if voice_enabled:
+    script_file = st.file_uploader(
+        "Script pool (.txt / .xlsx) — one script per line or per paragraph",
+        type=["txt", "md", "xlsx", "csv"],
+        help="Used only for rows with an empty `Voiceover` cell. Scripts are "
+             "dealt round-robin so the spread across the batch is even, and "
+             "each one rotates through the chosen voices. A .txt with blank "
+             "lines between entries treats each paragraph as one script; "
+             "without blank lines, one per line.",
+    )
+    if script_file is not None:
+        from speech.pool import parse_scripts as _parse_scripts
+        _preview = _parse_scripts(script_file.getvalue(), script_file.name)
+        if _preview:
+            st.caption(f"**{len(_preview)}** script(s) — first one: "
+                       f"“{_preview[0][:90]}”")
+        else:
+            st.warning(f"No scripts found in `{script_file.name}`. Rows with an "
+                       "empty Voiceover cell will render silent.")
+
 hashtag_file = None
 if hashtag_source == "excel":
     hashtag_file = st.file_uploader(
@@ -1840,6 +1959,10 @@ if generate_clicked and ready:
         # preserves the original workbook's formatting.
         if hashtag_file is not None:
             (assets / "hashtags.xlsx").write_bytes(hashtag_file.getvalue())
+        if script_file is not None:
+            # Keep the real extension: the parser dispatches on it.
+            suffix = Path(script_file.name).suffix.lower() or ".txt"
+            (assets / f"scripts{suffix}").write_bytes(script_file.getvalue())
 
         # Resolved to promo INDICES here, not staged as sheets: stage_uploads
         # renames every promo to input_N.mp4, so the filenames the columns were

@@ -402,6 +402,7 @@ def _render_batches(job: dict, df: pd.DataFrame, ws, n_batches: int,
                             gif_paths=ws.gif_paths,
                             bg_video_paths=ws.bg_video_paths,
                             music_paths=ws.music_paths,
+                            voice_cache_dir=store.assets_dir(job_id) / "voice",
                         )
                         for message in generator.input_warnings:
                             if message not in batch_warnings:
@@ -1128,6 +1129,20 @@ def run(job: dict) -> dict:
     videos.mkdir(parents=True, exist_ok=True)
 
     store.set_stage(job_id, "preparing")
+
+    # Narration first, and before the sheet is read: the stage deals pooled
+    # scripts into Voiceover/Voiceover_Voice columns in the staged workbook, and
+    # _load_dataframe below has to see them. Everything downstream only LOOKS UP
+    # what this produced — synthesis must never happen inside the render pool.
+    try:
+        from jobs.runners import voice as voice_stage
+        voice_result = voice_stage.run_stage(job, params)
+        if voice_result.get("synthesized"):
+            logger.info("Job %s: %s", job_id, voice_result)
+    except Exception as exc:  # noqa: BLE001
+        # An enhancement never costs a render. Those rows come out silent.
+        logger.warning("Job %s: voiceover stage failed (%s) — rendering silent",
+                       job_id, exc)
 
     df = _load_dataframe(assets)
     n_rows = len(df)

@@ -10,3 +10,14 @@ google-api-python-client>=2.100     # Drive v3
 google-auth>=2.30                   # ADC / the VM's attached service account
 yt-dlp>=2025.1                      # TikTok scraping; keep this one current
 google-genai>=1.0                   # Gemini via Vertex AI (caption pools)
+
+# --- voiceover + timed captions (the speech/ package)
+#
+# Marked for <3.13 because kokoro requires it and the local dev venv is 3.14 —
+# without the marker `pip install -r requirements.txt` fails outright there.
+# The Docker image is 3.12, so production gets it; speech/synth.py degrades to
+# "voiceover unavailable" anywhere it is missing.
+#
+# The Dockerfile installs torch from PyTorch's CPU index BEFORE this file, or
+# pip resolves the CUDA build and adds ~2.5 GB of unusable nvidia libraries.
+kokoro>=0.9.4; python_version < "3.13"

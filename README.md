@@ -116,6 +116,11 @@ rows alone determines how many videos are generated:
 | `CTA_Video_Speed_1` … `CTA_Video_Speed_10` | Playback speed of clip position 1…N individually (1 = normal, 2 = twice as fast, 0.5 = half). Columns exist up to 10; the sidebar's *Number of clip slots* sets how many are active. **Blank/absent = `CTA_Video_Speed`, then the sidebar's per-clip default** | `2.0` |
 | `CTA_Video_Speed` | Playback speed for **every** clip in the row at once — a shortcut for setting all of `CTA_Video_Speed_<n>`. A specific `CTA_Video_Speed_<n>` cell overrides it. Also the speed used by fill clips (see *Keep clips playing to fill the whole video*). **Blank/absent = normal / the sidebar per-clip defaults** | `1.5` |
 | `CTA_Clip_1` … `CTA_Clip_10` | Pin which sample plays in clip position 1…N for this video, by file name (with or without extension). **Blank/absent = a random sample from that position's pool** | `intro_a.mp4` |
+| `Voiceover` | The script **spoken aloud** for this video, and — unless `Screen_Text` overrides it — the words shown on screen as they are said. **Blank/absent = dealt from the uploaded script pool**, or silent if there is none | `Tired of overpaying? We compare forty providers in seconds.` |
+| `Screen_Text` | Show **different** words than the ones being spoken. Works on its own too: with no `Voiceover`, it is a silent caption paced for reading. **Blank/absent = the `Voiceover` text is shown** | `40 providers, 1 search` |
+| `Voiceover_Voice` | Which voice reads this row. **Blank/absent = dealt from the sidebar's voice list**, rotating so one folder is not all the same narrator | `am_michael` |
+| `Voiceover_Speed` | Speaking pace for this row (1 = the model's natural speed). **Blank/absent = the sidebar default** | `1.1` |
+| `Screen_Text_Size` / `_Color` / `_Opacity` / `_X` / `_Y` / `_Font` / `_BgColor` / `_BgOpacity` / `_Style` / `_Width` / `_Height` | The caption band's styling and placement, exactly the same set every other text role has. **Blank/absent = the sidebar defaults** | `56` / `#FFFFFF` |
 | `GIF_X` / `GIF_Y` | **Top-left corner** of the gif box, per row. Rounded down to an even pixel so the chroma planes stay aligned. **Blank/absent = the sidebar default** | `60` / `560` |
 | `GIF_Width` / `GIF_Height` | Size of the gif box. Each gif is **contain-fitted** into it — scaled up or down until one side touches the edge, never cropped and never stretched, so the box sets the gif's size whatever the source resolution. **Blank/absent = the sidebar default** | `360` / `360` |
 | `GIF_Fade_Start` / `GIF_Fade_Duration` | Fade-in timing for the gif layer, in **seconds**. Applies to the first gif only. **Blank/absent = the sidebar default (0/0 = visible immediately)** | `0.5` / `0.5` |
@@ -459,6 +464,39 @@ The music pool has its own source selector too, and it is the only one that read
 out of Drive — a folder of MP3s is invisible to the clip, gif and background-video selectors,
 and a folder of MP4s is invisible to this one. Two options, same as the gifs: upload, or a
 single pooled Drive folder (downloaded straight into `assets/music/`).
+
+### Voiceover and timed captions
+
+Turn on **Speak the script and caption it on screen** in the sidebar. Each row's
+`Voiceover` text is read aloud by [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) —
+locally, on the VM's own CPU, with no API and no per-character cost — and the words appear
+on screen a few at a time as they are spoken.
+
+**Nothing has to be timed by hand.** Tools like CapCut run speech recognition over finished
+audio to work out when each word was said. We do not have to: the audio is *generated* here,
+and Kokoro returns the start and end time of every word as part of producing it. So the
+captions are exact rather than inferred, and there is no separator to type and no split to
+mark up anywhere.
+
+What that means in practice:
+
+* **Rows without a `Voiceover` cell** draw from the script pool you upload on the Generate
+  page — dealt round-robin, so the spread across a batch is even. No pool, no narration:
+  the row renders exactly as it does today.
+* **Voices rotate.** Pick several in the sidebar and rows are dealt across them, so one
+  posting folder is not all the same narrator. A `Voiceover_Voice` cell pins a row.
+* **A script longer than the promo makes the video longer.** The promo loops until the
+  narration finishes rather than the sentence being cut off. Turn *Loop the promo if the
+  script is longer* off to keep the old behaviour — the row is then warned that its
+  narration was trimmed.
+* **The other audio ducks.** The promo's own sound and the music bed drop while the voice
+  is talking and come back between phrases. Measured at about 18 dB with the default
+  strength. Turn ducking off to mix at flat levels instead.
+* **Synthesis happens once per unique script, before any row renders.** A 16,000-video batch
+  dealt from a 60-script pool does 60 syntheses, not 16,000 — and none of it happens inside
+  the render pool.
+* **It is an enhancement, never a failure.** If the voice model is missing or a line cannot
+  be synthesized, that row renders silent and the batch carries on.
 
 ### What to expect from the audio features
 

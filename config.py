@@ -167,6 +167,72 @@ FFMPEG_THREADS = _int("BVG_FFMPEG_THREADS", 0)
 FFMPEG_DECODE_THREADS = _int("BVG_FFMPEG_DECODE_THREADS", 1)
 
 
+# --------------------------------------------------------------------------- voiceover
+
+# Spoken script + timed on-screen captions (see the speech/ package). Off by
+# default: the feature needs Kokoro installed, which the dev venv's Python 3.14
+# cannot take, and a batch that silently started narrating would be a surprise.
+VOICE_ENABLED = _bool("BVG_VOICE_ENABLED", False)
+
+# Kokoro language code. 'a'/'b' are American/British English; anything else
+# needs the matching misaki extra installed as well, so it is not offered in
+# the sidebar.
+VOICE_LANG = _str("BVG_VOICE_LANG", "a")
+
+# Voices the batch rotates through. Rows are dealt across this list so one
+# posting queue does not read as a single narrator; a row's Voiceover_Voice
+# cell overrides it. See speech/pool.py for why the rotation is per-script.
+VOICE_SET = _list("BVG_VOICE_SET", "af_heart,am_michael,bf_emma")
+VOICE_SPEED = _float("BVG_VOICE_SPEED", 1.0)
+
+# Leading silence, baked into the wav rather than applied with adelay, so the
+# voice track always starts at t=0 and the FFmpeg audio graph needs no delay
+# filter. A moment of promo before the narration starts reads far better than
+# a voice that begins on frame one.
+VOICE_LEAD_IN = _float("BVG_VOICE_LEAD_IN", 0.4)
+
+# Voice level in the final mix. Deliberately below 1.0: amix runs with
+# normalize=0, which is a pure SUM, so the existing promo+music legs already
+# reach 1.0 between them and a voice at full scale would clip on loud material.
+# The alimiter on [aout] is the backstop, this is the headroom.
+VOICE_GAIN = _float("BVG_VOICE_GAIN", 0.9)
+
+# Ducking: drop the promo/music bed under the narration. Done with
+# sidechaincompress, which listens to the voice itself, rather than a volume
+# filter gated on the beat timings — a gated volume steps instantaneously and
+# the click was measured at 36x the baseline sample delta.
+VOICE_DUCK = _bool("BVG_VOICE_DUCK", True)
+VOICE_DUCK_THRESHOLD = _float("BVG_VOICE_DUCK_THRESHOLD", 0.03)
+VOICE_DUCK_RATIO = _float("BVG_VOICE_DUCK_RATIO", 8.0)
+
+# When the script runs longer than the promo, loop the promo until the script
+# finishes instead of cutting the narration mid-sentence. This makes the RENDER
+# LENGTH max(promo, voice) rather than the promo alone — see
+# VideoGenerator._render_duration, which every duration-dependent layer reads.
+VOICE_LOOP_PROMO = _bool("BVG_VOICE_LOOP_PROMO", True)
+
+# Caption beats: how the word timings are grouped into on-screen text. The
+# defaults are the TikTok look — a few words at a time. BEAT_MAX caps the PNG
+# count per row, which is Pillow work inside the 16-wide render pool.
+BEAT_MAX_WORDS = _int("BVG_BEAT_MAX_WORDS", 4)
+BEAT_MAX_CHARS = _int("BVG_BEAT_MAX_CHARS", 28)
+BEAT_MIN_DURATION = _float("BVG_BEAT_MIN_DURATION", 0.45)
+BEAT_MAX = _int("BVG_BEAT_MAX", 120)
+
+# Parallel synthesis workers in the pre-render voice stage. Separate processes,
+# each pinned to one torch thread. This never runs inside the render pool: 16
+# parallel FFmpeg processes on this box have already been OOM-killed once, and
+# a PyTorch model in each render thread would repeat it.
+VOICE_WORKERS = _int("BVG_VOICE_WORKERS", 4)
+
+# Default vertical anchor for the caption band, in canvas pixels (0 = let the
+# auto-placer decide, like any other text). A lower third by default and NOT
+# auto-placed, because auto-placement is randomised per row: a caption that
+# landed somewhere different in every video of a folder would read as a fault.
+# A row's Screen_Text_X / Screen_Text_Y cells still win.
+SCREEN_TEXT_Y = _int("BVG_SCREEN_TEXT_Y", 1420)
+
+
 # --------------------------------------------------------------------------- email
 
 SMTP_HOST = _str("BVG_SMTP_HOST", "smtp.gmail.com")

@@ -12,12 +12,32 @@ FROM python:3.12-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core supervisor \
+       espeak-ng \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
+# PyTorch FIRST, and from the CPU index, or the voiceover dependency drags in
+# the default CUDA wheel: ~2.5 GB of nvidia-* libraries that cannot be used
+# here at all, because every machine this runs on encodes with libx264 on the
+# CPU and has no GPU. Installing it up front leaves the requirements install
+# below seeing torch already satisfied.
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
+        "torch>=2.5"
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Bake the Kokoro voice model into the image. Fetching it on first use would
+# mean a 16,000-video job racing sixteen render threads for the same file, and
+# a render that fails whenever the network does. The weights come from Hugging
+# Face rather than PyPI, so pip cannot do it. Non-fatal: speech/synth.py falls
+# back to downloading on demand, and to 'voiceover unavailable' after that.
+RUN python -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('hexgrad/Kokoro-82M', allow_patterns=['*.pth','*.json','voices/*']); \
+print('kokoro weights cached')" \
+    || echo "WARNING: Kokoro weights not pre-cached; the first voiceover job fetches them"
 
 # Every top-level module, as a glob rather than a hand-maintained list.
 # Listing them individually is how batching.py got left out of the image: it
@@ -28,6 +48,7 @@ COPY *.py ./
 COPY jobs/ jobs/
 COPY integrations/ integrations/
 COPY captions/ captions/
+COPY speech/ speech/
 COPY scrapers/ scrapers/
 COPY pages/ pages/
 COPY fonts/ fonts/
@@ -56,7 +77,8 @@ mods = ['config','workspace','results','batching','packing','video_generator', \
         'preview_editor','jobs.store','jobs.worker','jobs.runners.render', \
         'jobs.runners.scrape','jobs.runners.captions','integrations.drive', \
         'integrations.mailer','captions.naming','captions.pool', \
-        'captions.assign','scrapers.tiktok','tools.zip_drive_tk']; \
+        'captions.assign','scrapers.tiktok','tools.zip_drive_tk', \
+        'jobs.runners.voice','speech.beats','speech.pool','speech.synth']; \
 [importlib.import_module(m) for m in mods]; \
 print('import check OK:', len(mods), 'modules')"
 

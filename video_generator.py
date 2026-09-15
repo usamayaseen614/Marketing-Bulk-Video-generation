@@ -36,6 +36,8 @@ import pandas as pd
 from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 import config
+from speech import synth as speech_synth
+from speech.beats import group_text, group_words
 
 logger = logging.getLogger("video_generator")
 
@@ -217,6 +219,12 @@ MAX_TOTAL_FFMPEG_INPUTS = 60
 # and gif boxes are top-left instead). The box is centred on them, so adding one
 # to an existing sheet never moves the text.
 TEXT_ROLES = ["Headline", "Subheading", "Footer"]
+# The timed caption band is a text element in every way that matters (same
+# TextSpec, same _paint_text, same fonts and styles), but it is deliberately
+# NOT in TEXT_ROLES: that list drives the per-promo text-grid sheet format
+# (text_grids.ROLES) and the sidebar's per-role fit-box controls, and the
+# caption's text comes from the spoken script rather than from either.
+SCREEN_TEXT_ROLE = "Screen_Text"
 TEXT_BOX_COLUMNS = [f"{role}_{dim}"
                     for role in TEXT_ROLES for dim in ("Width", "Height")]
 # Bounds of the fit search. The floor is the readability guard: below it the
@@ -254,6 +262,21 @@ OPTIONAL_COLUMNS = [
     "Footer", "Footer_Size", "Footer_Color", "Footer_Opacity",
     "Footer_X", "Footer_Y", "Footer_Font",
     "Footer_BgColor", "Footer_BgOpacity", "Footer_Style", "Footer_Subliminal",
+    # Spoken script + timed caption band. `Voiceover` is what is SPOKEN;
+    # `Screen_Text` overrides what is SHOWN. Either works alone: a Voiceover on
+    # its own karaokes its own words, a Screen_Text on its own is silent.
+    #
+    # The word "caption" is avoided on purpose. A `Caption` column already
+    # exists and means something else entirely — captions/assign.py fills it
+    # with the Gemini post text, and render_row NAMES THE OUTPUT FILE from it.
+    #
+    # No Screen_Text_Subliminal: hiding parts of a caption that is only on
+    # screen for a beat would leave nothing readable.
+    "Voiceover", "Voiceover_Voice", "Voiceover_Speed",
+    "Screen_Text", "Screen_Text_Size", "Screen_Text_Color", "Screen_Text_Opacity",
+    "Screen_Text_X", "Screen_Text_Y", "Screen_Text_Font",
+    "Screen_Text_BgColor", "Screen_Text_BgOpacity", "Screen_Text_Style",
+    "Screen_Text_Width", "Screen_Text_Height",
 ]
 ALL_COLUMNS = REQUIRED_COLUMNS + OPTIONAL_COLUMNS
 
@@ -327,6 +350,10 @@ RANDOM_SIZE_RANGES = {
     "Headline": (56, 88),
     "Subheading": (34, 52),
     "Footer": (24, 36),
+    # Captions are read at a glance while they are spoken, so they sit between
+    # the headline and the subheading and vary little — a caption band that
+    # changed size every row would read as a rendering fault, not a style.
+    SCREEN_TEXT_ROLE: (52, 60),
 }
 RANDOM_TEXT_COLORS = [
     "#FFFFFF", "#FFD700", "#FFE066", "#FF6B6B", "#FF9F43", "#4ECDC4",
@@ -919,6 +946,14 @@ class RenderConfig:
     subheading_box_h: int = 0
     footer_box_w: int = 0
     footer_box_h: int = 0
+    # Same knob for the caption band. `_resolve_positions` reads these through
+    # getattr(cfg, f"{role.lower()}_box_w"), so the names are load-bearing.
+    screen_text_box_w: int = 0
+    screen_text_box_h: int = 0
+    # Default anchor for the caption band (0 = auto-place like any other text).
+    # See config.SCREEN_TEXT_Y for why this one has a default and the others
+    # do not.
+    screen_text_y: int = field(default_factory=lambda: config.SCREEN_TEXT_Y)
     # Default translucency for every text and every highlight box, as a 0..1
     # factor (1.0 = fully opaque). A row's <Role>_Opacity / <Role>_BgOpacity
     # cell overrides it per element, and both MULTIPLY any alpha already in the
@@ -962,6 +997,24 @@ class RenderConfig:
     subliminal_phase: int = 0
     subliminal_granularity: str = "word"   # "word" | "char"
     subliminal_all_intra: bool = True
+    # ---- voiceover + timed captions (see the speech/ package and config.py,
+    # which documents what each of these is for and why the defaults are what
+    # they are). Off by default; every one of these is a no-op while it is.
+    voice_enabled: bool = False
+    voice_lang: str = field(default_factory=lambda: config.VOICE_LANG)
+    voice_set: list = field(default_factory=lambda: list(config.VOICE_SET))
+    voice_speed: float = field(default_factory=lambda: config.VOICE_SPEED)
+    voice_lead_in: float = field(default_factory=lambda: config.VOICE_LEAD_IN)
+    voice_gain: float = field(default_factory=lambda: config.VOICE_GAIN)
+    voice_duck: bool = field(default_factory=lambda: config.VOICE_DUCK)
+    voice_duck_threshold: float = field(
+        default_factory=lambda: config.VOICE_DUCK_THRESHOLD)
+    voice_duck_ratio: float = field(default_factory=lambda: config.VOICE_DUCK_RATIO)
+    voice_loop_promo: bool = field(default_factory=lambda: config.VOICE_LOOP_PROMO)
+    beat_max_words: int = field(default_factory=lambda: config.BEAT_MAX_WORDS)
+    beat_max_chars: int = field(default_factory=lambda: config.BEAT_MAX_CHARS)
+    beat_min_duration: float = field(default_factory=lambda: config.BEAT_MIN_DURATION)
+    beat_max: int = field(default_factory=lambda: config.BEAT_MAX)
     # Seconds per row before a render is killed. Env-backed so it can be
     # tuned without a rebuild — see config.RENDER_TIMEOUT.
     ffmpeg_timeout: int = field(default_factory=lambda: config.RENDER_TIMEOUT)
@@ -1017,6 +1070,12 @@ class RowSpec:
     headline: TextSpec
     subheading: TextSpec
     footer: TextSpec
+    # The timed caption band. Defaulted rather than required so every existing
+    # caller that builds a RowSpec by hand (tests, the editor) keeps working.
+    # Its `.text` is swapped per beat while the PNG timeline is written, which
+    # is why the size is pinned once up front — see _caption_beat_images.
+    screen_text: TextSpec = field(default_factory=lambda: TextSpec(
+        text="", role=SCREEN_TEXT_ROLE, size=None, color=None, x=None, y=None))
     warnings: list[str] = field(default_factory=list)
     # Per-row video box, in canvas pixels; X/Y are the box's TOP-LEFT corner.
     # Filled from the row's Video_X/Video_Y/Video_Width/Video_Height cells when
@@ -1092,6 +1151,17 @@ class RowSpec:
     # to vary the seed) renders N identical videos. None = unknown, which keeps
     # the historical content-only seed (used by ad-hoc callers/tests).
     seed_salt: Optional[int] = None
+    # --- voiceover (speech/ package). `voiceover` is the script as typed; the
+    # rest are filled by the pre-render voice stage via attach_voice(), because
+    # synthesis must never happen inside the 16-wide render pool.
+    voiceover: str = ""
+    voice_name: Optional[str] = None
+    voice_speed: Optional[float] = None
+    voice_wav: Optional[Path] = None
+    voice_duration: float = 0.0
+    # Resolved caption beats, [(start, end, text), ...]. Empty = no caption
+    # layer, which is also the fallback whenever synthesis failed.
+    beats: Optional[list] = None
     resolved: bool = False
 
     @classmethod
@@ -1127,6 +1197,11 @@ class RowSpec:
             headline=text_spec("Headline"),
             subheading=text_spec("Subheading"),
             footer=text_spec("Footer"),
+            screen_text=text_spec(SCREEN_TEXT_ROLE),
+            voiceover=_clean_str(row.get("Voiceover")),
+            voice_name=_clean_str(row.get("Voiceover_Voice")) or None,
+            voice_speed=_parse_opt_float(row.get("Voiceover_Speed"), warnings,
+                                         "Voiceover_Speed"),
             video_x=_parse_opt_int(row.get("Video_X"), warnings, "Video_X"),
             video_y=_parse_opt_int(row.get("Video_Y"), warnings, "Video_Y"),
             video_w=_parse_opt_int(row.get("Video_Width"), warnings, "Video_Width"),
@@ -1167,7 +1242,7 @@ class RowSpec:
 
     @property
     def text_elements(self) -> list[TextSpec]:
-        return [self.headline, self.subheading, self.footer]
+        return [self.headline, self.subheading, self.footer, self.screen_text]
 
     def placement_seed(self) -> int:
         """Stable per-row seed so randomized styling/placement varies across
@@ -1175,7 +1250,12 @@ class RowSpec:
         final render and re-running a batch yields identical layouts. (Only
         intrinsic row content goes in; sizes/colors may themselves be drawn
         from this seed.)"""
-        key = "|".join([self.bg_image] + [t.text for t in self.text_elements])
+        # Pinned to the original three texts on purpose. Folding the caption
+        # band in here would append a trailing "|" for every sheet that has no
+        # script, changing the CRC and silently re-randomising the colors,
+        # sizes and auto-placement of every row ever rendered.
+        key = "|".join([self.bg_image, self.headline.text,
+                        self.subheading.text, self.footer.text])
         seed = zlib.crc32(key.encode("utf-8"))
         # Fold in the row's position so identical-content rows still diverge.
         # Chained through crc32 (deterministic), and only when a row number is
@@ -1213,8 +1293,14 @@ class VideoGenerator:
         gif_paths: Optional[list] = None,
         bg_video_paths: Optional[list] = None,
         music_paths: Optional[list] = None,
+        voice_cache_dir: Optional[Path] = None,
     ):
         self.config = config
+        # Where the pre-render voice stage left its synthesized wavs. render_row
+        # looks a row up by the SAME content hash the stage wrote, so there is no
+        # manifest to thread through the job — and a cache miss simply renders
+        # the row silent.
+        self.voice_cache_dir = Path(voice_cache_dir) if voice_cache_dir else None
         self.video_path = Path(video_path)
         # Optional CTA video: a list of slots (positions 1..N that play in fixed
         # order); each slot is a pool of sample clips, one of which is chosen per
@@ -1914,6 +2000,20 @@ class VideoGenerator:
             else:
                 self._wrap_text(element)
 
+        # The caption band gets a fixed anchor rather than a random one. Every
+        # other text is auto-placed per row when its X/Y cells are blank, which
+        # is a deliberate variety feature — but a caption that landed in a
+        # different place in every video of a posting folder reads as a
+        # rendering fault, not as variety. Set before the explicit/pending split
+        # below so the band is treated as explicitly placed and reserves its
+        # space. A row's own Screen_Text_X/Y cells still win.
+        caption = spec.screen_text
+        if caption.text and cfg.screen_text_y:
+            if caption.y is None:
+                caption.y = int(cfg.screen_text_y)
+            if caption.x is None:
+                caption.x = CANVAS_W // 2
+
         explicit_rects: list[tuple] = []
         pending: list[tuple[TextSpec, float, float]] = []
         for element in spec.text_elements:
@@ -2124,7 +2224,7 @@ class VideoGenerator:
         gracefully (leaves the sequence as-is, so the last frame holds) whenever
         a duration can't be measured; the muxer's -shortest trims the final
         overshoot clip."""
-        main_dur = self._probe_duration(self.video_path)
+        main_dur = self._render_duration(spec)
         if main_dur is None:
             spec.warnings.append(
                 "CTA video: couldn't measure the main video's duration; the side "
@@ -2200,7 +2300,7 @@ class VideoGenerator:
         sharing one would lock two layers to the same picks in every row.
         """
         rng = random.Random(spec.placement_seed() ^ salt)
-        target = self._probe_duration(self.video_path)
+        target = self._render_duration(spec)
         if target is None:
             spec.warnings.append(
                 f"{label}: couldn't measure the promo video's duration, so the "
@@ -2314,7 +2414,7 @@ class VideoGenerator:
         # The chunk boundaries are cut at fractions of the measured length, so
         # without a measurement there is nothing to cut. Warn rather than guess:
         # a silent no-op would read as "the checkbox does nothing".
-        if self._probe_duration(self.video_path) is None:
+        if self._render_duration(spec) is None:
             spec.warnings.append(
                 "Split audio: couldn't measure the promo's duration, so the "
                 "audio can't be cut into chunks — left at normal speed.")
@@ -2420,6 +2520,15 @@ class VideoGenerator:
         canvas = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
         for element in spec.text_elements:
             if not element.text:
+                continue
+            if element.role == SCREEN_TEXT_ROLE and spec.beats:
+                # The caption band is motion, not a still: its words change with
+                # the narration, so they ship as the timed frames
+                # _caption_layers builds and are deliberately absent here. This
+                # keeps the always-on overlay correct by construction —
+                # otherwise it would bake in whichever beat happened to be
+                # sitting in `.text` (attach_voice leaves the LONGEST one there
+                # so the type is sized for the worst case).
                 continue
             layer = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
             if element.subliminal:
@@ -2739,6 +2848,171 @@ class VideoGenerator:
         preview can honestly show."""
         return spec.gif_clips[0]
 
+    # ------------------------------------------------- timed captions + voice
+
+    def attach_voice(self, spec: RowSpec, entry: Optional[dict] = None) -> None:
+        """Bind a synthesized voiceover to a row and resolve its caption beats.
+
+        MUST run before _resolve_positions (render_row calls it straight after
+        from_row), for two reasons: the render length is max(promo, voice) and
+        every duration-dependent layer is dealt against it, and the caption's
+        type size is resolved once — against the LONGEST beat, so the band does
+        not resize itself every time the words change.
+
+        `entry` is what speech.synth.synthesize returned, or None. None is not
+        an error: the row renders silent, and a row carrying a Screen_Text still
+        gets captions, paced for reading."""
+        cfg = self.config
+        kw = {"max_words": cfg.beat_max_words, "max_chars": cfg.beat_max_chars,
+              "min_duration": cfg.beat_min_duration, "max_beats": cfg.beat_max}
+        shown = spec.screen_text.text.strip()
+        spoken = (spec.voiceover or "").strip()
+
+        if entry:
+            spec.voice_wav = Path(entry["wav"])
+            spec.voice_duration = float(entry.get("duration") or 0.0)
+            if shown and shown != spoken:
+                # Different words on screen than in the ear: there is nothing to
+                # align against, so the beats are apportioned across the speech
+                # by character count. Say so — this is the one path where the
+                # captions are an approximation rather than the model's own
+                # timings.
+                spec.beats = group_text(shown, spec.voice_duration, **kw)
+                spec.warnings.append(
+                    "Screen_Text differs from Voiceover, so the captions are "
+                    "spread evenly across the narration rather than synced to "
+                    "it word by word. Leave Screen_Text blank to sync exactly.")
+            else:
+                spec.beats = group_words(entry.get("words") or (), **kw)
+        elif shown:
+            # Silent captions: no narration to time against, so they are paced
+            # across the promo itself.
+            spec.beats = group_text(shown, self._probe_duration(self.video_path)
+                                    or 0.0, **kw)
+        else:
+            spec.beats = []
+
+        if spec.beats and not cfg.voice_loop_promo:
+            promo = self._probe_duration(self.video_path)
+            if promo and spec.voice_duration > promo:
+                spec.warnings.append(
+                    f"The script runs {spec.voice_duration:.1f}s but the promo "
+                    f"is {promo:.1f}s, and looping the promo to fit is off — "
+                    "the narration and its captions are cut short.")
+
+        # Pin the type against the longest beat so _resolve_positions sizes and
+        # places the band for the worst case. Every beat is then painted at that
+        # size, and a short beat simply centres a smaller block on the same
+        # anchor instead of jumping a size larger.
+        spec.screen_text.text = (
+            max((b[2] for b in spec.beats), key=len) if spec.beats else "")
+
+    def _voice_entry(self, spec: RowSpec) -> Optional[dict]:
+        """This row's narration from the pre-rendered voice cache, or None.
+
+        A lookup, never a synthesis. Rows render 16-wide in a thread pool on a
+        box that has already OOM-killed sixteen parallel FFmpegs; a PyTorch
+        model loaded into each of those threads would repeat it. The voice stage
+        in jobs/runners/pipeline.py fills this cache before a single row is
+        rendered, and a miss just renders the row silent."""
+        cfg = self.config
+        if not (cfg.voice_enabled and self.voice_cache_dir and spec.voiceover):
+            return None
+        voice = spec.voice_name or (cfg.voice_set[0] if cfg.voice_set
+                                    else speech_synth.DEFAULT_VOICE)
+        speed = (spec.voice_speed if spec.voice_speed is not None
+                 else cfg.voice_speed)
+        return speech_synth.load_cached(spec.voiceover, voice, speed,
+                                        self.voice_cache_dir, cfg.voice_lang)
+
+    def _caption_layers(self, spec: RowSpec) -> tuple:
+        """(frames, static) where frames is [(start, end, image), ...] — one
+        full-canvas RGBA frame per beat, the static texts with that beat's
+        caption composited over them — and `static` is the texts-only frame
+        used for the gaps, the lead-in and the tail.
+
+        Full canvas rather than a cropped tile because these frames REPLACE the
+        static overlay input (see build_ffmpeg_command) — the headline,
+        subheading and footer live in this same stream and have to be present in
+        every entry, or they would blink out whenever a caption is on screen.
+
+        The static texts are painted once and copied, not repainted per beat:
+        a 20-beat script would otherwise re-run _paint_text eighty times inside
+        the 16-wide render pool."""
+        beats = spec.beats or []
+        if not beats:
+            return [], None
+        self._resolve_positions(spec)
+        element = spec.screen_text
+        if not element.text:
+            return [], None
+
+        # The gap/lead-in/tail frame, and the base every beat composites onto.
+        # build_overlay_image omits the caption band whenever beats exist, so
+        # this is the static texts alone.
+        static = self.build_overlay_image(spec, include_cta=False)
+
+        out = []
+        for start, end, text in beats:
+            beat = replace(element, text=text)
+            # Mirrors _resolve_positions exactly: a boxed caption lets the box
+            # drive the type (so the size does follow the words, which is what
+            # a box means), an unboxed one keeps the pinned size.
+            if beat.box_w and beat.box_h:
+                self._fit_text_box(beat, [])
+            else:
+                self._wrap_text(beat)
+            layer = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
+            self._paint_text(layer, beat.x, beat.y, beat, "full")
+            out.append((start, end, Image.alpha_composite(static, layer)))
+        return out, static
+
+    @staticmethod
+    def _concat_entry(path: Path, duration: Optional[float] = None) -> str:
+        """One entry of an FFmpeg concat-demuxer list.
+
+        Single quotes are not decoration. Outside them the demuxer treats a
+        backslash as an escape character, so a Windows path loses its
+        separators, and it stops the name at the first space — and this repo's
+        own working directory is `D:\\New folder (2)\\...`. Inside single quotes
+        the parser copies verbatim, and a literal apostrophe closes-escapes-
+        reopens in the shell style."""
+        quoted = path.name.replace("'", "'\\''")
+        line = f"file '{quoted}'\n"
+        return line + (f"duration {duration:.3f}\n" if duration is not None else "")
+
+    def _write_caption_list(self, layers, static_png: Path, list_path: Path,
+                            beat_paths: list, tail_until: float) -> Path:
+        """Write the caption timeline as a concat-demuxer list.
+
+        Entries are BARE FILENAMES, resolved by the demuxer against the list
+        file's own directory — every PNG is written next to it. That sidesteps
+        both the backslash mangling above and a long-standing Windows bug where
+        a drive-letter absolute path gets prepended to itself.
+
+        The trailing pair is load-bearing. The concat demuxer IGNORES the last
+        entry's duration, so without a tail the closing beat's stream ends early
+        and overlay's repeatlast FREEZES it on screen for the rest of the video
+        (measured). The tail is the static-texts frame, which both clears the
+        last caption and keeps the headline/subheading/footer up — which is also
+        why this layer must NOT use eof_action=pass, the way the subliminal
+        layer does."""
+        parts = []
+        # No separate lead-in entry: the narration's leading silence is baked
+        # into the wav, so beat 0 already starts after it and the ordinary gap
+        # handling below covers the head. A silent caption timeline starts at 0
+        # and simply gets no head gap.
+        cursor = 0.0
+        for (start, end, _image), png in zip(layers, beat_paths):
+            if start - cursor > 0.001:
+                parts.append(self._concat_entry(static_png, start - cursor))
+            parts.append(self._concat_entry(png, max(0.04, end - start)))
+            cursor = end
+        parts.append(self._concat_entry(static_png, max(1.0, tail_until - cursor)))
+        parts.append(self._concat_entry(static_png))   # the ignored-duration slot
+        list_path.write_text("".join(parts), encoding="utf-8")
+        return list_path
+
     # ------------------------------------------------------------- FFmpeg
 
     # Every `[<n>:v]` reference in a filter_complex.
@@ -2785,10 +3059,154 @@ class VideoGenerator:
                 f"out of range={stray}). Refusing to render rather than produce "
                 "a video with the wrong clips in it.")
 
+    def _mix_with_voice(self, aparts: list, legs: list, voice_i: int,
+                        main_dur: Optional[float], spec: RowSpec) -> str:
+        """Fold the voiceover in, ducking everything else under it.
+
+        The obvious implementation — widen `amix=inputs=2` to three and
+        sidechain each background leg — is wrong in three separate ways, each of
+        which was measured rather than guessed:
+
+          * sidechaincompress ENDS AT THE SHORTER of its two inputs. Silently:
+            exit 0, nothing on stderr even at -v error. An 8s voiceover cut a
+            20s bed to 8.00s. That is what the apad BEFORE the asplit is for.
+          * amix runs with normalize=0, which is a pure SUM (measured: 1 leg
+            -22.0 dB, 2 legs -16.0, 3 legs -12.4). The promo and bed legs are
+            already complementary and reach full scale between them, so a third
+            leg at 1.0 clips on loud material — hence voice_gain below 1.0 and
+            the alimiter on the way out.
+          * `duration=first` only anchors the mix while the promo leg is first,
+            which `legs` does not guarantee. On a silent promo legs[0] is the
+            bed, whose apad lives only in the single-leg branch below, and the
+            audio was measured dying at 12s under a 30s video.
+
+        So: sum the background legs, pin THAT to the render length, duck it
+        once, and leave the final amix at two inputs."""
+        cfg = self.config
+        gain = max(0.0, min(float(cfg.voice_gain or 1.0), 1.0))
+        # A bare apad pads forever; the bounded form both fills the gap and
+        # terminates on its own. With no measurable duration there is nothing to
+        # pin to, so ducking is skipped rather than risking the unbounded form.
+        pad = f",apad=whole_dur={main_dur:.3f}" if main_dur else ""
+        if not main_dur:
+            spec.warnings.append(
+                "Voiceover: the promo's duration could not be measured, so the "
+                "narration is mixed flat, without ducking.")
+
+        # One background label, pinned to the render length. duration=longest
+        # here (not first) because this inner mix is pinned by the apad that
+        # follows it, which removes the leg-order fragility entirely instead of
+        # depending on it. Every leg is finite, so longest cannot run away.
+        if len(legs) >= 2:
+            aparts.append("".join(legs) + f"amix=inputs={len(legs)}:duration=longest"
+                          f":dropout_transition=0:normalize=0{pad}[abg];")
+            background = "[abg]"
+        elif legs:
+            # aformat even on the single leg. sidechaincompress does NOT
+            # force-match channel layouts between its main and its sidechain,
+            # and a promo's own track is very often mono against the voice's
+            # stereo — leaving that to libavfilter's auto-negotiation is the
+            # kind of thing that differs between FFmpeg builds, and the binary
+            # here is whatever `shutil.which("ffmpeg")` finds on the VM.
+            aparts.append(f"{legs[0]}{MUSIC_FORMAT}{pad}[abg];")
+            background = "[abg]"
+        else:
+            background = ""
+
+        voice = (f"[{voice_i}:a]{MUSIC_FORMAT},asetpts=PTS-STARTPTS,"
+                 f"volume={gain:.4f}{pad}")
+
+        if not background:
+            # Silent promo and no bed: there is nothing to duck against.
+            spec.warnings.append(
+                "Voiceover: this row has no other audio, so the narration plays "
+                "on its own.")
+            aparts.append(f"{voice}[aout]")
+            return "[aout]"
+
+        if cfg.voice_duck and main_dur:
+            # asplit so the voice both KEYS the compressor and stays audible —
+            # sidechaincompress takes two inputs and returns one. Note it
+            # operates on labels, not on [N:a], so it cannot disturb
+            # _check_filter_inputs' exactly-once count.
+            aparts.append(f"{voice},asplit[avoice][avsc];")
+            threshold = max(0.0, min(float(cfg.voice_duck_threshold or 0.03), 1.0))
+            ratio = max(1.0, min(float(cfg.voice_duck_ratio or 8.0), 20.0))
+            aparts.append(
+                f"{background}[avsc]sidechaincompress="
+                f"threshold={threshold:.4f}:ratio={ratio:.2f}"
+                ":attack=20:release=300:level_sc=4:detection=rms:link=average"
+                "[abgd];")
+            background = "[abgd]"
+        else:
+            aparts.append(f"{voice}[avoice];")
+
+        # alimiter is the only thing between a loud promo plus a loud voice and
+        # hard clipping, because normalize=0 means these two genuinely add.
+        #
+        # The closing apad pins the FINISHED mix, and it is not belt-and-braces:
+        # sidechaincompress was measured ending its output ~0.4s early inside
+        # this graph (a 6.0s render came out at 5.62s), and `-shortest` then
+        # trimmed the PICTURE to match. Padding each input is not enough —
+        # whatever a filter drops downstream has to be refilled here. Bounded by
+        # whole_dur, so it still cannot run away, and apad never trims, so a mix
+        # that is already long enough passes through untouched.
+        tail = f",apad=whole_dur={main_dur:.3f}" if main_dur else ""
+        aparts.append(f"{background}[avoice]amix=inputs=2:duration=first"
+                      ":dropout_transition=0:normalize=0,"
+                      f"alimiter=limit=0.95{tail}[aout]")
+        return "[aout]"
+
+    @staticmethod
+    def _check_input_bounds(cmd: list, audio_active: bool) -> None:
+        """Assert every LOOPING input carries an input-side `-t`.
+
+        This guards a measured, silent failure rather than a theoretical one. A
+        `-loop 1` still is an infinite stream; with the video sink alone,
+        overlay's framesync holds it in step. Add a SECOND sink — the audio
+        chain — and FFmpeg's scheduler alternates between them and lets the
+        stills run ahead into unbounded FIFOs. Nine stills plus a music input
+        measured 18.8 GB RSS with the encoder frozen at frame 13, and sixteen of
+        those in parallel is the OOM kill that surfaces as "FFmpeg exited with
+        code -9" with an EMPTY stderr.
+
+        It matters much more now than it did. The audio graph used to be opt-in
+        per job — without music or split-audio a row took `-map promo:a?` and
+        never built one. A voiceover puts EVERY row of the batch on the two-sink
+        shape, so the one path where the bounds go missing (an unprobeable promo
+        makes still_args and clip_args return nothing at all) would take the box
+        down rather than spoil one row. Refusing here costs a failed row and
+        names the cause; the alternative is diagnosed from a dmesg.
+
+        Same posture as _check_filter_inputs: assert the invariant instead of
+        trusting it, because the failure mode has no error message of its own."""
+        if not audio_active:
+            return
+        unbounded = []
+        previous = 0
+        for index, token in enumerate(cmd):
+            if token != "-i":
+                continue
+            options = cmd[previous:index]
+            if ("-loop" in options or "-stream_loop" in options
+                    or "concat" in options) and "-t" not in options:
+                unbounded.append(cmd[index + 1] if index + 1 < len(cmd) else "?")
+            previous = index + 2
+        if unbounded:
+            raise RuntimeError(
+                "Refusing to render: this row mixes audio with "
+                f"{len(unbounded)} unbounded looping input(s) "
+                f"({', '.join(Path(u).name for u in unbounded)}). That is the "
+                "shape measured at 18.8 GB RSS with a frozen encoder, and at "
+                "16 parallel renders it is an OOM kill with no error message. "
+                "The usual cause is a promo whose duration FFmpeg cannot read — "
+                "re-export it as a normal MP4.")
+
     def build_ffmpeg_command(self, spec: RowSpec, base_png: Path,
                              overlay_png: Path, cta_png: Optional[Path],
                              out_path: Path,
-                             sub_layers: Optional[list] = None) -> list[str]:
+                             sub_layers: Optional[list] = None,
+                             cap_list: Optional[Path] = None) -> list[str]:
         """
         Single-pass composite. Filter graph explained:
 
@@ -2902,6 +3320,10 @@ class VideoGenerator:
         # a length mismatch would emit fewer -i than the graph references.
         if len(music_reps) != len(music):
             music_reps = (music_reps + [1] * len(music))[:len(music)]
+        # The voiceover wav, produced by the pre-render voice stage. Gated on
+        # include_audio like every other audio layer: a muted batch stays muted.
+        voice_wav = spec.voice_wav if cfg.include_audio else None
+        has_voice = bool(voice_wav and Path(voice_wav).is_file())
         sub_layers = sub_layers or []
         # These two are built together and stay aligned by construction, but a
         # mismatch here would be silent and expensive: zip() truncates, so the
@@ -2976,7 +3398,7 @@ class VideoGenerator:
         # ahead. The margin is slack for container-vs-stream duration rounding:
         # the base still feeds an overlay with shortest=1, so it must OUTLAST the
         # promo or the whole render would be truncated to the still.
-        still_dur = self._probe_duration(self.video_path)  # cached per path
+        still_dur = self._render_duration(spec)   # promo, or the voice if longer
         still_args = (["-t", f"{still_dur + 1.0:.3f}"] if still_dur else [])
 
         def clip_args(speed: float = 1.0) -> list:
@@ -3009,9 +3431,41 @@ class VideoGenerator:
             return add_input("-loop", "1", "-framerate", str(fps), *still_args,
                              "-i", str(path))
 
+        # The promo is the anchor and is normally finite. When a script outruns
+        # it, the promo LOOPS rather than the narration being cut off mid-word,
+        # which is what makes the render length max(promo, voice) — see
+        # _render_duration. The -t bounds the looped stream, so the extra laps
+        # cost decode work only up to the point the output ends.
+        promo_dur = self._probe_duration(self.video_path)
+        promo_args: list = []
+        if still_dur and promo_dur and still_dur > promo_dur + 0.05:
+            laps = max(1, math.ceil((still_dur + 1.0) / promo_dur))
+            promo_args = ["-stream_loop", str(laps - 1),
+                          "-t", f"{still_dur + 1.0:.3f}"]
+
         base_i = add_still(base_png)
-        promo_i = add_input("-i", str(self.video_path))
-        text_i = add_still(overlay_png)
+        promo_i = add_input(*promo_args, "-i", str(self.video_path))
+        # The text layer is either a still (no captions) or a concat-demuxer
+        # TIMELINE of full-canvas frames, one per caption beat. It is the SAME
+        # input slot either way, referenced exactly once as [text_i:v], at the
+        # same z — so the layers list, the chaining loop and the video side of
+        # _check_filter_inputs are untouched by this whole feature.
+        #
+        # It is also faster than the still it replaces: `-loop 1 -framerate 30`
+        # pushes 30 full-canvas RGBA frames a second into overlay's framesync
+        # for a layer that changes a handful of times, while the timeline emits
+        # one frame per beat (measured 25-35% quicker end to end).
+        #
+        # NEVER put -r or -framerate before this -i. A rate option overrides the
+        # demuxer's own timeline and collapses every entry to a single frame
+        # period, silently discarding every caption duration. -safe 0 is equally
+        # non-optional: the demuxer rejects unsafe names by default, and this
+        # project's own working directory has spaces and parentheses in it.
+        if cap_list is not None:
+            text_i = add_input("-f", "concat", "-safe", "0", *still_args,
+                               "-i", str(cap_list))
+        else:
+            text_i = add_still(overlay_png)
         cta_i = add_still(cta_png) if has_cta else None
         # Each CTA sample is bounded by its own speed: the filter graph below
         # replays this same per-clip speed with setpts, and the two must agree
@@ -3055,6 +3509,14 @@ class VideoGenerator:
         music_ix = ([add_input("-stream_loop", str(max(1, int(r)) - 1), *clip_args(),
                                "-i", str(p))
                      for p, r in zip(music, music_reps)] if has_music else [])
+        # The voiceover. Claimed after the music and BEFORE the background beds'
+        # budget calculation below, so the layer that is designed to give way
+        # absorbs this slot instead of a maxed-out row failing the 60-input
+        # ceiling outright. Never trimmed itself, on the music's reasoning: a
+        # dropped bed is cosmetic, a dropped voiceover is silence where the
+        # message was.
+        voice_ix = ([add_input(*clip_args(), "-i", str(voice_wav))]
+                    if has_voice else [])
         # Background beds, claimed like the gifs: -stream_loop N replays a clip
         # before decoding, which is what holds a short bed for the dwell floor.
         # Finite by construction — an unbounded -stream_loop -1 was measured
@@ -3093,7 +3555,8 @@ class VideoGenerator:
                 f"{MAX_TOTAL_FFMPEG_INPUTS} limit: {len(clips)} CTA clip(s), "
                 f"{len(gifs)} gif(s), {len(sub_layers)} subliminal layer(s), "
                 f"{len(music) if has_music else 0} music track(s), "
-                f"{len(bgvs) if has_bgv else 0} background video(s). "
+                f"{len(bgvs) if has_bgv else 0} background video(s), "
+                f"{len(voice_ix)} voiceover track(s). "
                 "Raise the gif dwell time so fewer gifs are needed, raise the "
                 "background-video or music dwell time, use fewer CTA clips, or "
                 "shorten the promo video.")
@@ -3306,8 +3769,8 @@ class VideoGenerator:
         tempos = self._split_audio_tempos(spec)
         aparts: list[str] = []
         audio_out = ""              # non-empty => map this label instead
-        if cfg.include_audio and (has_music or tempos):
-            main_dur = self._probe_duration(self.video_path)
+        if cfg.include_audio and (has_music or tempos or has_voice):
+            main_dur = self._render_duration(spec)
             legs: list[str] = []
             # Complementary split: music at v leaves the original at 1-v.
             vol = max(0.0, min(float(cfg.music_volume or 0.0), 1.0))
@@ -3370,7 +3833,10 @@ class VideoGenerator:
                     museq = "[mu0]"
                 aparts.append(f"{museq}volume={bed_vol:.4f}[abed];")
                 legs.append("[abed]")
-            if len(legs) == 2:
+            if has_voice:
+                audio_out = self._mix_with_voice(aparts, legs, voice_ix[0],
+                                                 main_dur, spec)
+            elif len(legs) == 2:
                 # normalize=0 or the weights stop meaning what they say — amix
                 # otherwise rescales by the number of live inputs. duration=first
                 # ends the mix with the promo leg, which apad has already pinned
@@ -3399,7 +3865,9 @@ class VideoGenerator:
         # highest referenced index equals n_inputs-1 does NOT: an injected
         # off-by-one in either direction passes it and still renders a different
         # video with exit 0.
-        self._check_filter_inputs(filter_complex, n_inputs, audio_only=music_ix)
+        self._check_filter_inputs(filter_complex, n_inputs,
+                                  audio_only=music_ix + voice_ix)
+        self._check_input_bounds(cmd, bool(audio_out))
 
         cmd += ["-filter_complex", filter_complex, "-map", "[out]"]
         if not cfg.include_audio:
@@ -3432,7 +3900,7 @@ class VideoGenerator:
         # (-map 1:a?). A silent or audio-disabled promo would otherwise run away,
         # so probe the duration and cap it explicitly. This also makes the
         # "whole video ends when the main video ends" contract exact.
-        main_dur = self._probe_duration(self.video_path)
+        main_dur = self._render_duration(spec)
         if main_dur:
             cmd += ["-t", f"{main_dur:.3f}"]
         if sub_layers and cfg.subliminal_all_intra:
@@ -3459,6 +3927,11 @@ class VideoGenerator:
         hashtags, length caps) lives with the caller, not in the render engine.
         Omit it for the historical Caption-or-Headline name."""
         spec = RowSpec.from_row(row, row_number)
+        # Before anything reads a duration. The render length is max(promo,
+        # voice) and _resolve_positions deals every duration-dependent layer
+        # (CTA samples, gifs, music, background beds) against it, so binding the
+        # narration has to happen while all of those are still unresolved.
+        self.attach_voice(spec, self._voice_entry(spec))
         # Repeated renders of one sheet must differ; see RenderConfig.variant_salt.
         # Guarded so the default (0) leaves every existing seed untouched.
         if self.config.variant_salt:
@@ -3472,6 +3945,8 @@ class VideoGenerator:
             row_number, _clean_str(row.get("Caption")) or spec.headline.text)
         out_path = self.output_dir / filename
         sub_files: list[Path] = []
+        cap_files: list[Path] = []
+        cap_list: Optional[Path] = None
         try:
             self.build_base_image(spec).save(base_png)
             # resolves positions; the CTA ships as its own input so FFmpeg
@@ -3509,8 +3984,31 @@ class VideoGenerator:
                 sub_layers.append(
                     {"raw": raw, "w": w, "h": h, "x": x0, "y": y0, "k": k})
 
+            # Timed captions: one full-canvas frame per beat, listed with its
+            # own duration in a concat-demuxer file that REPLACES the static
+            # overlay input. The frames carry the headline/subheading/footer
+            # too, so nothing blinks out while a caption is up.
+            #
+            # Identical size and mode for every entry is not a style choice: the
+            # concat demuxer does not normalise its inputs, and a list whose
+            # frames disagree renders the layer as nothing at all, with exit 0.
+            layers, _static = self._caption_layers(spec)
+            if layers:
+                render_dur = self._render_duration(spec) or 0.0
+                for e, (_start, _end, image) in enumerate(layers):
+                    assert image.size == (CANVAS_W, CANVAS_H) and image.mode == "RGBA"
+                    png = self.work_dir / f"row_{row_number:04d}_cap{e:03d}.png"
+                    image.save(png)
+                    cap_files.append(png)
+                # The gap/tail frame IS the overlay PNG already written above
+                # (build_overlay_image omits the caption band while beats
+                # exist), so the list just points back at it.
+                cap_list = self.work_dir / f"row_{row_number:04d}_caps.txt"
+                self._write_caption_list(layers, overlay_png, cap_list,
+                                         cap_files, render_dur + 1.0)
+
             cmd = self.build_ffmpeg_command(spec, base_png, overlay_png, cta_png,
-                                            out_path, sub_layers)
+                                            out_path, sub_layers, cap_list)
             proc = subprocess.run(
                 cmd, **_FF_CAPTURE, timeout=self.config.ffmpeg_timeout
             )
@@ -3543,8 +4041,39 @@ class VideoGenerator:
                 cta_png.unlink(missing_ok=True)
             for f in sub_files:
                 f.unlink(missing_ok=True)
+            for f in cap_files:
+                f.unlink(missing_ok=True)
+            if cap_list is not None:
+                cap_list.unlink(missing_ok=True)
 
     # ------------------------------------------------------------- duration probe
+
+    def _render_duration(self, spec: "RowSpec") -> Optional[float]:
+        """How long this row's OUTPUT is — which is no longer always the promo.
+
+        The promo defined the render length outright until voiceover arrived. A
+        script that runs past the promo now loops the promo instead of being cut
+        off mid-sentence, so the length is max(promo, voice).
+
+        This is one accessor rather than a patch at the output `-t` because
+        SIX places derive something from the render length: the CTA sample
+        sequence, the gif/music/background-bed dwell dealing, the split-audio
+        gate, the input-side `-t` bounds, the audio graph's apad targets, and
+        the output bound itself. Lengthening only the last would leave every
+        other layer sized to the promo and running out early — the bed holding
+        its last frame, the music going silent — under a voice that is still
+        talking.
+
+        None (an unprobeable promo) propagates exactly as _probe_duration's None
+        always did; every caller already degrades or warns on it.
+        """
+        promo = self._probe_duration(self.video_path)
+        if promo is None:
+            return None
+        voice = float(getattr(spec, "voice_duration", 0.0) or 0.0)
+        if voice > promo and self.config.voice_loop_promo:
+            return voice
+        return promo
 
     _DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
 

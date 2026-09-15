@@ -407,7 +407,8 @@ def run(job: dict) -> dict:
                            job_id, exc)
             result["caption_pool"] = {"error": str(exc)}
 
-    # ---- 3 & 4. render and upload, unchanged
+    # ---- 3 & 4. render and upload, unchanged. The voiceover stage runs inside
+    # render.run() rather than here, so a plain render job narrates too.
     store.set_stage(job_id, "rendering")
     render_result = render_runner.run(job)
     result.update(render_result)

@@ -97,10 +97,15 @@ def apply_to_frame(df: pd.DataFrame, pool_id: Optional[str] = None) -> tuple[pd.
     }
 
 
-def write_columns_to_workbook(excel_bytes: bytes, df: pd.DataFrame) -> bytes:
-    """Write the Caption and Hashtags columns back into the original workbook,
-    preserving its formatting — the sheet stays a real artifact the user can
-    open, not a regenerated copy."""
+def write_columns_to_workbook(excel_bytes: bytes, df: pd.DataFrame,
+                              columns: tuple = (CAPTION_COLUMN, HASHTAG_COLUMN)) -> bytes:
+    """Write generated columns back into the original workbook, preserving its
+    formatting — the sheet stays a real artifact the user can open, not a
+    regenerated copy.
+
+    `columns` defaults to this module's own pair; the voice stage passes its
+    Voiceover columns instead, so both features share one writer rather than
+    growing a second openpyxl round-trip that drifts from this one."""
     import io
 
     from openpyxl import load_workbook
@@ -113,14 +118,14 @@ def write_columns_to_workbook(excel_bytes: bytes, df: pd.DataFrame) -> bytes:
     }
     next_column = (max(headers.values()) + 1) if headers else 1
 
-    for column in (CAPTION_COLUMN, HASHTAG_COLUMN):
+    for column in columns:
         if column not in headers:
             sheet.cell(row=1, column=next_column, value=column)
             headers[column] = next_column
             next_column += 1
 
     for offset, (_, row) in enumerate(df.iterrows(), start=2):
-        for column in (CAPTION_COLUMN, HASHTAG_COLUMN):
+        for column in columns:
             value = row.get(column)
             if value is not None and str(value).strip():
                 sheet.cell(row=offset, column=headers[column], value=str(value))
