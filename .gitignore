@@ -65,3 +65,5 @@ desktop.ini
 
 #recovered files
 _recovered
+# Excel lock files, created while a workbook is open
+~$*
