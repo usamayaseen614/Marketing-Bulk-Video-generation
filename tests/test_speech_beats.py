@@ -114,6 +114,19 @@ assert frame.at[0, "Voiceover"] == "mine" and frame.at[0, "Voiceover_Voice"] == 
 assert frame.at[1, "Voiceover"] == "pooled"
 print("sheet values are never overwritten by the pool")
 
+# A row that writes its own on-screen words and leaves Voiceover blank is asking
+# for captions WITHOUT narration. The pool has to leave it alone, or there is no
+# way to express that at all once a pool is uploaded.
+frame, info = apply_to_frame(
+    pd.DataFrame([{"Voiceover": "", "Screen_Text": ""},
+                  {"Voiceover": "", "Screen_Text": "Captions only, please"}]),
+    ["POOLED"], ["a", "b"])
+assert frame.at[0, "Voiceover"] == "POOLED", frame.at[0, "Voiceover"]
+assert str(frame.at[1, "Voiceover"]).strip() == "", frame.at[1, "Voiceover"]
+assert str(frame.at[1, "Voiceover_Voice"]).strip() == ""
+assert info["applied"] == 1 and info["silent_rows"] == 1, info
+print("a Screen_Text row with no Voiceover opts out of the pool")
+
 # No pool is not an error — those rows just stay silent.
 frame, info = apply_to_frame(pd.DataFrame([{}, {}]), [], [])
 assert info["applied"] == 0 and "silent" in info["reason"]

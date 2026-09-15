@@ -64,6 +64,10 @@ def apply_to_frame(df: pd.DataFrame, scripts: Sequence[str],
                    voices: Optional[Sequence[str]] = None) -> tuple[pd.DataFrame, dict]:
     """Fill blank Voiceover / Voiceover_Voice cells.
 
+    A row with a Screen_Text but no Voiceover is skipped: writing the on-screen
+    words yourself and leaving the spoken ones empty is how you ask for captions
+    with no narration, and the pool must not override that.
+
     Scripts are dealt round-robin rather than at random, for the same reason the
     promo mix is stratified: an even spread across a posting queue is the point,
     and a deterministic deal means a re-run reproduces the batch.
@@ -89,12 +93,23 @@ def apply_to_frame(df: pd.DataFrame, scripts: Sequence[str],
     scripts = [s for s in (str(x).strip() for x in scripts or ()) if s]
     voices = [v for v in (str(x).strip() for x in voices or ()) if v]
 
-    targets = [i for i in out.index if _blank(out.at[i, VOICEOVER_COLUMN])]
+    # A row that already says what it wants on screen, and left Voiceover
+    # blank, is deliberately SILENT — the pool leaves it alone. Without this
+    # there is no way to express "captions, no narration" once a pool is
+    # uploaded, because the pool fills every blank cell it can find.
+    silent = (out[SCREEN_TEXT_COLUMN].map(lambda v: not _blank(v))
+              if SCREEN_TEXT_COLUMN in out.columns else None)
+    targets = [i for i in out.index
+               if _blank(out.at[i, VOICEOVER_COLUMN])
+               and not (silent is not None and bool(silent.at[i]))]
     if scripts and targets:
         for n, index in enumerate(targets):
             out.at[index, VOICEOVER_COLUMN] = scripts[n % len(scripts)]
 
     applied = len(targets) if scripts else 0
+    kept_silent = 0 if silent is None else sum(
+        1 for i in out.index
+        if bool(silent.at[i]) and _blank(out.at[i, VOICEOVER_COLUMN]))
     if not scripts and targets:
         reason = "No script pool, so those rows render silent."
     elif not targets:
@@ -123,4 +138,5 @@ def apply_to_frame(df: pd.DataFrame, scripts: Sequence[str],
 
     logger.info("Applied %d pooled script(s) across %d voice(s)", applied, len(voices))
     return out, {"applied": applied, "scripts": len(scripts),
-                 "voices": len(voices), "reason": reason}
+                 "voices": len(voices), "silent_rows": kept_silent,
+                 "reason": reason}

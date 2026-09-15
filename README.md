@@ -82,7 +82,21 @@ rows show off custom fonts, background boxes, and the outline/shadow/neon styles
 also `data_auto.xlsx` — just the three text columns, nothing else — to try the fully
 automatic mode: random backgrounds, sizes, colors, positions, fonts, and styles.
 
-> ⚠️ It **overwrites** `data.xlsx`, `data_auto.xlsx` and `backgrounds.zip` in that folder.
+The demo sheet also exercises **every voiceover mode**, one per row, so you can see all four
+behaviours in a single render:
+
+| Row | What it demonstrates |
+|---|---|
+| 1 | A `Voiceover` with its own words on screen — the normal case. Pins `af_bella` as the narrator and styles the caption band |
+| 3 | Says one thing, shows another: `Voiceover` plus a different `Screen_Text` (and a slightly faster `Voiceover_Speed`) |
+| 4 | A blank `Voiceover`, filled from the script pool |
+| 5 | `Screen_Text` with no narration at all — silent captions |
+
+`scripts.txt` is the pool for row 4. Upload it under **Script pool** on the Generate page,
+tick *Speak the script and caption it on screen* in the sidebar, and render.
+
+> ⚠️ It **overwrites** `data.xlsx`, `data_auto.xlsx`, `scripts.txt` and `backgrounds.zip`
+> in that folder.
 > Move your own sheet somewhere else first if one is sitting there.
 
 To try **per-promo text**, it also writes `headline_by_promo.xlsx`,
@@ -483,6 +497,10 @@ What that means in practice:
 * **Rows without a `Voiceover` cell** draw from the script pool you upload on the Generate
   page — dealt round-robin, so the spread across a batch is even. No pool, no narration:
   the row renders exactly as it does today.
+* **To keep a row silent, fill its `Screen_Text` and leave `Voiceover` blank.** The pool
+  skips it. Writing the on-screen words yourself and leaving the spoken ones empty is how
+  you ask for captions without narration, and a pool must not override that — otherwise
+  there would be no way to say it at all once a pool is uploaded.
 * **Voices rotate.** Pick several in the sidebar and rows are dealt across them, so one
   posting folder is not all the same narrator. A `Voiceover_Voice` cell pins a row.
 * **A script longer than the promo makes the video longer.** The promo loops until the

@@ -13,6 +13,8 @@ Produces in ./sample_assets:
                        (the CTA image is optional — omit it to skip that layer)
     cta_video_1..5.mp4 — five short clips to try as the optional CTA videos
                        (they play back-to-back in a shuffled order)
+    scripts.txt      — a script pool for the voiceover feature: four spoken
+                       lines, dealt to any row whose Voiceover cell is blank
     headline_by_promo.xlsx / subheading_by_promo.xlsx / footer_by_promo.xlsx
                      — the optional per-promo text sheets: one column per promo
                        above, one row per row of data.xlsx, so the same row says
@@ -214,6 +216,17 @@ def main() -> None:
             # vision) — no single frame shows the whole line. See the sidebar's
             # "Subliminal text" section and the README caveats.
             "Footer_Subliminal": "yes",
+            # Voiceover: this row is read aloud and its own words appear on
+            # screen a few at a time, in time with the speech. Screen_Text is
+            # deliberately LEFT BLANK — blank means "show what is being said",
+            # which is what you want almost every time. Only the caption band's
+            # styling is set here.
+            "Voiceover": ("Summer mega sale is here. Up to fifty percent off "
+                          "everything. Offer ends June thirtieth."),
+            "Voiceover_Voice": "af_bella",          # pin the narrator for this row
+            "Screen_Text_Size": 60, "Screen_Text_Color": "#FFFFFF",
+            "Screen_Text_Y": 1420, "Screen_Text_Font": "Impact (Bebas Neue)",
+            "Screen_Text_BgColor": "#FF2D55", "Screen_Text_BgOpacity": "80%",
         },
         {
             "BG_Image": "does_not_exist.png",  # intentional failure demo
@@ -241,6 +254,19 @@ def main() -> None:
             "Subheading_Opacity": "60%",
             "Footer": "www.example.com", "Footer_Size": 30,
             "Footer_Color": "#EEEEEE", "Footer_X": 540, "Footer_Y": 1860,
+            # Says one thing, shows another. With different words there is
+            # nothing to sync against, so the captions are spread evenly across
+            # the narration instead of matched word for word — and the row is
+            # warned about exactly that. Use it when the spoken line is a full
+            # sentence but the screen wants something punchier.
+            "Voiceover": "New arrivals just landed, with fresh styles every week.",
+            # Plain sentences, not "|"-separated. In this app "|" is a manual
+            # LINE BREAK inside one text (see _wrap_text), not a beat separator
+            # — caption beats are worked out from the words themselves.
+            "Screen_Text": "New in. Fresh styles every week.",
+            "Voiceover_Speed": 1.1,                 # a touch quicker than default
+            "Screen_Text_Size": 68, "Screen_Text_Color": "#00F5D4",
+            "Screen_Text_Y": 1500, "Screen_Text_Style": "neon",
         },
         {
             # Auto-placement demo: blank X/Y cells get random, non-overlapping
@@ -254,6 +280,14 @@ def main() -> None:
             "Subheading_Color": "white", "Subheading_X": None, "Subheading_Y": None,
             "Footer": "", "Footer_Size": 30,
             "Footer_Color": "", "Footer_X": None, "Footer_Y": None,
+            # Blank Voiceover: this row takes a script from the pool you upload
+            # (scripts.txt below), and a voice from the sidebar's list. Leave the
+            # column out of your own sheet entirely and every row behaves this
+            # way. With no pool uploaded, the row simply renders silent.
+            "Voiceover": "",
+            "Screen_Text_Size": 58, "Screen_Text_Color": "#FFFFFF",
+            "Screen_Text_Y": 1460, "Screen_Text_BgColor": "#000000",
+            "Screen_Text_BgOpacity": "55%",
         },
         {
             # Long-text demo: headline/subheading auto-wrap to stay on the
@@ -271,10 +305,31 @@ def main() -> None:
             "Footer": "Follow us for daily dance tutorials and behind the scenes fun",
             "Footer_Size": None, "Footer_Color": None,
             "Footer_X": None, "Footer_Y": None,
+            # Screen_Text with NO Voiceover: captions with no narration at all.
+            # They are paced across the promo for reading rather than timed to
+            # speech, and no audio is touched. Works whether or not the
+            # voiceover feature is switched on.
+            "Voiceover": "",
+            "Screen_Text": ("No narration here. Just timed captions. "
+                            "Read them at your own pace."),
+            "Screen_Text_Size": 56, "Screen_Text_Color": "#FFE066",
+            "Screen_Text_Y": 1380, "Screen_Text_Style": "shadow",
         },
     ]
     df = pd.DataFrame(rows)
     df.to_excel(OUT / "data.xlsx", index=False)
+
+    # The script pool: uploaded on the Generate page, used ONLY by rows whose
+    # Voiceover cell is blank. Dealt round-robin so the spread across a batch is
+    # even. Blank lines separate entries, so a script can run to several
+    # sentences; a file with no blank lines is read one script per line instead.
+    (OUT / "scripts.txt").write_text(
+        "\n\n".join([
+            "Stop scrolling. This is the one thing you are missing.",
+            "Everything you need, in one place, for less than you think.",
+            "Thousands already switched this month. Here is why.",
+            "It takes thirty seconds. Tap the link and see for yourself.",
+        ]) + "\n", encoding="utf-8")
 
     # Fully-automatic variant: only the text columns remain. Backgrounds are
     # randomly assigned from the ZIP; sizes, colors, positions, fonts, and
@@ -283,6 +338,10 @@ def main() -> None:
     auto = df.drop(columns=["BG_Image"] + [
         c for c in df.columns
         if c.startswith(("Video_", "CTA_"))
+        # Behaviour flags, not text: the automatic sheet is content only, so
+        # the narrator, the pace and the subliminal toggle are all left to the
+        # sidebar.
+        or c in ("Voiceover_Voice", "Voiceover_Speed", "Footer_Subliminal")
         or c.endswith(("_X", "_Y", "_Size", "_Color", "_Font", "_BgColor", "_Style",
                        "_Opacity", "_BgOpacity"))
     ])
