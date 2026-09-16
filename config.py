@@ -174,9 +174,20 @@ FFMPEG_DECODE_THREADS = _int("BVG_FFMPEG_DECODE_THREADS", 1)
 # cannot take, and a batch that silently started narrating would be a surprise.
 VOICE_ENABLED = _bool("BVG_VOICE_ENABLED", False)
 
+# Which speech engine narrates. 'kokoro' or 'pocket' (Kyutai's Pocket TTS) —
+# see speech/synth.py, which owns both and is the only place either package is
+# imported. The sidebar picks it per batch; this is only the default the
+# dropdown opens on.
+#
+# Kokoro stays the default because the existing VOICE_SET below is Kokoro voice
+# names and the two engines share none: flipping this without also setting
+# VOICE_SET would open the sidebar on an engine whose voices are all unselected.
+VOICE_ENGINE = _str("BVG_VOICE_ENGINE", "kokoro")
+
 # Kokoro language code. 'a'/'b' are American/British English; anything else
 # needs the matching misaki extra installed as well, so it is not offered in
-# the sidebar.
+# the sidebar. Pocket TTS has no equivalent — its voice carries the language —
+# so this is ignored there.
 VOICE_LANG = _str("BVG_VOICE_LANG", "a")
 
 # Voices the batch rotates through. Rows are dealt across this list so one

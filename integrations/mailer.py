@@ -132,10 +132,16 @@ def _render_body(job: dict, status: str, result: dict) -> str:
 
     batches = result.get("batches") or 1
     if batches > 1:
+        # A Promo Alternate job renders no promo at all, so "using 0 promo
+        # video(s)" would read as though the source material was dropped.
+        # What it used instead is the alternate pool, so say that.
+        n_promos = result.get("promo_videos", 1)
+        n_alt = result.get("promo_alt_clips") or 0
+        source = (f"using {n_alt} Promo Alternate clip(s)" if n_alt and not n_promos
+                  else f"using {n_promos} promo video(s)")
         lines.append(
             f"  {result.get('rows', 0):,} sheet rows x {batches} batches, "
-            f"using {result.get('promo_videos', 1)} promo video(s), "
-            f"mixed across {result.get('folders', batches)} folders")
+            f"{source}, mixed across {result.get('folders', batches)} folders")
 
     if uploaded is not None and result.get("upload_mode") == "zip":
         zips = result.get("drive_zips") or result.get("drive_files") or 0

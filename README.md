@@ -339,9 +339,14 @@ So the video made from **row 2** on **video 3.mp4** reads `sakfjn`.
 | Number of clip slots | How many CTA-video clip positions play in fixed order (1–10). Each is a pool; one sample is picked per output video |
 | Keep clips playing to fill the whole video | After the fixed slots, keep drawing fresh random clips until the side covers the full promo length (never freezes). Split-screen turns this on automatically |
 | Subliminal text (experimental) | *Apply to* picks **up to two** texts (Headline / Subheading / Footer, default off) that get split across frames so no single frame shows all of them — never all three at once; override per text via `<Role>_Subliminal`. *Effect style* = **Hide a slice** (bright, recommended) or **Show only a slice** (~1/K brightness, faint). For Hide: *Hidden characters* = **Random each cycle** (balanced, non-repeating; default) or **Fixed pattern**, and *Hidden per frame (%)* sets how much is hidden (≈33% stays bright and hides each character exactly once per cycle; higher is fainter). Tunable K (frames/cycle), word/char granularity, and *Preserve frame-by-frame* (all-intra, larger files). Certain known texts carry a **hand-authored schedule** (see `CUSTOM_SUBLIMINAL_SCHEDULES` in `video_generator.py`) that replaces all of these settings and the last-4 rule. See the caveats above |
+| Speech engine | Which model reads the scripts: **Kokoro** or **Pocket TTS (Kyutai)**. An engine that is not installed on this machine is labelled rather than hidden. The two share no voice names, so the *Voices* list below re-offers itself when this changes — and Pocket TTS has no speaking-speed control, so that slider greys out. See *Voiceover and timed captions* |
 | Frame rate (fps) | 30 or 60. 60 doubles the frames to encode but halves the subliminal cycle (K/fps s), so the effect blends more smoothly. Both upload fine to every major platform |
 | Randomize position per video | Each video gets its own random spot per row (avoids the CTA and explicitly positioned texts; auto-placed texts then avoid the video). Seeded per row, so previews and re-runs are reproducible. Ignored in split-screen mode |
 | Video X/Y/W/H | Default box the promo video is fitted into (aspect ratio preserved, centered). X/Y are hidden when randomize is on. A row's `Video_X`/`Video_Y`/`Video_Width`/`Video_Height` cells override these per video |
+| Use Promo Alternate clips instead | No promo video at all. The promo's box is filled by a pool of clips played back-to-back, and the **voiceover decides how long each video runs**. Ticking it disables the promo uploader and reveals the *Promo Alternate* section below. See *Promo Alternate* |
+| Promo Alternate clips (MP4) | The pool that replaces the promo. **Flat, like the gifs** — a different selection plays in each output video, dealt from a shuffled deck so every clip is used once before any repeats. Each clip plays **once, in full**: there is no dwell floor here, because a promo clip replayed to clear one reads as a stutter |
+| Length without a voiceover (s) | With no promo there is nothing to measure, so a row whose `Voiceover` cell is blank (or a batch with narration off) is rendered for this long (default 20). Rows that *do* have narration ignore it and last exactly as long as they speak |
+| Mute the clips' own audio | On by default: the video is carried by the voiceover and the music bed alone. Off, the joined clips' audio takes the place the promo's audio held — mixed under the music, warped by split-audio, ducked under the voice. **Every** clip in the pool must have an audio track for that; if any is silent they are all played muted and the batch says so |
 | CTA image X/Y/W/H | Default position (top-left corner) and size of the CTA image. A row's `CTA_X`/`CTA_Y`/`CTA_Width`/`CTA_Height` cells override these per video |
 | CTA fade-in start / duration | When the CTA image fades in and for how long (seconds). Overridable per row via `CTA_Fade_Start` / `CTA_Fade_Duration` |
 | CTA videos + box + fade + per-clip speed | Optional clips layered with the CTA image; they play back-to-back in a shuffled order in one shared box (`CTA_Video_*`), with a shared fade-in and a separate speed per clip slot (overridable per row via `CTA_Video_Speed_<n>`, or `CTA_Video_Speed` for the whole row). Leave the upload empty to skip the whole element |
@@ -482,15 +487,34 @@ single pooled Drive folder (downloaded straight into `assets/music/`).
 ### Voiceover and timed captions
 
 Turn on **Speak the script and caption it on screen** in the sidebar. Each row's
-`Voiceover` text is read aloud by [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) —
-locally, on the VM's own CPU, with no API and no per-character cost — and the words appear
-on screen a few at a time as they are spoken.
+`Voiceover` text is read aloud — locally, on the VM's own CPU, with no API and no
+per-character cost — and the words appear on screen a few at a time as they are spoken.
+
+**Two engines, picked from the sidebar's *Speech engine* dropdown.** Nothing else about the
+batch changes with it; the sheet, the captions and the audio mix are identical either way.
+
+| | [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) | [Pocket TTS](https://kyutai-labs.github.io/pocket-tts/) (Kyutai) |
+|---|---|---|
+| Voices | 28, American and British English | 21 English |
+| Speaking speed | Yes — slider and `Voiceover_Speed` | **No control at all**; rows that set one say so in their warnings |
+| Accent / language | `a` American, `b` British | English model; the voice sets the accent (the package has other-language models, not offered here) |
+| Python | 3.10–3.12 only | 3.10–3.14 |
+| Size | 82M parameters | 100M parameters, built for CPU |
+
+The dropdown labels an engine *not installed here* rather than hiding it, so you can see what
+the machine is missing. A machine with neither still offers the caption half — see below.
 
 **Nothing has to be timed by hand.** Tools like CapCut run speech recognition over finished
 audio to work out when each word was said. We do not have to: the audio is *generated* here,
-and Kokoro returns the start and end time of every word as part of producing it. So the
+and both engines return the start and end time of every word as part of producing it. So the
 captions are exact rather than inferred, and there is no separator to type and no split to
 mark up anywhere.
+
+> Pocket TTS gets its word timings from
+> [`pocket-tts-timestamped`](https://pypi.org/project/pocket-tts-timestamped/), a fork of
+> Kyutai's package that adds them — that is what `requirements.txt` installs. Kyutai's own
+> `pocket-tts` also works and narrates identically, but returns no timings, so the captions
+> fall back to being spread evenly across the narration.
 
 What that means in practice:
 
@@ -503,6 +527,13 @@ What that means in practice:
   there would be no way to say it at all once a pool is uploaded.
 * **Voices rotate.** Pick several in the sidebar and rows are dealt across them, so one
   posting folder is not all the same narrator. A `Voiceover_Voice` cell pins a row.
+* **The voice list belongs to the engine.** Kokoro and Pocket TTS share no voice names, so
+  switching engines re-offers the list and drops any selection that does not fit — and a
+  `Voiceover_Voice` cell only means something next to its own engine. A name the engine does
+  not know renders that row silent, with the reason in the log.
+* **Switching engines re-synthesizes.** The engine is part of the cache key, so the same
+  script under the other engine is a different entry rather than the first one's audio
+  served twice. Nothing is lost by switching back and forth; each is cached separately.
 * **A script longer than the promo makes the video longer.** The promo loops until the
   narration finishes rather than the sentence being cut off. Turn *Loop the promo if the
   script is longer* off to keep the old behaviour — the row is then warned that its
@@ -516,10 +547,13 @@ What that means in practice:
 * **It is an enhancement, never a failure.** If a line cannot be synthesized, that row
   renders silent and the batch carries on.
 * **Captions work without a speech engine.** Kokoro needs Python 3.10-3.12, so it will not
-  install on every machine. Where it is missing, the sidebar offers *Show timed captions
-  (no narration here)* instead: the `Voiceover` text still appears on screen, paced across
-  the video, so you can build and preview the caption layer locally. Deploy — or install
-  Kokoro — and the same sheet starts speaking, with the captions synced to the speech
+  install on every machine, and `requirements.txt` marks Pocket TTS the same way to keep the
+  dev venv lean (it would otherwise install on 3.14 too — drop the marker to get working
+  voiceover locally). Where the selected engine is missing, the sidebar offers *Show timed
+  captions (no narration here)* instead: the `Voiceover` text still appears on screen, paced
+  across the video, so you can build and preview the caption layer locally. Deploy — or
+  install an engine — and the same sheet starts speaking, with the captions synced to the
+  speech
   rather than paced.
 * **One switch gates the whole thing.** With the checkbox off, neither `Voiceover` nor
   `Screen_Text` renders anything, so filling either column cannot start captioning a batch
@@ -528,6 +562,46 @@ What that means in practice:
   one row on the spot rather than waiting for a batch. The static preview shows the
   **longest** caption line, so you can check the widest case fits before committing to a
   batch.
+
+### Promo Alternate — clips instead of a promo video
+
+Tick **Use Promo Alternate clips instead** (next to the promo uploader) when there is no single
+promo to build the batch around. The promo uploader is disabled and a **Promo Alternate** pool
+appears in the sidebar; its clips fill the promo's own box, at the promo's own layer number, one
+after another until the video ends.
+
+What changes, and what does not:
+
+* **The voiceover sets the length.** This is the whole point of the mode. Without a promo there
+  is no duration to measure, so the render length is the narration's — and every layer that is
+  sized against it (the CTA fill, the gif, music and background-video sequences, the audio
+  padding, the output bound) follows. A row with no narration uses *Length without a voiceover*.
+* **The CTA clips are untouched.** They keep their own pool, their own box, their own per-slot
+  speeds and their own *Keep clips playing to fill the whole video* setting, so both boxes rotate
+  independently. Turn that setting on if you want the CTA side to cycle for the full length too.
+* **Clips are fitted, not cropped.** Each is scaled to fit *inside* the video box with its aspect
+  ratio intact and the background showing through whatever the fit leaves over — exactly how the
+  promo has always been drawn. A pool of mixed aspect ratios is fine.
+* **Batches mean something different.** With no promos to cycle, each pass simply re-rolls the
+  clip draw, so *Batches to render* defaults to 1 and N passes give N different videos per row.
+  *Max copies of one promo per folder* is hidden: there is no promo to count copies of.
+* **Per-promo text sheets are unavailable.** Those sheets match their columns to promo video
+  filenames, and this mode has none. Per-row text comes from the main Excel as usual.
+* **A sequence that runs out holds its last frame** rather than ending the video early — the
+  narration is never cut short to match the clips. The pool is capped at 40 clips per video; a
+  batch that reaches the cap says so in the row's warnings.
+* **A row whose narration failed to synthesize is named.** It renders at the fallback length
+  rather than its script's, which would otherwise look like a finished video that is simply
+  too short, so the row carries a warning saying so.
+* **Long narration plus long clip sequences share one 60-input ceiling.** This is not new — CTA
+  fill and the gif pool have always grown with the render length the same way — but this mode
+  makes it easier to reach, because the length is now the script's. A row that needs more than
+  60 FFmpeg inputs fails with a message naming every layer's share; the fix is longer clips, a
+  higher gif or music dwell time, or a shorter script. Only that row fails, not the batch.
+* **This is the layer to watch for memory.** Each clip is carried as RGBA so the margin around
+  a fitted clip can stay transparent, which at the 40-clip cap measures ~2.7 GB peak at the
+  default 900×900 box and ~4.0 GB at full canvas, against ~0.5 GB for an ordinary promo. If you
+  raise *Parallel renders* high on a box with limited RAM, raise it more carefully in this mode.
 
 ### What to expect from the audio features
 
@@ -878,6 +952,13 @@ everything in a single pass per row:
 ```
 [1:v]scale=W:H:force_original_aspect_ratio=decrease[vid]   # fit promo video in box, no distortion
 [0:v][vid]overlay=x='X+(W-w)/2':y='Y+(H-h)/2':shortest=1   # center in box over background
+# ...or, in Promo Alternate mode, the promo input is not claimed at all and the same [vidB]
+# layer is the joined clip pool — contain-fitted and padded transparent to the box like the
+# gifs, so concat will join a pool of mixed aspect ratios. No shortest=1 anchor: the length
+# is the narration's, and the base still and the output carry their own -t.
+[N:v]fps=F,format=rgba,scale=W:H:force_original_aspect_ratio=decrease:force_divisible_by=2,
+     pad=W:H:'trunc((W-iw)/4)*2':'trunc((H-ih)/4)*2':color=0x00000000,setsar=1[pa0]; ...
+[pa0][pa1]...concat=n=N:v=1:a=0[vidB] ; [0:v]null[anchored]
 [bgvid][2:v]overlay=0:0[txt]                               # stamp text layer on top
 # optional CTA videos — cover-filled to the box, each sped up/slowed by its own clip speed,
 # concatenated in the row's shuffled order, faded in:

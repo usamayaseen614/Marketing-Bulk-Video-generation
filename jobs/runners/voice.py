@@ -45,7 +45,10 @@ def run_stage(job: dict, params: dict) -> dict:
     from speech import pool as script_pool
     from speech import synth
 
-    usable, reason = synth.available()
+    # The engine this batch was queued with, not the machine's current default:
+    # a job sitting in the queue must narrate with what its sidebar selected.
+    engine = synth.normalize_engine(render_config.get("voice_engine"))
+    usable, reason = synth.available(engine)
     if not usable:
         return {"skipped": reason}
 
@@ -82,7 +85,7 @@ def run_stage(job: dict, params: dict) -> dict:
     lang = render_config.get("voice_lang") or config.VOICE_LANG
     lead_in = float(render_config.get("voice_lead_in") or config.VOICE_LEAD_IN)
     default_speed = float(render_config.get("voice_speed") or config.VOICE_SPEED)
-    default_voice = voices[0] if voices else synth.DEFAULT_VOICE
+    default_voice = voices[0] if voices else synth.default_voice(engine)
     cache = assets / "voice"
     cache.mkdir(parents=True, exist_ok=True)
 
@@ -106,7 +109,8 @@ def run_stage(job: dict, params: dict) -> dict:
             continue
         voice = spec.voice_name or default_voice
         speed = spec.voice_speed if spec.voice_speed is not None else default_speed
-        tasks[synth.cache_key(text, voice, speed, lang)] = (text, voice, speed)
+        tasks[synth.cache_key(text, voice, speed, lang, engine)] = (
+            text, voice, speed)
 
     if not tasks:
         return {"skipped": "no row carries a Voiceover", **summary}
@@ -132,7 +136,8 @@ def run_stage(job: dict, params: dict) -> dict:
         synth.configure_threads(0)
         for text, voice, speed in pending:
             try:
-                record(synth.synthesize(text, voice, speed, cache, lang, lead_in))
+                record(synth.synthesize(text, voice, speed, cache, lang,
+                                        lead_in, engine))
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Job %s: a voiceover failed (%s)", job_id, exc)
                 record(None)
@@ -145,7 +150,7 @@ def run_stage(job: dict, params: dict) -> dict:
         with ProcessPoolExecutor(max_workers=workers,
                                  initializer=synth.configure_threads) as pool:
             futures = [pool.submit(synth.synthesize, text, voice, speed, cache,
-                                   lang, lead_in)
+                                   lang, lead_in, engine)
                        for text, voice, speed in pending]
             for future in as_completed(futures):
                 try:
@@ -171,7 +176,7 @@ def run_stage(job: dict, params: dict) -> dict:
                        job_id)
         synthesize_serially()
 
-    logger.info("Job %s: %d voiceover(s) ready, %d failed, from %d row(s)",
-                job_id, done, failed, len(frame))
+    logger.info("Job %s: %d voiceover(s) ready, %d failed, from %d row(s) on %s",
+                job_id, done, failed, len(frame), synth.ENGINES.get(engine, engine))
     return {"unique_scripts": len(tasks), "synthesized": done, "failed": failed,
-            "voices": len(voices), **summary}
+            "voices": len(voices), "engine": engine, **summary}

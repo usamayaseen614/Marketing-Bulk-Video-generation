@@ -366,6 +366,10 @@ _TEMPLATE = r"""
     frame.draggable = false;
     videoEl.appendChild(frame);
     videoEl.style.zIndex = Z.video;
+    // Promo Alternate: this box plays a sequence of clips rather than one promo,
+    // so a still can only ever show the first of them. Same admission the gif
+    // and background-video boxes make below. Absent outside that mode.
+    if (v.count > 1) videoEl.title = 'Clip 1 of ' + v.count + ' in this video';
     stage.appendChild(videoEl);
     const videoItem = {
       x: v.x, y: v.y, w: v.w, h: v.h,

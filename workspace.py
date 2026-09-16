@@ -91,6 +91,13 @@ class Workspace:
     # than seen: tracks play back-to-back under the promo's own audio, mixed at
     # RenderConfig.music_volume.
     music_paths: list = field(default_factory=list)
+    # The Promo Alternate pool: clips that REPLACE the promo video rather than
+    # decorating it. Flat and dealt like the gif/bed pools, but painted in the
+    # promo's own box at the promo's own z, and with the render length coming
+    # from the voiceover instead of from a promo file (RenderConfig.promo_alt).
+    # A job in this mode stages no promos at all, which is why video_path below
+    # falls back to this pool's first clip.
+    promo_alt_paths: list = field(default_factory=list)
 
     def promo_for_batch(self, batch_index: int) -> Path:
         """The promo video for batch `batch_index` (0-based).
@@ -105,18 +112,38 @@ class Workspace:
 
 def stage_uploads(dest: Path, video_file, zip_file, cta_file, font_file,
                   cta_video_slot_files=None, gif_files=None,
-                  bg_video_files=None, music_files=None) -> None:
+                  bg_video_files=None, music_files=None,
+                  promo_alt_files=None) -> None:
     """Write the in-memory uploads to disk where FFmpeg/PIL can read them.
 
     `video_file` may be a single upload or a list of up to MAX_PROMO_VIDEOS —
-    a multi-batch render uses a different promo video per batch."""
+    a multi-batch render uses a different promo video per batch.
+
+    New parameters are APPENDED, never inserted: app.py's Preview, Render Row
+    and submit paths all call this positionally."""
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
 
+    # The Promo Alternate pool, staged first because the promo guard below
+    # depends on it. Its own folder, and the name matters: `cta_slot_*` and
+    # `input_*.mp4` are globbed with an int() on the trailing segment in
+    # workspace_from_dir, so a colliding prefix would raise ValueError for
+    # every job in the batch. Always created, so a job resumed after a restart
+    # can tell "nothing was uploaded" from "the folder is missing".
+    alt_dir = dest / "promo_alt"
+    alt_dir.mkdir(parents=True, exist_ok=True)
+    for f in promo_alt_files or []:
+        if f is not None:
+            (alt_dir / Path(f.name).name).write_bytes(f.getvalue())
+
     promos = video_file if isinstance(video_file, (list, tuple)) else [video_file]
     promos = [f for f in promos if f is not None][:MAX_PROMO_VIDEOS]
-    if not promos:
-        raise ValueError("At least one promo video is required.")
+    # Promo Alternate mode stages no promo at all — the pool IS the picture.
+    # Requiring one anyway would mean uploading a file the render never reads.
+    if not promos and not any(alt_dir.iterdir()):
+        raise ValueError(
+            "At least one promo video is required (or a Promo Alternate clip)."
+        )
     for i, promo in enumerate(promos, start=1):
         # input.mp4 stays the first one's name so anything reading a single
         # promo keeps working unchanged.
@@ -229,11 +256,26 @@ def workspace_from_dir(assets: Path, work_dir: Path) -> Workspace:
         (f for f in music_dir.iterdir() if f.is_file() and is_audio(f))
     ) if music_dir.is_dir() else []
 
+    # The Promo Alternate pool, sorted for the same reproducibility reason.
+    alt_dir = assets / "promo_alt"
+    promo_alt_paths = sorted(
+        (f for f in alt_dir.iterdir() if f.is_file() and is_video(f))
+    ) if alt_dir.is_dir() else []
+
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     return Workspace(
         bg_dir=bg_dir,
-        video_path=video_paths[0] if video_paths else assets / "input.mp4",
+        # With no promo staged, video_path falls back to the alternate pool's
+        # first clip rather than to a path that was never written. It is a real
+        # video file, so everything that only ever wanted *a* video off this
+        # attribute — the has-a-video-stream guard, the preview poster frame,
+        # the has-audio probe — keeps working without an Optional to thread
+        # through. The RENDER does not read it in that mode: the alternate
+        # sequence is dealt per row from promo_alt_paths.
+        video_path=(video_paths[0] if video_paths else
+                    promo_alt_paths[0] if promo_alt_paths else
+                    assets / "input.mp4"),
         cta_path=cta_path if cta_path.is_file() else None,
         font_path=fonts[0] if fonts else None,
         work_dir=work_dir,
@@ -242,13 +284,16 @@ def workspace_from_dir(assets: Path, work_dir: Path) -> Workspace:
         video_paths=video_paths,
         bg_video_paths=bg_video_paths,
         music_paths=music_paths,
+        promo_alt_paths=promo_alt_paths,
     )
 
 
 def build_workspace(tmp: Path, video_file, zip_file, cta_file, font_file,
                     cta_video_slot_files=None, gif_files=None,
-                    bg_video_files=None, music_files=None) -> Workspace:
+                    bg_video_files=None, music_files=None,
+                    promo_alt_files=None) -> Workspace:
     """Stage the uploads into `tmp` and return the Workspace over them."""
     stage_uploads(tmp, video_file, zip_file, cta_file, font_file,
-                  cta_video_slot_files, gif_files, bg_video_files, music_files)
+                  cta_video_slot_files, gif_files, bg_video_files, music_files,
+                  promo_alt_files)
     return workspace_from_dir(tmp, tmp / "work")

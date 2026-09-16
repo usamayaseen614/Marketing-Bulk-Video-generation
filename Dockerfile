@@ -39,6 +39,33 @@ snapshot_download('hexgrad/Kokoro-82M', allow_patterns=['*.pth','*.json','voices
 print('kokoro weights cached')" \
     || echo "WARNING: Kokoro weights not pre-cached; the first voiceover job fetches them"
 
+# The same treatment for the other engine, for the same reason. Pocket TTS
+# fetches its weights inside TTSModel.load_model() rather than from one known
+# repo, so the warm-up is a real load — which also proves the install works at
+# build time instead of at 3am on the first narrated batch. ~100M parameters,
+# a little MORE than Kokoro's 82M. Non-fatal in exactly the same way:
+# speech/synth.py falls back to downloading on demand, and to "not installed
+# here" after that.
+#
+# Every offered voice, not just the default, because Kokoro's line above bakes
+# `voices/*` and a batch that rotates through four narrators would otherwise
+# fetch three of them mid-render. Each voice is its own small download from
+# Hugging Face (the model itself is fetched once, by load_model above).
+#
+# The list is duplicated from speech/synth.py's POCKET_VOICES, which is the
+# source of truth, because the app's own modules are COPYed in below this layer
+# — importing it here would tie the weight cache to every code change and undo
+# the layer caching this ordering exists for. Keep the two in step.
+RUN python -c "\
+from pocket_tts_timestamped import TTSModel; \
+m = TTSModel.load_model(); \
+voices = 'alba anna azelma bill_boerst caro_davy charles cosette eponine eve \
+fantine george jane javert jean marius mary michael paul peter_yearsley \
+stuart_bell vera'.split(); \
+[m.get_state_for_audio_prompt(v) for v in voices]; \
+print('pocket-tts cached:', len(voices), 'voices at', m.sample_rate, 'Hz')" \
+    || echo "WARNING: Pocket TTS weights not pre-cached; the first voiceover job fetches them"
+
 # Every top-level module, as a glob rather than a hand-maintained list.
 # Listing them individually is how batching.py got left out of the image: it
 # imported fine locally and every render on the VM died with

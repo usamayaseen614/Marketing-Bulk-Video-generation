@@ -403,6 +403,7 @@ def _render_batches(job: dict, df: pd.DataFrame, ws, n_batches: int,
                             bg_video_paths=ws.bg_video_paths,
                             music_paths=ws.music_paths,
                             voice_cache_dir=store.assets_dir(job_id) / "voice",
+                            promo_alt_paths=ws.promo_alt_paths,
                         )
                         for message in generator.input_warnings:
                             if message not in batch_warnings:
@@ -428,16 +429,30 @@ def _render_batches(job: dict, df: pd.DataFrame, ws, n_batches: int,
                         if message not in batch_warnings:
                             batch_warnings.append(message)
 
-                    logger.info("Job %s: batch %d/%d — %d row(s) queued on promo %s%s",
-                                job_id, batch, n_batches, len(group), promo.name,
+                    # Promo Alternate renders no promo at all, and ws.video_path
+                    # is only a stand-in there (the pool's first clip) — naming
+                    # it as "the promo" would send anyone reading this log
+                    # looking for a file the render never opened.
+                    logger.info("Job %s: batch %d/%d — %d row(s) queued on %s%s",
+                                job_id, batch, n_batches, len(group),
+                                (f"{len(ws.promo_alt_paths)} Promo Alternate clip(s)"
+                                 if cfg.promo_alt else f"promo {promo.name}"),
                                 " (per-promo text)" if df_promo is not df else "")
 
                     for item in group:
                         _b, row_no = batching.split_index(item["idx"], n_rows)
                         row = df_run.iloc[row_no - 1]
                         name = (item.get("meta") or {}).get("short_name") or None
+                        # The manifest's Promo column is the delivered record of
+                        # what each file was made from, so it must not name a
+                        # file the render never opened. In Promo Alternate mode
+                        # `promo` is only workspace's stand-in (the pool's first
+                        # clip) and each row holds its own shuffled sequence —
+                        # there is no single promo to name, so the column says
+                        # so rather than pinning every row on one clip.
                         futures[pool.submit(generator.render_row, row_no, row, name)] = (
-                            item, promo.name)
+                            item,
+                            "Promo Alternate" if cfg.promo_alt else promo.name)
 
             logger.info(
                 "Job %s: %d row(s) queued across %d batch(es), %d worker(s), "
@@ -1139,6 +1154,18 @@ def run(job: dict) -> dict:
         voice_result = voice_stage.run_stage(job, params)
         if voice_result.get("synthesized"):
             logger.info("Job %s: %s", job_id, voice_result)
+        elif voice_result.get("failed"):
+            # EVERY script failed. Gated on `synthesized` alone this said
+            # nothing at all — the loudest possible outcome (a whole batch
+            # rendering mute) was the one that logged least. The usual cause is
+            # a sheet whose Voiceover_Voice names belong to the other engine,
+            # which the stage cannot tell from a genuinely bad name.
+            logger.warning(
+                "Job %s: NO narration was synthesized — %d script(s) all "
+                "failed on %s. Every row will render silent. Check that the "
+                "sheet's Voiceover_Voice names belong to this engine. %s",
+                job_id, voice_result["failed"],
+                voice_result.get("engine", "?"), voice_result)
     except Exception as exc:  # noqa: BLE001
         # An enhancement never costs a render. Those rows come out silent.
         logger.warning("Job %s: voiceover stage failed (%s) — rendering silent",
@@ -1276,6 +1303,9 @@ def run(job: dict) -> dict:
         "folders": n_folders,
         "rows": n_rows,
         "promo_videos": len(ws.video_paths),
+        # 0 outside Promo Alternate mode. The mailer reads both, because a job
+        # with no promos is not a job that lost its source material.
+        "promo_alt_clips": len(ws.promo_alt_paths),
         "elapsed": elapsed,
         "batch_warnings": batch_warnings,
         "failures": results.failure_summary(records),

@@ -35,6 +35,7 @@ from video_generator import (
     FPS_CHOICES,
     MAX_CTA_VIDEO_SLOTS,
     MUSIC_MIN_SECONDS,
+    PROMO_ALT_SECONDS,
     SPLIT_AUDIO_CHUNKS,
     SPLIT_AUDIO_MAX_CHUNKS,
     SPLIT_AUDIO_MAX_SPREAD,
@@ -72,6 +73,7 @@ def make_generator(ws: Workspace, config: RenderConfig, output_dir: Path) -> Vid
         gif_paths=ws.gif_paths,
         bg_video_paths=ws.bg_video_paths,
         music_paths=ws.music_paths,
+        promo_alt_paths=ws.promo_alt_paths,
         # The preview and the single-row render are interactive: one row, driven
         # by a click, so this one is allowed to synthesize on the spot rather
         # than read a cache some earlier stage filled. The batch does the
@@ -357,7 +359,26 @@ with st.sidebar:
         split_audio_spread = SPLIT_AUDIO_SPREAD
 
     st.subheader("Voiceover & captions")
-    _voice_ok, _voice_why = speech_synth.available()
+    # Asked for every engine, not just the selected one, so the dropdown can say
+    # which are actually installed here instead of only reporting on the one
+    # already chosen. available() caches per engine, so this costs one import
+    # attempt apiece for the life of the process.
+    _engine_status = {key: speech_synth.available(key)
+                      for key in speech_synth.ENGINES}
+    _engine_keys = list(speech_synth.ENGINES)
+    _default_engine = speech_synth.normalize_engine(settings.VOICE_ENGINE)
+    voice_engine = st.selectbox(
+        "Speech engine", _engine_keys,
+        index=_engine_keys.index(_default_engine),
+        format_func=lambda key: speech_synth.ENGINES[key] + (
+            "" if _engine_status[key][0] else " — not installed here"),
+        help="Which model reads the scripts. Kokoro takes a speaking speed and "
+             "an English accent; Pocket TTS (Kyutai) is smaller, installs on "
+             "newer Pythons, and has no speed control. The two share no voice "
+             "names, so the list below changes with this — and so does the "
+             "meaning of a row's `Voiceover_Voice` cell.",
+    )
+    _voice_ok, _voice_why = _engine_status[voice_engine]
     # Every one of these has to exist whether or not the feature is usable —
     # RenderConfig below reads them unconditionally.
     voice_set = list(settings.VOICE_SET)
@@ -382,31 +403,56 @@ with st.sidebar:
                  "than the ones being said.",
         )
     else:
-        # No speech engine here, but the CAPTION half needs none — the words are
-        # in the sheet. Offering it anyway is what lets the timed-caption layer
-        # be built and previewed on a machine that cannot run the voice model
-        # (Kokoro needs Python < 3.13), instead of the whole feature looking
-        # broken.
-        st.caption(f"No speech engine on this machine — {_voice_why}")
+        # This engine is not here, but the CAPTION half needs no engine at all —
+        # the words are in the sheet. Offering it anyway is what lets the
+        # timed-caption layer be built and previewed on a machine that cannot
+        # run the model (Kokoro needs Python < 3.13), instead of the whole
+        # feature looking broken.
+        st.caption(f"Not available on this machine — {_voice_why}")
+        if any(ok for ok, _ in _engine_status.values()):
+            st.caption("Another engine in the dropdown above IS installed here.")
         voice_enabled = st.checkbox(
             "Show timed captions (no narration here)", value=False,
             help="Puts each row's `Voiceover` (or `Screen_Text`) on screen a few "
                  "words at a time, paced across the video. Identical to the full "
-                 "feature minus the voice — install Kokoro, or deploy, and the "
-                 "same sheet starts speaking and syncs the captions to it.",
+                 "feature minus the voice — install the engine, or deploy, and "
+                 "the same sheet starts speaking and syncs the captions to it.",
         )
     if voice_enabled and _voice_ok:
+        _engine_voices = speech_synth.voices(voice_engine)
+        # The saved VOICE_SET is one engine's names and the two lists share
+        # none, so it cannot be handed to the other engine's multiselect —
+        # Streamlit raises when a default is not among the options. Keep
+        # whatever still fits and fall back to this engine's own default.
+        _kept = [v for v in settings.VOICE_SET if v in _engine_voices]
         voice_set = st.multiselect(
-            "Voices", speech_synth.VOICES, default=list(settings.VOICE_SET),
+            "Voices", _engine_voices,
+            default=_kept or [speech_synth.default_voice(voice_engine)],
             help="Rows rotate through these, so one posting folder is not all "
-                 "the same narrator. af_/am_ are American, bf_/bm_ British; "
-                 "*f_ female, *m_ male. A row's `Voiceover_Voice` cell wins.",
-        ) or [speech_synth.DEFAULT_VOICE]
+                 "the same narrator. A row's `Voiceover_Voice` cell wins."
+                 + (" af_/am_ are American, bf_/bm_ British; *f_ female, "
+                    "*m_ male." if voice_engine == speech_synth.KOKORO else ""),
+        ) or [speech_synth.default_voice(voice_engine)]
+        _can_speed = speech_synth.supports_speed(voice_engine)
         voice_speed = st.slider(
-            "Speaking speed", 0.7, 1.4, float(settings.VOICE_SPEED), 0.05,
+            # Shown at 1.0 when the engine has no rate control, because that is
+            # what the batch will actually use — a disabled slider still reading
+            # the saved 1.15 while RenderConfig carries 1.0 is the quiet kind of
+            # wrong. Switching back to Kokoro restores the saved value.
+            "Speaking speed", 0.7, 1.4,
+            float(settings.VOICE_SPEED) if _can_speed else 1.0, 0.05,
+            disabled=not _can_speed,
             help="1.0 is the model's natural pace. A row's `Voiceover_Speed` "
-                 "cell overrides it.",
+                 "cell overrides it." if _can_speed else
+                 "This engine has no speaking-speed control, so neither this "
+                 "nor a row's `Voiceover_Speed` cell changes the pace. Rows "
+                 "that set one say so in their warnings.",
         )
+        if not _can_speed:
+            voice_speed = 1.0
+            st.caption(
+                f"{speech_synth.ENGINES[voice_engine]} has no speed control — "
+                "narration plays at the model's own pace.")
         beat_max_words = st.slider(
             "Words per caption", 1, 8, int(settings.BEAT_MAX_WORDS),
             help="How many words sit on screen at once. Three or four is the "
@@ -571,6 +617,61 @@ with st.sidebar:
              "video — so it never freezes on a last frame. Off = play once, then "
              "hold the last frame. Split-screen mode turns this on automatically.",
     )
+
+    # ---- Promo Alternate
+    # The switch itself lives beside the promo uploader in the main area (that
+    # is where someone looks when deciding not to use a promo), but the sidebar
+    # runs FIRST in Streamlit's top-to-bottom script order, so it cannot read
+    # the widget's return value. It reads session_state instead, which already
+    # holds the NEW value at the start of the rerun a toggle triggers — so this
+    # section appears and disappears on the same rerun as the tick, with no lag.
+    # Nothing here may be keyed "promo_alt": that key belongs to the checkbox.
+    promo_alt = bool(st.session_state.get("promo_alt"))
+    # In an EXPANDER rather than behind `if promo_alt:` — the widgets have to be
+    # instantiated on every run whether the mode is on or not. Streamlit drops
+    # the state of a keyed widget the moment a run stops rendering it, so a
+    # section that only exists while the box is ticked would throw away a
+    # multi-gigabyte pool the first time someone unticked it to re-read the
+    # promo uploader's help text. The expander just opens itself instead.
+    with st.expander("Promo Alternate", expanded=promo_alt):
+        st.caption(
+            "The pool that REPLACES the promo video, used only while **Use "
+            "Promo Alternate clips instead** is ticked beside the promo "
+            "uploader. One flat pool, not slots: clips play back-to-back in the "
+            "promo's own box, each one once and in full, until the video ends — "
+            "and the **voiceover decides where that is**. The CTA clips above "
+            "are untouched and keep cycling in their own box, so both rotate."
+        )
+        promo_alt_files = st.file_uploader(
+            "Promo Alternate clips (MP4)", type=["mp4"],
+            accept_multiple_files=True, key="promo_alt_pool",
+            help="A different selection plays in each output video, every clip "
+                 "used once before any repeats.",
+        )
+        if promo_alt_files:
+            _alt_gb = sum(getattr(f, "size", 0) for f in promo_alt_files) / 1024 ** 3
+            st.caption(f"{len(promo_alt_files)} clip(s), {_alt_gb:,.1f} GB")
+        promo_alt_seconds = st.number_input(
+            "Length without a voiceover (s)", 1.0, 600.0,
+            float(PROMO_ALT_SECONDS), 0.5,
+            help="With no promo there is nothing to measure, so a row whose "
+                 "Voiceover cell is blank (or a batch with narration turned "
+                 "off) is rendered for this long. Rows that DO have narration "
+                 "ignore this and last exactly as long as they speak.",
+        )
+        promo_alt_audio = not st.checkbox(
+            "Mute the clips' own audio", value=True,
+            help="On, the video is carried by the voiceover and the music bed "
+                 "alone. Off, the clips' own sound takes the place the promo's "
+                 "audio held — mixed under the music and ducked under the "
+                 "voice. Every clip in the pool must have an audio track for "
+                 "that; if any is silent they are all played muted and the "
+                 "batch says so.",
+        )
+    # The pool is only ever read in the mode it belongs to: leaving clips in the
+    # uploader must not add a layer to an ordinary promo render.
+    if not promo_alt:
+        promo_alt_files = []
 
     st.subheader("GIFs (optional)")
     st.caption(
@@ -832,6 +933,7 @@ config = RenderConfig(
     split_audio_chunks=int(split_audio_chunks),
     split_audio_spread=float(split_audio_spread),
     voice_enabled=bool(voice_enabled),
+    voice_engine=str(voice_engine),
     voice_set=list(voice_set),
     voice_speed=float(voice_speed),
     voice_lead_in=float(voice_lead_in),
@@ -843,6 +945,9 @@ config = RenderConfig(
     screen_text_y=int(screen_text_y),
     video_x=int(video_x), video_y=int(video_y),
     video_w=int(video_w), video_h=int(video_h),
+    promo_alt=bool(promo_alt),
+    promo_alt_seconds=float(promo_alt_seconds),
+    promo_alt_audio=bool(promo_alt_audio),
     cta_x=int(cta_x), cta_y=int(cta_y),
     cta_w=int(cta_w), cta_h=int(cta_h),
     cta_fade_start=float(cta_fade_start), cta_fade_duration=float(cta_fade_duration),
@@ -884,13 +989,34 @@ st.subheader("1. Upload assets")
 col1, col2 = st.columns(2)
 with col1:
     excel_file = st.file_uploader("Excel file (.xlsx)", type=["xlsx"])
+    # Declared BEFORE the uploader it disables: Streamlit refuses to change a
+    # widget after it has been instantiated. Its key is read by the sidebar,
+    # which runs earlier in the script but sees the new value straight away
+    # because a tick triggers a rerun with session_state already updated.
+    st.checkbox(
+        "Use Promo Alternate clips instead", key="promo_alt",
+        help="No promo video at all. The promo's box is filled by a pool of "
+             "clips uploaded in the sidebar, playing back-to-back, and the "
+             "voiceover and its captions decide how long each video runs. The "
+             "CTA clips keep cycling in their own box alongside.",
+    )
     promo_files = st.file_uploader(
         f"Promo video(s) (MP4) — up to {MAX_PROMO_VIDEOS}", type=["mp4"],
-        accept_multiple_files=True,
+        accept_multiple_files=True, disabled=promo_alt,
         help="Upload one to use it in every video. Upload several and a "
              "multi-batch render gives each batch its own promo video, cycling "
              "if there are fewer promos than batches.",
     )
+    # Disabling an uploader does NOT clear what it already holds — the files
+    # stay in session_state and would still be staged at submit. Drop them here
+    # so everything downstream (the batch default, the grids, the pairing table,
+    # stage_uploads) agrees that this mode has no promos.
+    if promo_alt:
+        promo_files = []
+        if not promo_alt_files:
+            st.warning(
+                "Promo Alternate is on but its pool is empty — upload clips "
+                "under **Promo Alternate** in the sidebar.")
     # Truncated HERE, not in stage_uploads, because everything below reads this
     # list: the "Batches to render" DEFAULT (Streamlit raises rather than clamps
     # when a default lands above max_value, so an over-long upload took the page
@@ -994,13 +1120,32 @@ with st.expander(
         "Excel and the sidebar. Leave a cell blank to keep the main Excel's "
         "text for that one."
     )
+    if promo_alt:
+        st.info(
+            "Not used with Promo Alternate — these sheets match their columns to "
+            "promo video filenames, and this mode has no promo videos. Per-row "
+            "text comes from the main Excel as usual. Anything uploaded here is "
+            "kept and used again as soon as the mode is turned off."
+        )
+    # The uploaders are instantiated either way: Streamlit discards a keyed
+    # widget's state the moment a run stops rendering it, so hiding them would
+    # silently throw away workbooks the moment someone tried the mode. What
+    # changes is that `grid_uploads` is left EMPTY in this mode — with no promo
+    # names every column is unmatched, which text_grids treats as an error that
+    # refuses the batch outright, so anyone with a grid uploaded could not
+    # submit at all.
     for column, role in zip(st.columns(len(TEXT_ROLES)), TEXT_ROLES):
-        grid_uploads[role] = column.file_uploader(
+        upload = column.file_uploader(
             f"{role} by promo (.xlsx)", type=["xlsx"], key=grid_keys[role],
+            disabled=promo_alt,
             help=f"One column per promo video, one row per row of the main "
                  f"Excel. Overrides the main sheet's `{role}` column.",
         )
-    if promo_names and sheet_rows:
+        if not promo_alt:
+            grid_uploads[role] = upload
+    if promo_alt:
+        pass
+    elif promo_names and sheet_rows:
         st.caption("Templates below already carry the right headers and row "
                    "count — fill one in and upload it back.")
         for column, role in zip(st.columns(len(TEXT_ROLES)), TEXT_ROLES):
@@ -1074,12 +1219,17 @@ if st.session_state.get("text_grid_key", grid_key) != grid_key:
         st.session_state.pop(stale, None)
 st.session_state["text_grid_key"] = grid_key
 
-ready = df is not None and video_file is not None
+# In Promo Alternate mode the alternate pool stands in for the promo — it is
+# what fills the promo's box, so it is what "have we got a picture yet" means.
+ready = df is not None and (bool(promo_alt_files) if promo_alt
+                            else video_file is not None)
 if not ready:
     st.info(
-        "Upload the Excel sheet and a promo video to enable preview and "
-        "generation. The background ZIP and CTA image are optional — without "
-        "backgrounds, videos render on the sidebar's background color."
+        "Upload the Excel sheet and "
+        + ("Promo Alternate clips (sidebar)" if promo_alt else "a promo video")
+        + " to enable preview and generation. The background ZIP and CTA image "
+          "are optional — without backgrounds, videos render on the sidebar's "
+          "background color."
     )
 
 # ---- actions
@@ -1563,17 +1713,31 @@ st.subheader("5. Generate")
 # below searches up to, since folders and passes share this range.
 MAX_PASSES = max(20, MAX_PROMO_VIDEOS)
 
-col_b, col_f, col_c = st.columns(3)
+# Promo Alternate has no promos, so the copies-per-promo lever has no subject —
+# the thing that distinguishes one pass from another here is the clip draw
+# (variant_salt, which the worker already sets per batch). Dropping the third
+# widget rather than relabelling it: reinterpreting "copies of one promo" as
+# "copies of one sequence" would be a number nothing in the pipeline actually
+# enforces, which is worse than not offering it.
+cols = st.columns(2 if promo_alt else 3)
+col_b, col_f = cols[0], cols[1]
+col_c = None if promo_alt else cols[2]
 # Default to one pass per promo, which is the pairing people expect: every row
-# rendered once with every promo.
+# rendered once with every promo. With no promos there is no such pairing, so
+# one pass — more is a deliberate ask for more variants.
 _n_promos = max(1, len(promo_files or []))
 n_batches = col_b.number_input(
-    "Batches to render", 1, MAX_PASSES, _n_promos, 1, disabled=not ready,
-    help="How many times the sheet is rendered. Each pass uses the next promo "
-         "video and picks different sample clips. Set this to the number of "
-         "promos and every row is rendered once with every promo.",
+    "Batches to render", 1, MAX_PASSES, 1 if promo_alt else _n_promos, 1,
+    disabled=not ready,
+    help="How many times the sheet is rendered. "
+         + ("Each pass draws a different Promo Alternate sequence and different "
+            "CTA clips for every row, so N passes give N different videos per "
+            "row." if promo_alt else
+            "Each pass uses the next promo video and picks different sample "
+            "clips. Set this to the number of promos and every row is rendered "
+            "once with every promo."),
 )
-if _n_promos > 1 and int(n_batches) < _n_promos:
+if not promo_alt and _n_promos > 1 and int(n_batches) < _n_promos:
     st.warning(
         f"Only {int(n_batches)} pass(es) but {_n_promos} promo videos — promos "
         f"{int(n_batches) + 1}–{_n_promos} would never be used. Set batches to "
@@ -1585,7 +1749,7 @@ n_folders = col_f.number_input(
          "no folder is just one promo video. Usually the same as the batch "
          "count. A minimum when a copies limit is set beside it.",
 )
-max_per_folder = col_c.number_input(
+max_per_folder = 0 if col_c is None else col_c.number_input(
     "Max copies of one promo per folder", 0, 10_000, 0, 1, disabled=not ready,
     help="0 = off. When set, the output-folder count is raised (never lowered) "
          "until no folder holds more videos made from any one promo than this. "
@@ -1638,7 +1802,12 @@ if ready and df is not None:
                 if fixed_tail else "each published under both names.")
                if _n_names == 2 else
                f"published as `{upload_platforms}.zip` only."))
-    if promo_count > 1 and int(n_batches) == promo_count:
+    if promo_alt:
+        note += (f" No promo video: every pass draws its own Promo Alternate "
+                 f"sequence from the {len(promo_alt_files or [])} clip(s) "
+                 "uploaded, so the passes differ by their clips rather than by "
+                 "a promo.")
+    elif promo_count > 1 and int(n_batches) == promo_count:
         note += (f" Every row is rendered once with each of the {promo_count} "
                  "promos — all pairings, no repeats.")
     elif promo_count and int(n_batches) > promo_count:
@@ -1653,8 +1822,10 @@ if ready and df is not None:
     _worst = batching.max_copies_per_promo(int(n_batches), len(df),
                                            n_folders_eff, max(1, promo_count))
     _per_folder = total_videos // max(1, n_folders_eff)
-    st.caption(f"{n_folders_eff} folder(s) x ~{_per_folder:,} videos, at most "
-               f"{_worst} copies of any one promo in any one folder.")
+    st.caption(f"{n_folders_eff} folder(s) x ~{_per_folder:,} videos"
+               + ("." if promo_alt else
+                  f", at most {_worst} copies of any one promo in any one "
+                  "folder."))
     if n_folders_eff != int(n_folders):
         st.info(
             f"Output folders raised {int(n_folders)} → {n_folders_eff} to keep "
@@ -1782,7 +1953,8 @@ if preview_clicked and ready:
                 # the row's chosen clip so the box is draggable in the preview.
                 ws = build_workspace(Path(tmp), video_file, zip_file, cta_file,
                                      font_file, cta_video_slot_files, gif_files,
-                                     bg_video_files, music_files)
+                                     bg_video_files, music_files,
+                                     promo_alt_files)
                 generator = make_generator(ws, config, Path(tmp) / "out")
                 # Same deterministic background assignment as the real batch,
                 # so the preview shows the row's actual background — and the
@@ -1822,7 +1994,8 @@ if render_row_clicked and ready:
             try:
                 ws = build_workspace(Path(tmp), video_file, zip_file, cta_file,
                                      font_file, cta_video_slot_files, gif_files,
-                                     bg_video_files, music_files)
+                                     bg_video_files, music_files,
+                                     promo_alt_files)
                 generator = make_generator(ws, config, Path(tmp) / "out")
                 # Same deterministic background assignment as the real batch, so
                 # this row renders with its actual background. df already carries
@@ -2012,7 +2185,12 @@ if generate_clicked and ready:
                       None if bg_video_source != "upload" else bg_video_files,
                       # And again for the music, which is the only pool read out
                       # of Drive as AUDIO — see check_source(kind="audio").
-                      None if music_source != "upload" else music_files)
+                      None if music_source != "upload" else music_files,
+                      # The Promo Alternate pool is upload-only: it has no Drive
+                      # source of its own, so there is no source flag to gate it
+                      # on. Empty when the mode is off, which is what makes a
+                      # job's mode readable straight off its assets folder.
+                      promo_alt_files)
 
         # The sheet is written with any preview-editor edits baked in, so the
         # worker renders exactly what this page was showing. updated_excel_bytes

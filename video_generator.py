@@ -156,6 +156,27 @@ GIF_MAX_TOTAL_CLIPS = 40
 BG_VIDEO_MIN_SECONDS = 10.0
 BG_VIDEO_MAX_TOTAL_CLIPS = 40
 
+# Promo Alternate: the pool that REPLACES the promo video. Dealt by the same
+# dealer as the gifs and the beds, but with a dwell floor of effectively zero —
+# these are promo clips, not looping ornaments, and replaying a 3-second clip
+# twice to clear a floor reads as a stutter rather than as dwell. Each clip
+# therefore plays once, in full, and the sequence keeps drawing until it covers
+# the render length (which in this mode is the narration, not a promo file).
+#
+# The cap is the same 40 as its siblings and for the same reason — it shares
+# one MAX_TOTAL_FFMPEG_INPUTS ceiling with them. A pool of very short clips
+# against a long script reaches it, and the dealer says so in a row warning
+# instead of silently under-filling.
+PROMO_ALT_MIN_SECONDS = 0.1
+PROMO_ALT_MAX_TOTAL_CLIPS = 40
+# The render length for a row with NO narration, when nothing else can supply
+# one. Without a promo file there is no duration to measure and captions cannot
+# bootstrap their own (group_text returns [] for a non-positive total), so this
+# is the only non-circular answer — the clip sequence itself is dealt AGAINST
+# the render length, so it cannot define it. Overridden by
+# RenderConfig.promo_alt_seconds.
+PROMO_ALT_SECONDS = 20.0
+
 # The music bed: a flat pool of AUDIO files sequenced exactly like the gifs and
 # the background videos — tracks are drawn until their combined length covers
 # the promo, each held for at least MUSIC_MIN_SECONDS by repeating ITSELF a
@@ -828,6 +849,21 @@ class RenderConfig:
     video_y: int = 300
     video_w: int = 900
     video_h: int = 900
+    # ---- Promo Alternate. On, the promo video is not used at all: the promo's
+    # own box and z-order are filled by a back-to-back sequence dealt from the
+    # alternate pool, and the render length comes from the narration instead of
+    # from a promo file. Every other layer is untouched — the CTA clip box keeps
+    # its own pool, its own box and its own fill setting, so both cycle.
+    promo_alt: bool = False
+    # The render length for a row with no narration. See PROMO_ALT_SECONDS.
+    promo_alt_seconds: float = PROMO_ALT_SECONDS
+    # Whether the alternate clips keep their OWN audio. Off by default: these
+    # videos are carried by the narration, and a pool of clips each arriving
+    # with its own room tone cutting across the voice is far more often a
+    # nuisance than an effect. On, the joined clip audio takes the place the
+    # promo's audio held — music mixes under it, split-audio can warp it, and
+    # the voice ducks it.
+    promo_alt_audio: bool = False
     cta_x: int = 340
     cta_y: int = 1600
     cta_w: int = 400
@@ -1001,6 +1037,10 @@ class RenderConfig:
     # which documents what each of these is for and why the defaults are what
     # they are). Off by default; every one of these is a no-op while it is.
     voice_enabled: bool = False
+    # Which engine narrates: "kokoro" or "pocket". Defaulted, like every other
+    # field here, so a job queued before this existed still rehydrates through
+    # RenderConfig(**params["render_config"]) and runs on Kokoro as it did.
+    voice_engine: str = field(default_factory=lambda: config.VOICE_ENGINE)
     voice_lang: str = field(default_factory=lambda: config.VOICE_LANG)
     voice_set: list = field(default_factory=lambda: list(config.VOICE_SET))
     voice_speed: float = field(default_factory=lambda: config.VOICE_SPEED)
@@ -1139,6 +1179,12 @@ class RowSpec:
     # because build_ffmpeg_command zips them into `-stream_loop N -i path`.
     bg_video_clips: Optional[list] = None
     bg_video_clip_repeats: Optional[list] = None
+    # The row's Promo Alternate sequence, filled by _resolve_promo_alt_sequence
+    # and painted in the promo's own box. Same contract as the two pairs above:
+    # index-aligned, and build_ffmpeg_command zips them into
+    # `-stream_loop N -i path`, so they MUST stay equal length.
+    promo_alt_clips: Optional[list] = None
+    promo_alt_clip_repeats: Optional[list] = None
     # The row's music sequence, filled by _resolve_music_sequence. Same contract
     # as gif_clips/gif_clip_repeats: index-aligned, and build_ffmpeg_command
     # zips them into `-stream_loop N -i path`, so they MUST stay equal length.
@@ -1295,6 +1341,7 @@ class VideoGenerator:
         music_paths: Optional[list] = None,
         voice_cache_dir: Optional[Path] = None,
         voice_allow_synthesis: bool = False,
+        promo_alt_paths: Optional[list] = None,
     ):
         self.config = config
         # Where the pre-render voice stage left its synthesized wavs. render_row
@@ -1334,7 +1381,35 @@ class VideoGenerator:
         # or corrupt uploads) are skipped with a warning naming the file. The
         # warnings are surfaced by the app after construction.
         self.input_warnings: list[str] = []
-        if not _has_video_stream(self.ffmpeg, self.video_path):
+        # Promo Alternate: drop-and-warn per clip like every other pool, then
+        # decide whether the mode is actually ON. A pool that empties itself
+        # here (every clip audio-only or corrupt) must NOT leave the mode on
+        # with nothing to paint — the promo box would be empty and the render
+        # would succeed, which is the silent-failure shape this file keeps
+        # warning about. Falling back to the promo instead is only honest when
+        # there is a promo; with none, the raise below names the real cause.
+        good_alts = []
+        for p in (promo_alt_paths or []):
+            p = Path(p)
+            if _has_video_stream(self.ffmpeg, p):
+                good_alts.append(p)
+            else:
+                self.input_warnings.append(
+                    f"Promo Alternate '{p.name}' has no video stream "
+                    "(audio-only or corrupt) — skipped.")
+        self.promo_alt_paths = good_alts
+        self._promo_alt = bool(config.promo_alt and self.promo_alt_paths)
+        if config.promo_alt and not self.promo_alt_paths:
+            raise ValueError(
+                "Promo Alternate is on but no usable clips were uploaded — "
+                "there is nothing to fill the video with. Upload clips to the "
+                "Promo Alternate pool, or turn the mode off and upload a promo "
+                "video.")
+        # The promo file is only required when it is actually rendered. In
+        # Promo Alternate mode video_path is the alternate pool's first clip
+        # (see workspace_from_dir) and the check below is redundant but
+        # harmless — it is the same file the loop above already passed.
+        if not self._promo_alt and not _has_video_stream(self.ffmpeg, self.video_path):
             raise ValueError(
                 "The promo video has no video stream — it looks audio-only or "
                 "corrupt. Re-export it as a normal MP4 video.")
@@ -1393,7 +1468,33 @@ class VideoGenerator:
         self._has_music = bool(self.music_paths)
         # Whether the PROMO carries audio, probed once. `-map <promo>:a?` could
         # stay ignorant of this; a filter graph cannot (see _has_audio_stream).
-        self._promo_has_audio = _has_audio_stream(self.ffmpeg, self.video_path)
+        #
+        # In Promo Alternate mode the promo's audio leg is the joined clips'
+        # audio, and concat with a=1 needs EVERY input to have an audio stream —
+        # one silent clip in the sequence is not a quiet passage, it is a graph
+        # FFmpeg refuses. So probe the pool once here and treat the leg as
+        # present only when EVERY clip carries sound — pool-wide rather than
+        # per row, because the sequence is dealt from a shuffled deck and a row
+        # that happened to miss the silent clip would otherwise render with
+        # audio while its neighbour rendered without.
+        self._promo_alt_audio_ok = {
+            str(p): _has_audio_stream(self.ffmpeg, p) for p in self.promo_alt_paths
+        } if (self._promo_alt and config.promo_alt_audio) else {}
+        if self._promo_alt:
+            self._promo_has_audio = bool(config.promo_alt_audio
+                                         and all(self._promo_alt_audio_ok.values()))
+            if config.promo_alt_audio and not self._promo_has_audio:
+                silent = sorted(Path(k).name for k, v
+                                in self._promo_alt_audio_ok.items() if not v)
+                self.input_warnings.append(
+                    "Promo Alternate: keeping the clips' own audio is on, but "
+                    + ", ".join(silent[:5])
+                    + (" and others have" if len(silent) > 5 else
+                       " has" if len(silent) == 1 else " have")
+                    + " no audio track. The clips are played silent — FFmpeg "
+                      "cannot join a sequence where only some clips have sound.")
+        else:
+            self._promo_has_audio = _has_audio_stream(self.ffmpeg, self.video_path)
 
         self._bg_index, self._bg_names = self._build_bg_index(Path(bg_dir))
         # Fonts are cached by (file path, named variation, size). The uploaded
@@ -2061,6 +2162,18 @@ class VideoGenerator:
             if spec.video_y is None:
                 spec.video_y = cfg.video_y
 
+        # Even box, for the same reason the background-video box is evened: the
+        # alternate sequence is padded to exactly this size before concat, and
+        # an odd width or height has no valid yuv420p chroma size at the output.
+        # Harmless when the mode is off — the sidebar's own values are already
+        # even, and only an Excel Video_Width cell can be odd.
+        if self._promo_alt:
+            spec.video_w -= spec.video_w % 2
+            spec.video_h -= spec.video_h % 2
+            spec.video_x -= spec.video_x % 2
+            spec.video_y -= spec.video_y % 2
+            self._resolve_promo_alt_sequence(spec)
+
         video_rect = (spec.video_x, spec.video_y,
                       spec.video_x + spec.video_w, spec.video_y + spec.video_h)
         # crop_to_panels (split only): the output is exactly the panel band, so
@@ -2393,6 +2506,23 @@ class VideoGenerator:
             spec, self.bg_video_paths, 0xB6D,
             max(0.1, float(self.config.bg_video_min_seconds or BG_VIDEO_MIN_SECONDS)),
             BG_VIDEO_MAX_TOTAL_CLIPS, "Background videos", "background video")
+
+    def _resolve_promo_alt_sequence(self, spec: RowSpec) -> None:
+        """Fill spec.promo_alt_clips / spec.promo_alt_clip_repeats for this row.
+
+        Fourth caller of the dwell-sequence dealer, and the only one whose
+        output is the MAIN picture rather than a decoration. It wants the same
+        thing the other three do — a derived-length sequence over a flat pool —
+        with a floor of effectively zero so every clip plays once, in full: a
+        promo clip replayed to clear a dwell floor reads as a stutter, not as
+        dwell. Its own salt, for the reason recorded at _resolve_gif_sequence:
+        sharing one would lock this layer's draw to another's in every row.
+        """
+        if not self.promo_alt_paths:
+            return
+        spec.promo_alt_clips, spec.promo_alt_clip_repeats = self._deal_dwell_sequence(
+            spec, self.promo_alt_paths, 0x4E7, PROMO_ALT_MIN_SECONDS,
+            PROMO_ALT_MAX_TOTAL_CLIPS, "Promo Alternate", "clip")
 
     def _resolve_music_sequence(self, spec: RowSpec) -> None:
         """Fill spec.music_clips / spec.music_clip_repeats for this row.
@@ -2861,6 +2991,16 @@ class VideoGenerator:
         preview can honestly show."""
         return spec.gif_clips[0]
 
+    def _lead_promo_path(self, spec: RowSpec) -> Optional[Path]:
+        """What fills the promo box first in this row — the promo itself, or in
+        Promo Alternate mode the first clip of this row's sequence.
+
+        None means "the promo", which is _fit_frame / _first_video_frame's own
+        default, so the caller passes this straight through."""
+        if self._promo_alt and spec.promo_alt_clips:
+            return spec.promo_alt_clips[0]
+        return None
+
     # ------------------------------------------------- timed captions + voice
 
     def attach_voice(self, spec: RowSpec, entry: Optional[dict] = None) -> None:
@@ -2891,6 +3031,38 @@ class VideoGenerator:
         shown = spec.screen_text.text.strip()
         spoken = (spec.voiceover or "").strip()
 
+        # A speaking speed the chosen engine cannot honour. Pocket TTS has no
+        # rate control at all, so a Voiceover_Speed cell is silently inert
+        # there — and silently inert is the one outcome worth a warning, since
+        # the same sheet DOES change pace on Kokoro. The sidebar slider is
+        # disabled in that mode; this catches the per-row cell, which is not.
+        if (spoken and spec.voice_speed is not None
+                and abs(float(spec.voice_speed) - 1.0) > 1e-6
+                and not speech_synth.supports_speed(cfg.voice_engine)):
+            spec.warnings.append(
+                f"Voiceover_Speed is {float(spec.voice_speed):g}x, but "
+                f"{speech_synth.ENGINES.get(speech_synth.normalize_engine(cfg.voice_engine), cfg.voice_engine)}"
+                " has no speaking-speed control — this row narrates at the "
+                "engine's own pace. Switch the speech engine to Kokoro to use "
+                "it.")
+
+        # The two catalogues share no names, so flipping the sidebar engine
+        # makes every Voiceover_Voice cell in an existing sheet foreign — and a
+        # name the engine cannot resolve fails inside synthesize(), which logs
+        # and returns None. That is a SILENT row, and a whole sheet of them is
+        # a silent batch that finishes as a success; without this the only
+        # trace is a line in render_log.txt. Only when nothing was synthesized:
+        # both engines also accept a path or an hf:// URL, which is not in the
+        # list and must not be shouted about when it worked.
+        if (spoken and entry is None and spec.voice_name
+                and spec.voice_name not in speech_synth.voices(cfg.voice_engine)):
+            spec.warnings.append(
+                f"Voiceover_Voice '{spec.voice_name}' is not a "
+                f"{speech_synth.ENGINES.get(speech_synth.normalize_engine(cfg.voice_engine), cfg.voice_engine)}"
+                " voice, so this row is silent — the two engines share no "
+                "voice names. Clear the cell to use the batch's own voices, "
+                "or switch the speech engine back.")
+
         if entry:
             spec.voice_wav = Path(entry["wav"])
             spec.voice_duration = float(entry.get("duration") or 0.0)
@@ -2906,7 +3078,22 @@ class VideoGenerator:
                     "spread evenly across the narration rather than synced to "
                     "it word by word. Leave Screen_Text blank to sync exactly.")
             else:
-                spec.beats = group_words(entry.get("words") or (), **kw)
+                entry_words = entry.get("words") or ()
+                spec.beats = group_words(entry_words, **kw)
+                # The synthesizer marks a word whose timing it had to invent
+                # rather than measure. All of them means this row's captions are
+                # PACED, not synced — the engine returned audio and no
+                # alignment (upstream pocket-tts, or a model config with no
+                # timestamp heads). It looks identical in the output and reads
+                # as drift on a long script, so it is worth the same sentence
+                # the Screen_Text case above gets.
+                if entry_words and all(w.get("estimated") for w in entry_words):
+                    spec.warnings.append(
+                        "This engine returned no word timings, so the captions "
+                        "are spread evenly across the narration rather than "
+                        "synced to it word by word. Install "
+                        "pocket-tts-timestamped (or switch to Kokoro) to sync "
+                        "them exactly.")
         elif shown or spoken:
             # No narration to time against, so the words are paced across the
             # promo itself. Two ways to land here, and both want captions:
@@ -2918,13 +3105,34 @@ class VideoGenerator:
             #    showing them silently is far better than showing nothing —
             #    and it means the caption side of this feature works on a
             #    machine that cannot run the voice model at all.
+            # _render_duration, not the promo's own length: in Promo Alternate
+            # mode there is no promo to pace against, and with voice_duration
+            # still 0 here that accessor returns the configured fallback — the
+            # exact length this row will be rendered at. Outside the mode it
+            # returns the promo, which is what this always read.
             spec.beats = group_text(shown or spoken,
-                                    self._probe_duration(self.video_path) or 0.0,
+                                    self._render_duration(spec) or 0.0,
                                     **kw)
+            # A row with a script but no synthesized wav is an old, deliberate
+            # silence — a cache miss renders the row silent and always has. What
+            # is NEW is the consequence: with no promo, the narration is also
+            # the LENGTH, so the same miss no longer produces a correct-looking
+            # silent video, it produces one cut to the fallback. A 50-second
+            # script coming out as a 20-second video is the kind of thing that
+            # reads as success in a thumbnail, so name it on the row.
+            if self._promo_alt and spoken:
+                spec.warnings.append(
+                    f"No narration was synthesized for this row, so it is "
+                    f"rendered at the {self._render_duration(spec):.1f}s "
+                    "fallback length rather than the length of its script. "
+                    "Check the voiceover stage — the captions are paced across "
+                    "the fallback, not across the speech.")
         else:
             spec.beats = []
 
-        if spec.beats and not cfg.voice_loop_promo:
+        # No promo means nothing for the script to outrun: the length IS the
+        # narration, so looping is neither possible nor needed.
+        if spec.beats and not cfg.voice_loop_promo and not self._promo_alt:
             promo = self._probe_duration(self.video_path)
             if promo and spec.voice_duration > promo:
                 spec.warnings.append(
@@ -2950,16 +3158,18 @@ class VideoGenerator:
         cfg = self.config
         if not (cfg.voice_enabled and self.voice_cache_dir and spec.voiceover):
             return None
+        engine = speech_synth.normalize_engine(cfg.voice_engine)
         voice = spec.voice_name or (cfg.voice_set[0] if cfg.voice_set
-                                    else speech_synth.DEFAULT_VOICE)
+                                    else speech_synth.default_voice(engine))
         speed = (spec.voice_speed if spec.voice_speed is not None
                  else cfg.voice_speed)
         entry = speech_synth.load_cached(spec.voiceover, voice, speed,
-                                         self.voice_cache_dir, cfg.voice_lang)
+                                         self.voice_cache_dir, cfg.voice_lang,
+                                         engine)
         if entry is None and self.voice_allow_synthesis:
             entry = speech_synth.synthesize(
                 spec.voiceover, voice, speed, self.voice_cache_dir,
-                cfg.voice_lang, cfg.voice_lead_in)
+                cfg.voice_lang, cfg.voice_lead_in, engine)
         return entry
 
     def _caption_layers(self, spec: RowSpec) -> tuple:
@@ -3335,6 +3545,18 @@ class VideoGenerator:
         cfg = self.config
         fps = int(cfg.fps or FPS)
         has_cta = self._has_cta
+        # Promo Alternate: the promo input is not claimed at all and [vidB] is
+        # built from this sequence instead. `_check_filter_inputs` asserts every
+        # declared input is referenced EXACTLY once, so the promo has to be
+        # DROPPED rather than merely left unpainted.
+        alts = list(spec.promo_alt_clips or [])
+        alt_reps = list(spec.promo_alt_clip_repeats or [])
+        # Same normalisation, same reason as the gif/bed/music lists below:
+        # zip() truncates, so a length mismatch would emit fewer -i than the
+        # filter graph references and shift every later input by one.
+        if len(alt_reps) != len(alts):
+            alt_reps = (alt_reps + [1] * len(alts))[:len(alts)]
+        has_alt = bool(self._promo_alt and alts)
         clips = spec.cta_video_clips or []
         has_ctav = bool(self._has_cta_video and clips)
         gifs = list(spec.gif_clips or [])
@@ -3473,7 +3695,7 @@ class VideoGenerator:
         # which is what makes the render length max(promo, voice) — see
         # _render_duration. The -t bounds the looped stream, so the extra laps
         # cost decode work only up to the point the output ends.
-        promo_dur = self._probe_duration(self.video_path)
+        promo_dur = None if has_alt else self._probe_duration(self.video_path)
         promo_args: list = []
         if still_dur and promo_dur and still_dur > promo_dur + 0.05:
             laps = max(1, math.ceil((still_dur + 1.0) / promo_dur))
@@ -3481,7 +3703,16 @@ class VideoGenerator:
                           "-t", f"{still_dur + 1.0:.3f}"]
 
         base_i = add_still(base_png)
-        promo_i = add_input(*promo_args, "-i", str(self.video_path))
+        # In Promo Alternate mode the promo slot is taken by the alternate
+        # sequence: one input per clip, claimed HERE so they keep the promo's
+        # position in the input order and every later index shifts by exactly
+        # the same amount the graph below accounts for. -stream_loop is the
+        # gifs' mechanism and is a no-op at the mode's floor (every repeat is 1)
+        # — it is here so a raised floor needs no second code path.
+        alt_ix = ([add_input("-stream_loop", str(max(1, int(r)) - 1), *clip_args(),
+                             "-i", str(p))
+                   for p, r in zip(alts, alt_reps)] if has_alt else [])
+        promo_i = None if has_alt else add_input(*promo_args, "-i", str(self.video_path))
         # The text layer is either a still (no captions) or a concat-demuxer
         # TIMELINE of full-canvas frames, one per caption beat. It is the SAME
         # input slot either way, referenced exactly once as [text_i:v], at the
@@ -3589,14 +3820,17 @@ class VideoGenerator:
             # render_row's broad except as "The filename or extension is too long".
             raise RuntimeError(
                 f"This row needs {n_inputs} FFmpeg inputs, over the "
-                f"{MAX_TOTAL_FFMPEG_INPUTS} limit: {len(clips)} CTA clip(s), "
+                f"{MAX_TOTAL_FFMPEG_INPUTS} limit: "
+                f"{len(alts) if has_alt else 0} Promo Alternate clip(s), "
+                f"{len(clips)} CTA clip(s), "
                 f"{len(gifs)} gif(s), {len(sub_layers)} subliminal layer(s), "
                 f"{len(music) if has_music else 0} music track(s), "
                 f"{len(bgvs) if has_bgv else 0} background video(s), "
                 f"{len(voice_ix)} voiceover track(s). "
                 "Raise the gif dwell time so fewer gifs are needed, raise the "
                 "background-video or music dwell time, use fewer CTA clips, or "
-                "shorten the promo video.")
+                + ("shorten the narration or use longer Promo Alternate clips."
+                   if has_alt else "shorten the promo video."))
 
         # ---- filter graph, written against the indices claimed above ---------
         # spec.video_* are the per-row resolved box (Excel Video_* overrides,
@@ -3606,12 +3840,75 @@ class VideoGenerator:
         # [vidB] is the promo's visible layer painted in z-order below.
         video_pos = (f"x='{spec.video_x}+({spec.video_w}-w)/2'"
                      f":y='{spec.video_y}+({spec.video_h}-h)/2'")
-        parts = [
-            f"[{promo_i}:v]scale={spec.video_w}:{spec.video_h}"
-            f":force_original_aspect_ratio=decrease:force_divisible_by=2,"
-            f"split[vidA][vidB];",
-            f"[{base_i}:v][vidA]overlay={video_pos}:shortest=1[anchored];",
-        ]
+        if has_alt:
+            # Promo Alternate. Each clip is contain-fitted to the promo's box
+            # and padded to exactly that size on a transparent colour — the
+            # gifs' treatment, not the CTA clips' cover-fill crop, because this
+            # layer is standing in for the promo and the promo has always been
+            # fitted whole with the background showing through the leftover
+            # area. The pad is also what makes concat possible at all: it
+            # REJECTS inputs of differing sizes, and a pool of assorted aspect
+            # ratios contain-fitted is exactly that. format=rgba must precede
+            # the pad or the transparent colour flattens to opaque black.
+            #
+            # Per-clip rgba is what the CTA and gif branches already do at the
+            # same 40-clip cap; the background beds are the exception because
+            # their only alpha use is one colorchannelmixer AFTER the join. That
+            # arrangement cannot be copied here without giving up the
+            # transparent margin, and the margin IS this layer's look. Measured
+            # peak working set, pool of 1.5s clips dealt to the 40-clip cap:
+            #
+            #     ordinary promo, 1 input                        0.51 GB
+            #     gif layer, 40 clips at 360x360, rgba           1.95 GB
+            #     this layer, 40 clips at 900x900  (the default) 2.69 GB
+            #     this layer, 40 clips at 1080x1920 (full canvas)4.01 GB
+            #
+            # and the two alternatives at full canvas, same graph otherwise:
+            #
+            #     format=yuva420p per clip (keeps alpha)         3.83 GB  (-4%)
+            #     format=yuv420p + one rgba after the concat     1.59 GB
+            #
+            # The last one is the beds' shape and it is 2.5x cheaper — but it
+            # loses the alpha before the join, so the margin comes out as black
+            # bars instead of the background. It is the ALPHA that costs here,
+            # not the byte width: yuva420p is 2.5 bytes a pixel against rgba's 4
+            # and saves 4%. So there is no cheaper arrangement that still looks
+            # right, and the cost is bounded instead: every clip plays once (no
+            # dwell repeats inflating the count), and a row that reaches the cap
+            # warns. At full canvas with many parallel renders this is the layer
+            # to watch — see the beds' note below on what an OOM kill looks like.
+            parts = []
+            for k, idx in enumerate(alt_ix):
+                parts.append(
+                    f"[{idx}:v]fps={fps},format=rgba,"
+                    f"scale={spec.video_w}:{spec.video_h}"
+                    f":force_original_aspect_ratio=decrease:force_divisible_by=2,"
+                    f"pad={spec.video_w}:{spec.video_h}"
+                    f":'trunc(({spec.video_w}-iw)/4)*2'"
+                    f":'trunc(({spec.video_h}-ih)/4)*2'"
+                    f":color=0x00000000,setsar=1[pa{k}];"
+                )
+            if len(alt_ix) > 1:
+                parts.append(f"{''.join(f'[pa{k}]' for k in range(len(alt_ix)))}"
+                             f"concat=n={len(alt_ix)}:v=1:a=0[vidB];")
+            else:
+                parts.append("[pa0]null[vidB];")
+            # No [vidA] anchor. Its whole job was to terminate the infinite
+            # `-loop 1` base still on the promo's length via shortest=1, and
+            # here the sequence is NOT the length: _render_duration comes from
+            # the narration, the base still already carries an input-side -t
+            # from still_args, and the output carries its own -t. Anchoring on
+            # the sequence instead would cut the narration short every time the
+            # clips under-fill — the one failure this layer is allowed to have,
+            # and the one the last frame holding is supposed to absorb.
+            parts.append(f"[{base_i}:v]null[anchored];")
+        else:
+            parts = [
+                f"[{promo_i}:v]scale={spec.video_w}:{spec.video_h}"
+                f":force_original_aspect_ratio=decrease:force_divisible_by=2,"
+                f"split[vidA][vidB];",
+                f"[{base_i}:v][vidA]overlay={video_pos}:shortest=1[anchored];",
+            ]
         if has_ctav:
             n = len(clips)
             speeds = spec.cta_video_clip_speeds or [1.0] * n
@@ -3806,11 +4103,46 @@ class VideoGenerator:
         tempos = self._split_audio_tempos(spec)
         aparts: list[str] = []
         audio_out = ""              # non-empty => map this label instead
-        if cfg.include_audio and (has_music or tempos or has_voice):
+        # `has_alt and self._promo_has_audio` joins the third condition rather
+        # than riding the `-map <promo>:a?` fallback below: there is no single
+        # input holding this row's sound, so the only way to hear the clips at
+        # all is to concatenate them in the graph.
+        if cfg.include_audio and (has_music or tempos or has_voice
+                                  or (has_alt and self._promo_has_audio)):
             main_dur = self._render_duration(spec)
             legs: list[str] = []
             # Complementary split: music at v leaves the original at 1-v.
             vol = max(0.0, min(float(cfg.music_volume or 0.0), 1.0))
+            # Where the "promo" leg's audio comes from. Normally the promo
+            # input; in Promo Alternate mode the joined clips, which have to be
+            # concatenated into one label first. Every clip is aformat'ed before
+            # concat for the reason the music pool is: concat refuses inputs
+            # whose rate or layout disagree, and a pool of user-supplied clips
+            # disagreeing is the normal case. Only reached when every clip in
+            # the pool carries audio — _promo_has_audio is False otherwise, and
+            # the constructor has already warned by name.
+            promo_a = f"[{promo_i}:a]"
+            if self._promo_has_audio and has_alt:
+                for k, idx in enumerate(alt_ix):
+                    aparts.append(
+                        f"[{idx}:a]{MUSIC_FORMAT},asetpts=PTS-STARTPTS[pa{k}a];")
+                # apad to the render length, bounded. The promo's own track was
+                # the render length by definition; this sequence is not — it can
+                # under-fill exactly as the picture side can, and a short audio
+                # leg is worse than a short picture leg because `-shortest`
+                # would trim the PICTURE to match it. Bounded by whole_dur, so
+                # it cannot run away, and apad never trims.
+                tail = f",apad=whole_dur={main_dur:.3f}" if main_dur else ""
+                if len(alt_ix) > 1:
+                    aparts.append(
+                        "".join(f"[pa{k}a]" for k in range(len(alt_ix)))
+                        + f"concat=n={len(alt_ix)}:v=0:a=1{tail}[paseq];")
+                    promo_a = "[paseq]"
+                elif tail:
+                    aparts.append(f"[pa0a]{tail.lstrip(',')}[paseq];")
+                    promo_a = "[paseq]"
+                else:
+                    promo_a = "[pa0a]"
             if self._promo_has_audio:
                 if tempos:
                     n = len(tempos)
@@ -3821,7 +4153,7 @@ class VideoGenerator:
                     # because this shares Windows' command-line ceiling with
                     # everything else here.
                     stamps = "|".join(f"{step * (i + 1):.4f}" for i in range(n - 1))
-                    aparts.append(f"[{promo_i}:a]asegment=timestamps={stamps}"
+                    aparts.append(f"{promo_a}asegment=timestamps={stamps}"
                                  + "".join(f"[as{i}]" for i in range(n)) + ";")
                     for i, tempo in enumerate(tempos):
                         # asetpts rebases each cut to zero so concat can stitch
@@ -3840,7 +4172,7 @@ class VideoGenerator:
                                  + f"concat=n={n}:v=0:a=1,"
                                  f"apad=whole_dur={main_dur:.3f}[apromo];")
                 else:
-                    aparts.append(f"[{promo_i}:a]anull[apromo];")
+                    aparts.append(f"{promo_a}anull[apromo];")
                 if has_music:
                     aparts.append(f"[apromo]volume={1.0 - vol:.4f}[apromov];")
                     legs.append("[apromov]")
@@ -3851,11 +4183,18 @@ class VideoGenerator:
                 # honouring "10%" literally would produce a near-silent video
                 # that reads as a bug rather than a setting.
                 bed_vol = vol if self._promo_has_audio else 1.0
-                if not self._promo_has_audio:
+                # Not warned in Promo Alternate mode with the clips muted: there
+                # the bed being the whole mix is the SETTING, not a surprise
+                # about this particular upload, and the warning would otherwise
+                # fire on every row of every batch and mean nothing.
+                if not self._promo_has_audio and not (has_alt
+                                                      and not cfg.promo_alt_audio):
                     spec.warnings.append(
-                        "Music: this promo video has no audio track, so the "
-                        f"music plays at full volume rather than {vol:.0%} — "
-                        "there is nothing to mix it against.")
+                        ("Music: the Promo Alternate clips have no audio track"
+                         if has_alt else
+                         "Music: this promo video has no audio track")
+                        + f", so the music plays at full volume rather than "
+                          f"{vol:.0%} — there is nothing to mix it against.")
                 for k, idx in enumerate(music_ix):
                     # aformat before concat, always: concat refuses inputs whose
                     # rate or layout disagree, and a pool of user-supplied
@@ -3911,6 +4250,13 @@ class VideoGenerator:
             cmd += ["-an"]
         elif audio_out:
             cmd += ["-map", audio_out, "-c:a", "aac", "-b:a", cfg.audio_bitrate]
+        elif has_alt:
+            # No promo to take audio from. With no music, no voice and no split
+            # there is no graph either, so the only honest answer is a silent
+            # video: `-map <clip>:a?` would pick ONE clip of the sequence and
+            # play it over the whole thing. Keeping the clips' audio goes
+            # through the graph above instead, which joins all of them.
+            cmd += ["-an"]
         else:
             # Take audio from the promo video if it exists; never fail without
             # it. The CTA video's and the gifs' audio is intentionally ignored.
@@ -4115,7 +4461,22 @@ class VideoGenerator:
 
         None (an unprobeable promo) propagates exactly as _probe_duration's None
         always did; every caller already degrades or warns on it.
+
+        In Promo Alternate mode there is no promo to measure, so the narration
+        defines the length outright and a row without narration falls back to
+        the configured seconds. It is NEVER None there, which is what makes the
+        mode safe: `still_args` / `clip_args()` return [] on a None duration and
+        _check_input_bounds then refuses every row of a batch that mixes audio
+        with unbounded looping inputs. Deriving the length from the clips
+        instead is not an option — the clip sequence is dealt against this
+        value, so it cannot also define it.
         """
+        if self._promo_alt:
+            voice = float(getattr(spec, "voice_duration", 0.0) or 0.0)
+            if voice > 0:
+                return voice
+            return max(0.1, float(self.config.promo_alt_seconds
+                                  or PROMO_ALT_SECONDS))
         promo = self._probe_duration(self.video_path)
         if promo is None:
             return None
@@ -4237,7 +4598,8 @@ class VideoGenerator:
         base = self.build_base_image(spec).convert("RGBA")
         overlay = self.build_overlay_image(spec)  # resolves positions first
 
-        frame = self._fit_frame(spec.video_w, spec.video_h)
+        frame = self._fit_frame(spec.video_w, spec.video_h,
+                                self._lead_promo_path(spec))
         fx = spec.video_x + (spec.video_w - frame.width) // 2
         fy = spec.video_y + (spec.video_h - frame.height) // 2
         base.paste(frame, (fx, fy))
@@ -4262,7 +4624,8 @@ class VideoGenerator:
         spec = self._spec_for(row, row_number)
         self._resolve_positions(spec)
 
-        frame = self._fit_frame(spec.video_w, spec.video_h)
+        frame = self._fit_frame(spec.video_w, spec.video_h,
+                                self._lead_promo_path(spec))
 
         texts = []
         measure = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
@@ -4336,6 +4699,12 @@ class VideoGenerator:
                 "w": spec.video_w, "h": spec.video_h,
                 "frame": _img_to_data_uri(frame.convert("RGB"), "JPEG"),
                 "frame_w": frame.width, "frame_h": frame.height,
+                # Promo Alternate: how many clips rotate through this box during
+                # the video. Same admission the gif and bed boxes make — a still
+                # cannot show a sequence. Absent (not 0) outside the mode, so
+                # the editor's existing `if (v.count)` style checks read false.
+                **({"count": len(spec.promo_alt_clips or [])}
+                   if self._promo_alt else {}),
             },
             "texts": texts,
             # Sidebar layer order — the editor applies these as CSS z-index so the
