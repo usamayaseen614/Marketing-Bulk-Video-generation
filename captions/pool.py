@@ -79,9 +79,24 @@ HASHTAG_SCHEMA = {
     "required": ["hashtag_sets"],
 }
 
+SCRIPT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "scripts": {
+            "type": "array",
+            "items": {"type": "string"},
+        }
+    },
+    "required": ["scripts"],
+}
+
 # One call cannot reliably emit 2,000 varied strings, so the pool is built in
 # chunks with a varying angle per chunk to keep them from converging.
 CHUNK_SIZE = 100
+
+# A voiceover script is several sentences, not one line, so a chunk holds far
+# fewer before the response grows long enough to risk being cut off.
+SCRIPT_CHUNK_SIZE = 25
 
 # A round issues enough chunks to cover the shortfall, then measures what
 # survived de-duplication. Normally two or three rounds are enough. The cap
@@ -242,7 +257,8 @@ def _clean_hashtags(text: str) -> str:
 
 def _fill(count: int, make_prompt: Callable[[int, int], str], schema: dict,
           key: str, clean: Callable[[str], str], label: str,
-          model: Optional[str] = None, progress=None) -> list[str]:
+          model: Optional[str] = None, progress=None,
+          chunk_size: int = CHUNK_SIZE) -> list[str]:
     """Build a list of `count` distinct strings by running chunks concurrently.
 
     `make_prompt(chunk_no, want)` writes one chunk's prompt; `key` is the field
@@ -277,9 +293,9 @@ def _fill(count: int, make_prompt: Callable[[int, int], str], schema: dict,
             # the pool's `workers` slots, so this is pipelined rather than a
             # burst: as one finishes the next starts.
             futures = {}
-            for _ in range(math.ceil(missing / CHUNK_SIZE)):
+            for _ in range(math.ceil(missing / chunk_size)):
                 chunk_no += 1
-                want = min(CHUNK_SIZE, missing)
+                want = min(chunk_size, missing)
                 futures[pool.submit(_one, chunk_no, want)] = chunk_no
 
             fresh = failures = 0
@@ -307,13 +323,21 @@ def _fill(count: int, make_prompt: Callable[[int, int], str], schema: dict,
                         "%d failed)", label, len(out), count, round_no,
                         len(futures), fresh, failures)
 
-            if failures == len(futures):
+            if failures == len(futures) and not out:
                 # Nothing got through at all — a wrong model id, a revoked
                 # permission, an exhausted quota. Returning a silently empty
                 # pool would hide the one thing worth saying.
                 raise CaptionError(
                     f"Every {label} request failed. Last error: {first_error}"
                 ) from first_error
+            if failures == len(futures):
+                # A later round died whole — typically a quota that ran out
+                # after round 1. Raising here would throw away everything
+                # already paid for, so keep it and say it is short.
+                logger.warning("%s stopped at %d of %d — every request in "
+                               "round %d failed: %s", label, len(out), count,
+                               round_no, first_error)
+                break
             if fresh == 0:
                 # The model has stopped producing anything new; better a
                 # smaller honest pool than an endless loop.
@@ -383,6 +407,50 @@ def generate_hashtag_sets(theme: str, count: int, model: Optional[str] = None,
 
     return _fill(count, make_prompt, HASHTAG_SCHEMA, "hashtag_sets",
                  _clean_hashtags, "Hashtag pool", model, progress)
+
+
+def _clean_script(text: str) -> str:
+    """One script as plain spoken text on a single line.
+
+    Emoji are stripped for the same reason as in captions, and one more: the
+    script is also the on-screen caption, and the caption fonts have no glyphs
+    for them."""
+    from captions.naming import strip_emoji
+
+    text = strip_emoji(text)
+    # Only a quote pair wrapping the WHOLE script — a script that merely opens
+    # with a quoted testimonial must keep both of its quote marks.
+    closing = {'"': '"', "“": "”", "'": "'"}.get(text[:1])
+    if (closing and len(text) > 1 and text.endswith(closing)
+            and text[0] not in text[1:-1] and closing not in text[1:-1]):
+        text = text[1:-1].strip()
+    return text
+
+
+def generate_scripts(prompt: str, count: int, model: Optional[str] = None,
+                     progress=None) -> list[str]:
+    """Generate `count` distinct voiceover scripts from the user's own prompt.
+
+    The prompt is sent as written — it is the user's whole brief. Only what the
+    harness needs is added: how many this chunk should hold, and that each is
+    read aloud on its own, so it must not carry titles or numbering that a
+    voice would then speak."""
+    prompt = (prompt or "").strip()
+    if not prompt:
+        raise CaptionError("No script prompt given — there is nothing to "
+                           "generate scripts from.")
+
+    def make_prompt(chunk_no: int, want: int) -> str:
+        return (
+            f"{prompt}\n\n"
+            f"Write {want} different scripts following the instructions above. "
+            "Each is read aloud as the voiceover of its own video, so no two "
+            "may share their wording. Plain spoken text only: no titles, "
+            "numbering, stage directions or emoji."
+        )
+
+    return _fill(count, make_prompt, SCRIPT_SCHEMA, "scripts", _clean_script,
+                 "Script pool", model, progress, chunk_size=SCRIPT_CHUNK_SIZE)
 
 
 def build_pool(theme: Optional[str] = None,

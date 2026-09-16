@@ -29,6 +29,24 @@ def _blank(value) -> bool:
     return value is None or str(value).strip().lower() in {"", "nan", "none"}
 
 
+def with_item_script(row: pd.Series, meta: Optional[dict]) -> pd.Series:
+    """`row` as one particular video narrates it.
+
+    A generated script belongs to a (batch, row) item, not to the sheet row —
+    every rendered video gets its own — so it lives on the item's meta and is
+    laid over the row here. The voice stage and the renderer BOTH go through
+    this, which is what keeps the cache key the stage synthesizes under
+    identical to the one the renderer looks up."""
+    meta = meta or {}
+    if not meta.get("voiceover"):
+        return row
+    row = row.copy()
+    row[VOICEOVER_COLUMN] = meta["voiceover"]
+    if meta.get("voice"):
+        row[VOICE_COLUMN] = meta["voice"]
+    return row
+
+
 def parse_scripts(data: bytes, filename: str = "") -> list[str]:
     """Read an uploaded script pool into a list of scripts.
 

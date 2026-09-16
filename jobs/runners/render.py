@@ -66,6 +66,7 @@ import results
 import text_grids
 from batching import Slot
 from jobs import store
+from speech.pool import with_item_script
 from video_generator import RenderConfig, VideoGenerator
 from workspace import workspace_from_dir
 
@@ -441,7 +442,10 @@ def _render_batches(job: dict, df: pd.DataFrame, ws, n_batches: int,
 
                     for item in group:
                         _b, row_no = batching.split_index(item["idx"], n_rows)
-                        row = df_run.iloc[row_no - 1]
+                        # A generated script is this video's own, not the
+                        # row's — see speech.pool.with_item_script.
+                        row = with_item_script(df_run.iloc[row_no - 1],
+                                               item.get("meta"))
                         name = (item.get("meta") or {}).get("short_name") or None
                         # The manifest's Promo column is the delivered record of
                         # what each file was made from, so it must not name a
@@ -1112,6 +1116,10 @@ def _write_manifests(job_id: str, n_rows: int, n_folders: int,
             "Promo": meta.get("promo", ""),
             "Drive_Uploaded": item.get("upload_status") == store.ITEM_DONE,
         }
+        if meta.get("voiceover"):
+            # A generated script is recorded nowhere else — the sheet only
+            # holds the ones typed or uploaded.
+            entry["Voiceover"] = meta["voiceover"]
         for role in text_grids.ROLES:
             if overrides.get(role):
                 entry[role] = _rendered_text(role, slot)
@@ -1144,32 +1152,6 @@ def run(job: dict) -> dict:
     videos.mkdir(parents=True, exist_ok=True)
 
     store.set_stage(job_id, "preparing")
-
-    # Narration first, and before the sheet is read: the stage deals pooled
-    # scripts into Voiceover/Voiceover_Voice columns in the staged workbook, and
-    # _load_dataframe below has to see them. Everything downstream only LOOKS UP
-    # what this produced — synthesis must never happen inside the render pool.
-    try:
-        from jobs.runners import voice as voice_stage
-        voice_result = voice_stage.run_stage(job, params)
-        if voice_result.get("synthesized"):
-            logger.info("Job %s: %s", job_id, voice_result)
-        elif voice_result.get("failed"):
-            # EVERY script failed. Gated on `synthesized` alone this said
-            # nothing at all — the loudest possible outcome (a whole batch
-            # rendering mute) was the one that logged least. The usual cause is
-            # a sheet whose Voiceover_Voice names belong to the other engine,
-            # which the stage cannot tell from a genuinely bad name.
-            logger.warning(
-                "Job %s: NO narration was synthesized — %d script(s) all "
-                "failed on %s. Every row will render silent. Check that the "
-                "sheet's Voiceover_Voice names belong to this engine. %s",
-                job_id, voice_result["failed"],
-                voice_result.get("engine", "?"), voice_result)
-    except Exception as exc:  # noqa: BLE001
-        # An enhancement never costs a render. Those rows come out silent.
-        logger.warning("Job %s: voiceover stage failed (%s) — rendering silent",
-                       job_id, exc)
 
     df = _load_dataframe(assets)
     n_rows = len(df)
@@ -1206,10 +1188,42 @@ def run(job: dict) -> dict:
     logger.info("Job %s: %d rows x %d batches = %d videos; names assigned: %s",
                 job_id, n_rows, n_batches, len(slots), caption_info.get("applied"))
 
+    # Narration after the items exist (a generated script is stored on its
+    # video's item) and before anything renders. The stage also deals uploaded
+    # scripts into Voiceover/Voiceover_Voice columns in the staged workbook, so
+    # the sheet is read again after it. Everything downstream only LOOKS UP
+    # what this produced — synthesis must never happen inside the render pool.
+    voice_warnings: list[str] = []
+    try:
+        from jobs.runners import voice as voice_stage
+        voice_result = voice_stage.run_stage(job, params, slots, n_rows)
+        if voice_result.get("warning"):
+            voice_warnings.append(voice_result["warning"])
+        if voice_result.get("synthesized"):
+            logger.info("Job %s: %s", job_id, voice_result)
+        elif voice_result.get("failed"):
+            # EVERY script failed. Gated on `synthesized` alone this said
+            # nothing at all — the loudest possible outcome (a whole batch
+            # rendering mute) was the one that logged least. The usual cause is
+            # a sheet whose Voiceover_Voice names belong to the other engine,
+            # which the stage cannot tell from a genuinely bad name.
+            logger.warning(
+                "Job %s: NO narration was synthesized — %d script(s) all "
+                "failed on %s. Every row will render silent. Check that the "
+                "sheet's Voiceover_Voice names belong to this engine. %s",
+                job_id, voice_result["failed"],
+                voice_result.get("engine", "?"), voice_result)
+    except Exception as exc:  # noqa: BLE001
+        # An enhancement never costs a render. Those rows come out silent.
+        logger.warning("Job %s: voiceover stage failed (%s) — rendering silent",
+                       job_id, exc)
+    df = _load_dataframe(assets)
+
     # The sheet keeps its Caption/Hashtags columns for the first batch, so it
     # still opens as a recognisable version of what was submitted.
-    batch_warnings = _render_batches(job, df, ws, n_batches, n_rows, workers,
-                                     overrides=overrides, promo_for=promo_for)
+    batch_warnings = voice_warnings + _render_batches(
+        job, df, ws, n_batches, n_rows, workers,
+        overrides=overrides, promo_for=promo_for)
 
     placement = batching.mix_into_folders(slots, n_folders)
 

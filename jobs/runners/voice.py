@@ -20,8 +20,11 @@ from jobs import store
 logger = logging.getLogger(__name__)
 
 
-def run_stage(job: dict, params: dict) -> dict:
+def run_stage(job: dict, params: dict, slots: list, n_rows: int) -> dict:
     """Synthesize every unique narration BEFORE a single row is rendered.
+
+    `slots` are the videos this job renders; their items must already be
+    registered, because a generated script is stored on its item.
 
     Two reasons this is its own stage rather than something render_row does on
     demand:
@@ -34,6 +37,8 @@ def run_stage(job: dict, params: dict) -> dict:
     WORK. Synthesis is keyed by content, so a 16,000-row batch dealt from a
     60-script pool does 60 syntheses and 15,940 cache hits. Doing it per row
     would do it 16,000 times, and do it inside the render's critical path.
+    Generated scripts (script_source "generate") are one per video by design,
+    so there every video IS a synthesis — still here, still out of the render.
 
     Never raises: a voiceover is an enhancement, and a batch that cannot narrate
     must still render. Rows whose synthesis failed simply come out silent."""
@@ -44,13 +49,6 @@ def run_stage(job: dict, params: dict) -> dict:
 
     from speech import pool as script_pool
     from speech import synth
-
-    # The engine this batch was queued with, not the machine's current default:
-    # a job sitting in the queue must narrate with what its sidebar selected.
-    engine = synth.normalize_engine(render_config.get("voice_engine"))
-    usable, reason = synth.available(engine)
-    if not usable:
-        return {"skipped": reason}
 
     assets = store.assets_dir(job_id)
     sheet = assets / "input.xlsx"
@@ -82,6 +80,30 @@ def run_stage(job: dict, params: dict) -> dict:
         logger.warning("Job %s: could not write the Voiceover columns back (%s)",
                        job_id, exc)
 
+    # A video that already rendered is never rendered again, so a script or a
+    # synthesis for it on a resumed job is paid for and unused — and a script
+    # written onto its item would put narration in the manifest its MP4 lacks.
+    from batching import item_index
+
+    listed = store.list_items(job_id)
+    items = {i["idx"]: i.get("meta") or {} for i in listed}
+    done = {i["idx"] for i in listed if i.get("render_status") == store.ITEM_DONE}
+    slots = [s for s in slots if item_index(s.batch, s.row, n_rows) not in done]
+
+    # Scripts are written BEFORE the engine check: with no engine on this
+    # machine the renderer still paces the words on screen as timed captions,
+    # and those words have to exist for it to show anything.
+    if params.get("script_source") == "generate":
+        summary.update(_generate_scripts(job_id, params, frame, slots, n_rows,
+                                         items, voices))
+
+    # The engine this batch was queued with, not the machine's current default:
+    # a job sitting in the queue must narrate with what its sidebar selected.
+    engine = synth.normalize_engine(render_config.get("voice_engine"))
+    usable, reason = synth.available(engine)
+    if not usable:
+        return {"skipped": reason, **summary}
+
     lang = render_config.get("voice_lang") or config.VOICE_LANG
     lead_in = float(render_config.get("voice_lead_in") or config.VOICE_LEAD_IN)
     default_speed = float(render_config.get("voice_speed") or config.VOICE_SPEED)
@@ -99,10 +121,16 @@ def run_stage(job: dict, params: dict) -> dict:
     # sheet carrying a Voiceover_Speed column with any blank cell cached under
     # speed "nan" while the renderer looked up "1.000". Every such row missed
     # the cache and rendered SILENT, with nothing on stderr and no failed item.
+    #
+    # Walked per video rather than per sheet row, so a generated script is laid
+    # over its row by the same with_item_script the renderer calls.
     from video_generator import RowSpec
 
     tasks: dict[str, tuple] = {}
-    for _, row in frame.iterrows():
+    for slot in slots:
+        row = script_pool.with_item_script(
+            frame.iloc[slot.row - 1],
+            items.get(item_index(slot.batch, slot.row, n_rows)))
         spec = RowSpec.from_row(row)
         text = synth.normalize(spec.voiceover)
         if not text:
@@ -180,3 +208,74 @@ def run_stage(job: dict, params: dict) -> dict:
                 job_id, done, failed, len(frame), synth.ENGINES.get(engine, engine))
     return {"unique_scripts": len(tasks), "synthesized": done, "failed": failed,
             "voices": len(voices), "engine": engine, **summary}
+
+
+def _generate_scripts(job_id: str, params: dict, frame: pd.DataFrame,
+                      slots: list, n_rows: int, items: dict,
+                      voices: list) -> dict:
+    """Write one Gemini script onto every video that needs one.
+
+    A video needs one when its sheet row left both Voiceover and Screen_Text
+    blank — the same two rules the uploaded pool follows — and its item does not
+    carry one yet. That last check is what makes a resumed job free: the scripts
+    were paid for once, and each video keeps the words it was given.
+
+    `items` (idx -> meta) is updated in place so the synthesis walk after this
+    sees the new scripts. A `warning` in the result goes into the render log:
+    a batch that quietly rendered mute is the outcome most worth reporting."""
+    from batching import item_index
+    from captions import pool as gemini
+    from speech import pool as script_pool
+
+    targets = []
+    for slot in slots:
+        idx = item_index(slot.batch, slot.row, n_rows)
+        row = frame.iloc[slot.row - 1]
+        if (items.get(idx, {}).get("voiceover")
+                or not script_pool._blank(row.get(script_pool.VOICEOVER_COLUMN))
+                or not script_pool._blank(row.get(script_pool.SCREEN_TEXT_COLUMN))):
+            continue
+        targets.append((slot, idx, row))
+    if not targets:
+        return {"generated_scripts": 0, "reason": ""}
+
+    def silent(why: str) -> dict:
+        logger.warning("Job %s: %s", job_id, why)
+        return {"generated_scripts": 0, "reason": "",
+                "warning": f"{why} — {len(targets):,} video(s) render silent."}
+
+    prompt = (params.get("script_prompt") or "").strip()
+    if not prompt:
+        return silent("Scripts were set to generate, but no prompt was given")
+
+    store.set_stage(job_id, f"writing scripts 0/{len(targets)}")
+
+    def progress(done: int, total: int) -> None:
+        store.heartbeat(job_id, stage=f"writing scripts {done}/{total}")
+
+    try:
+        scripts = gemini.generate_scripts(prompt, len(targets), progress=progress)
+    except Exception as exc:  # noqa: BLE001
+        return silent(f"Script generation failed ({exc})")
+    if not scripts:
+        return silent("Gemini returned no scripts")
+
+    for n, (slot, idx, row) in enumerate(targets):
+        meta = {**items.get(idx, {}), "voiceover": scripts[n % len(scripts)]}
+        # Row + batch, not position: each batch spreads its rows across the
+        # voices, and each row walks the voices from one batch to the next.
+        if voices and script_pool._blank(row.get(script_pool.VOICE_COLUMN)):
+            meta["voice"] = voices[(slot.row + slot.batch) % len(voices)]
+        store.update_item(job_id, idx, meta=meta)
+        items[idx] = meta
+
+    result = {"generated_scripts": len(scripts), "reason": ""}
+    if len(scripts) < len(targets):
+        # Only reachable when the model stops producing new scripts; repeating
+        # a few beats rendering those videos mute.
+        result["warning"] = (
+            f"Gemini wrote {len(scripts):,} distinct script(s) for "
+            f"{len(targets):,} videos, so some videos share a script.")
+    logger.info("Job %s: wrote %d script(s) across %d video(s)",
+                job_id, len(scripts), len(targets))
+    return result

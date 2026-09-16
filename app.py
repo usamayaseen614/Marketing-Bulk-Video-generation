@@ -93,18 +93,51 @@ def make_generator(ws: Workspace, config: RenderConfig, output_dir: Path) -> Vid
     return generator
 
 
-def apply_script_pool(frame, script_bytes, script_name, config: RenderConfig):
-    """Deal pooled scripts into the frame the way the batch's voice stage will.
+def sample_script(prompt: str) -> str:
+    """One Gemini script from `prompt`, kept until the prompt changes.
+
+    Session state, not a fresh call per click: every drag in the preview editor
+    is a rerun, and Preview and Render row should narrate the same words. A
+    failure is shown and not cached, so the next click tries again."""
+    cached = st.session_state.get("sample_script") or {}
+    if cached.get("prompt") == prompt and cached.get("script"):
+        return cached["script"]
+    from captions.pool import generate_scripts
+    try:
+        with st.spinner("Writing a sample script with Gemini…"):
+            script = (generate_scripts(prompt, 1) or [""])[0]
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"Couldn't write a sample script ({exc}) — this row has no "
+                   "narration here.")
+        return ""
+    st.session_state["sample_script"] = {"prompt": prompt, "script": script}
+    return script
+
+
+def apply_script_pool(frame, row_no: int, script_file, script_prompt: str,
+                      config: RenderConfig):
+    """Deal scripts into the frame the way the batch's voice stage will.
 
     The preview exists to show what the batch would produce, so a row whose
     Voiceover comes from the pool has to be narrated here too — otherwise
     previewing it shows an empty caption band and the batch shows a full one.
     Idempotent and non-destructive (a cell the sheet already filled always
-    wins), so running it here and again in the stage changes nothing."""
+    wins), so running it here and again in the stage changes nothing.
+
+    Generated scripts do not exist until the job runs, so a sample from the
+    same prompt stands in — and only when row `row_no` would take one, so
+    previewing a row with its own Voiceover costs no Gemini call."""
     if not config.voice_enabled:
         return frame
-    from speech.pool import apply_to_frame, parse_scripts
-    scripts = parse_scripts(script_bytes, script_name) if script_bytes else []
+    from speech.pool import (SCREEN_TEXT_COLUMN, VOICEOVER_COLUMN, _blank,
+                             apply_to_frame, parse_scripts)
+    scripts = []
+    if script_file is not None:
+        scripts = parse_scripts(script_file.getvalue(), script_file.name)
+    elif script_prompt.strip():
+        row = frame.iloc[row_no - 1]
+        if _blank(row.get(VOICEOVER_COLUMN)) and _blank(row.get(SCREEN_TEXT_COLUMN)):
+            scripts = [s for s in [sample_script(script_prompt.strip())] if s]
     filled, _ = apply_to_frame(frame, scripts, config.voice_set)
     return filled
 
@@ -1587,7 +1620,56 @@ caption_params["hashtag_source"] = hashtag_source
 # The script pool. Only rows whose `Voiceover` cell is BLANK draw from it, so a
 # sheet that already carries its own scripts ignores this entirely.
 script_file = None
+script_source = "upload"
 if voice_enabled:
+    script_source = st.radio(
+        "Scripts",
+        options=["upload", "generate"],
+        format_func=lambda m: {
+            "upload": "From a file I upload",
+            "generate": "Generate one per video (Gemini)",
+        }[m],
+        horizontal=True,
+        help="Either way, a row with its own `Voiceover` cell keeps it, and a "
+             "row with only `Screen_Text` stays silent.",
+    )
+if voice_enabled and script_source == "generate":
+    caption_params["script_prompt"] = st.text_area(
+        "Script prompt",
+        height=200,
+        placeholder="e.g. Write a 15-second TikTok voiceover for a skincare "
+                    "serum. Open with a hook, name one benefit, end with a "
+                    "call to action. Casual, second person.",
+        help="Sent to Gemini as written — describe the product, tone and "
+             "length here. The app only adds how many scripts to write and "
+             "asks for plain spoken text. Every video gets its own script, "
+             "written when the job starts, and each script is also the "
+             "video's on-screen caption.",
+    )
+    _prompt = caption_params["script_prompt"].strip()
+    if not _prompt:
+        st.error("A script prompt is required to generate scripts — enter "
+                 "one, or switch Scripts to an uploaded file.")
+    _sample = st.session_state.get("sample_script") or {}
+    _have_sample = _sample.get("prompt") == _prompt and bool(_sample.get("script"))
+    if st.button("🔄 New sample script" if _have_sample else "✍️ Write a sample script",
+                 disabled=not _prompt,
+                 help="Preview and Render row narrate one sample from this "
+                      "prompt, written on first use and kept until the prompt "
+                      "changes. The batch still writes a new script for every "
+                      "video."):
+        st.session_state.pop("sample_script", None)
+        sample_script(_prompt)
+        _sample = st.session_state.get("sample_script") or {}
+        _have_sample = bool(_sample.get("script"))
+    if _have_sample:
+        st.caption(f"Sample for Preview and Render row (click Preview again "
+                   f"after changing it): “{_sample['script']}”")
+    if not settings.gemini_configured():
+        st.warning("Vertex AI isn't configured — no scripts will be written "
+                   "and those videos will render silent.")
+caption_params["script_source"] = script_source
+if voice_enabled and script_source == "upload":
     script_file = st.file_uploader(
         "Script pool (.txt / .xlsx) — one script per line or per paragraph",
         type=["txt", "md", "xlsx", "csv"],
@@ -1879,6 +1961,17 @@ if ready and df is not None:
                 "fresh one, or render fewer batches."
             )
 
+    if voice_enabled and script_source == "generate":
+        # "Up to": rows with their own Voiceover or Screen_Text take no script.
+        from captions.pool import SCRIPT_CHUNK_SIZE
+        st.caption(
+            f"Up to **{total_videos:,} scripts** to write — "
+            f"~{-(-total_videos // SCRIPT_CHUNK_SIZE):,} Gemini call(s), "
+            f"{settings.CAPTION_CONCURRENCY} at a time — then one voiceover "
+            f"per video, {settings.VOICE_WORKERS} at a time, before rendering "
+            "starts."
+        )
+
     # Google allows one account 750 GB per rolling 24 hours into Drive, and
     # server-side copies count as well as uploads. At ~31 MB a video (measured
     # over a 16,000-video night) that is ~12,000 videos a day under both names,
@@ -1963,9 +2056,8 @@ if preview_clicked and ready:
                 df_preview, _ = generator.assign_backgrounds(
                     text_grids.apply_overrides(df, grid_overrides, promo_choice))
                 df_preview = apply_script_pool(
-                    df_preview,
-                    script_file.getvalue() if script_file else None,
-                    script_file.name if script_file else "", config)
+                    df_preview, int(preview_row), script_file,
+                    caption_params.get("script_prompt", ""), config)
                 payload = generator.build_editor_payload(
                     df_preview.iloc[int(preview_row) - 1], int(preview_row))
                 st.session_state["preview_payload"] = payload
@@ -2005,9 +2097,8 @@ if render_row_clicked and ready:
                 df_render, bg_warnings = generator.assign_backgrounds(
                     text_grids.apply_overrides(df, grid_overrides, promo_choice))
                 df_render = apply_script_pool(
-                    df_render,
-                    script_file.getvalue() if script_file else None,
-                    script_file.name if script_file else "", config)
+                    df_render, int(preview_row), script_file,
+                    caption_params.get("script_prompt", ""), config)
                 for message in bg_warnings:
                     st.warning(message)
                 res = generator.render_row(
@@ -2114,6 +2205,12 @@ if row_edits and excel_file is not None and not generate_clicked:
 if generate_clicked and ready and caption_mode == "generate"         and not caption_params.get("caption_theme", "").strip():
     st.error("Not queued — set a caption theme first, or choose “Use the "
              "active caption pool”.")
+    generate_clicked = False
+
+if generate_clicked and ready and voice_enabled and script_source == "generate" \
+        and not caption_params.get("script_prompt", "").strip():
+    st.error("Not queued — write a script prompt, or switch Scripts to an "
+             "uploaded file.")
     generate_clicked = False
 
 if generate_clicked and ready and clip_source == "drive_folder" and not any(
