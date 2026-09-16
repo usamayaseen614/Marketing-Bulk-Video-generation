@@ -65,7 +65,7 @@ def group_words(words, *, max_words: int = 4, max_chars: int = 28,
 
     beats = [(g[0]["start"], g[-1]["end"], " ".join(w["text"] for w in g))
              for g in groups if g]
-    beats = _merge_short(beats, min_duration)
+    beats = _merge_short(beats, min_duration, max_words, max_chars)
     return _cap(beats, max_beats)
 
 
@@ -93,23 +93,30 @@ def group_text(text: str, total_duration: float, *, max_words: int = 4,
                        min_duration=min_duration, max_beats=max_beats)
 
 
-def _merge_short(beats: list[Beat], min_duration: float) -> list[Beat]:
-    """Fold a beat too brief to read into the one before it.
+def _merge_short(beats: list[Beat], min_duration: float, max_words: int,
+                 max_chars: int) -> list[Beat]:
+    """Fold a beat too brief to read into the one before it — only while the
+    result still fits `max_words` and `max_chars`.
 
-    This deliberately outranks `max_words`: a beat can come out one or two words
-    over the cap, because a single word flashed up for a third of a second reads
-    as a glitch and a slightly long line does not. Punctuation is the usual
-    cause — a hard break after "?" leaves the next word stranded on its own."""
+    A lone word flashed up for a third of a second reads as a glitch, and
+    punctuation is the usual cause: a hard break after "?" leaves the next word
+    stranded on its own. But this never outranks the caps. Ordinary speech runs
+    about 0.3s a word, so at one word per caption nearly EVERY beat is "too
+    short" — merging regardless of the cap chained them together and folded a
+    whole sentence into a single caption, which is exactly what the "Words per
+    caption" setting exists to prevent."""
     if min_duration <= 0:
         return beats
     out: list[Beat] = []
     for start, end, text in beats:
-        if end - start >= min_duration or not out:
-            out.append((start, end, text))
-            continue
-        p_start, _, p_text = out[-1]
-        out[-1] = (p_start, end, f"{p_text} {text}")
-    # A single too-short beat at the head has nothing to merge into; keep it.
+        if out and end - start < min_duration:
+            p_start, _, p_text = out[-1]
+            merged = f"{p_text} {text}"
+            if len(merged.split()) <= max_words and len(merged) <= max_chars:
+                out[-1] = (p_start, end, merged)
+                continue
+        # Long enough, at the head with nothing before it, or too big to fold.
+        out.append((start, end, text))
     return out
 
 

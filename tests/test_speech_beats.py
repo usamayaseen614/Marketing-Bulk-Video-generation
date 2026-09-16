@@ -53,9 +53,21 @@ print(f"soft break held: {[b[2] for b in beats]}")
 # ---------- nothing strobes ----------
 words = [{"text": "long", "start": 0.0, "end": 2.0},
          {"text": "x", "start": 2.0, "end": 2.1}]
-beats = group_words(words, max_words=1, max_chars=100, min_duration=0.45)
+beats = group_words(words, max_words=2, max_chars=100, min_duration=0.45)
 assert len(beats) == 1 and beats[0] == (0.0, 2.1, "long x"), beats
 print(f"short beat merged: {beats}")
+
+# ---------- ...but never past the word cap ----------
+# Ordinary speech is ~0.3s a word, so at one word per caption every beat is
+# under min_duration. Merging anyway once folded this whole line into ONE caption.
+speech = timed("Stop scrolling right now because this sale is half off", per=0.3)
+beats = group_words(speech, max_words=1, max_chars=100, min_duration=0.45)
+assert [b[2] for b in beats] == "Stop scrolling right now because this sale is half off".split(), beats
+beats = group_words(speech, max_words=3, max_chars=100, min_duration=0.45)
+assert all(len(b[2].split()) <= 3 for b in beats), beats
+beats = group_words(words, max_words=1, max_chars=100, min_duration=0.45)
+assert [b[2] for b in beats] == ["long", "x"], beats
+print("word cap holds under short beats")
 
 # ---------- the beat cap ----------
 beats = group_words(timed(" ".join(str(i) for i in range(60))),
