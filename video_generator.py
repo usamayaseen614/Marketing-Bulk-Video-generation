@@ -1051,6 +1051,7 @@ class RenderConfig:
         default_factory=lambda: config.VOICE_DUCK_THRESHOLD)
     voice_duck_ratio: float = field(default_factory=lambda: config.VOICE_DUCK_RATIO)
     voice_loop_promo: bool = field(default_factory=lambda: config.VOICE_LOOP_PROMO)
+    voice_mute_promo: bool = field(default_factory=lambda: config.VOICE_MUTE_PROMO)
     beat_max_words: int = field(default_factory=lambda: config.BEAT_MAX_WORDS)
     beat_max_chars: int = field(default_factory=lambda: config.BEAT_MAX_CHARS)
     beat_min_duration: float = field(default_factory=lambda: config.BEAT_MIN_DURATION)
@@ -3007,8 +3008,9 @@ class VideoGenerator:
         """Bind a synthesized voiceover to a row and resolve its caption beats.
 
         MUST run before _resolve_positions (render_row calls it straight after
-        from_row), for two reasons: the render length is max(promo, voice) and
-        every duration-dependent layer is dealt against it, and the caption's
+        from_row), for two reasons: a narrated row's render length IS its
+        narration (see _render_duration) and every duration-dependent layer is
+        dealt against it, and the caption's
         type size is resolved once — against the LONGEST beat, so the band does
         not resize itself every time the words change.
 
@@ -3657,7 +3659,7 @@ class VideoGenerator:
         # ahead. The margin is slack for container-vs-stream duration rounding:
         # the base still feeds an overlay with shortest=1, so it must OUTLAST the
         # promo or the whole render would be truncated to the still.
-        still_dur = self._render_duration(spec)   # promo, or the voice if longer
+        still_dur = self._render_duration(spec)   # the promo, or the narration
         still_args = (["-t", f"{still_dur + 1.0:.3f}"] if still_dur else [])
 
         def clip_args(speed: float = 1.0) -> list:
@@ -3691,10 +3693,29 @@ class VideoGenerator:
                              "-i", str(path))
 
         # The promo is the anchor and is normally finite. When a script outruns
-        # it, the promo LOOPS rather than the narration being cut off mid-word,
-        # which is what makes the render length max(promo, voice) — see
-        # _render_duration. The -t bounds the looped stream, so the extra laps
+        # it, the promo LOOPS rather than the narration being cut off mid-word.
+        # A script that ends FIRST needs no loop: the output -t simply cuts the
+        # promo where the script stops — see _render_duration. The -t bounds
+        # the looped stream, so the extra laps
         # cost decode work only up to the point the output ends.
+        def fade_start(start, duration: float, label: str) -> float:
+            """A fade-in start that actually falls inside THIS row's render.
+
+            Fade starts are chosen against the promo, but a narrated row is
+            only as long as its script: a start of 8s on a 4s row holds the
+            layer at alpha 0 for the whole video, so the CTA simply never
+            appears — exit 0, nothing on stderr. Pulled back to the last
+            moment the fade can still finish, and the row is told."""
+            start = float(start or 0.0)
+            if not still_dur or start + float(duration or 0.0) <= still_dur:
+                return start
+            pulled = max(0.0, still_dur - float(duration or 0.0))
+            spec.warnings.append(
+                f"{label} fades in at {start:.1f}s but this row is only "
+                f"{still_dur:.1f}s long, so it would never appear — it fades "
+                f"in at {pulled:.1f}s instead.")
+            return pulled
+
         promo_dur = None if has_alt else self._probe_duration(self.video_path)
         promo_args: list = []
         if still_dur and promo_dur and still_dur > promo_dur + 0.05:
@@ -3829,8 +3850,13 @@ class VideoGenerator:
                 f"{len(voice_ix)} voiceover track(s). "
                 "Raise the gif dwell time so fewer gifs are needed, raise the "
                 "background-video or music dwell time, use fewer CTA clips, or "
-                + ("shorten the narration or use longer Promo Alternate clips."
-                   if has_alt else "shorten the promo video."))
+                # Every sequence above is dealt against the RENDER length, so
+                # the last suggestion has to name whatever sets it — shortening
+                # the promo changes nothing on a row whose script does.
+                + ("shorten the narration"
+                   if (spec.voice_duration and cfg.voice_loop_promo) or has_alt
+                   else "shorten the promo video")
+                + (" or use longer Promo Alternate clips." if has_alt else "."))
 
         # ---- filter graph, written against the indices claimed above ---------
         # spec.video_* are the per-row resolved box (Excel Video_* overrides,
@@ -3936,7 +3962,8 @@ class VideoGenerator:
             # emit a passthrough instead of a degenerate fade=d=0.
             if (spec.cta_video_fade_duration or 0) > 0:
                 parts.append(
-                    f"{seq}fade=t=in:st={spec.cta_video_fade_start}"
+                    f"{seq}fade=t=in:st="
+                    f"{fade_start(spec.cta_video_fade_start, spec.cta_video_fade_duration, 'The CTA video')}"
                     f":d={spec.cta_video_fade_duration}:alpha=1[ctav];"
                 )
             else:
@@ -3961,7 +3988,8 @@ class VideoGenerator:
                 gseq = labels[0]
             if (spec.gif_fade_duration or 0) > 0:
                 parts.append(
-                    f"{gseq}fade=t=in:st={spec.gif_fade_start}"
+                    f"{gseq}fade=t=in:st="
+                    f"{fade_start(spec.gif_fade_start, spec.gif_fade_duration, 'The gif layer')}"
                     f":d={spec.gif_fade_duration}:alpha=1[gifl];"
                 )
             else:
@@ -4028,7 +4056,9 @@ class VideoGenerator:
         if has_cta:
             parts.append(
                 f"[{cta_i}:v]format=rgba,"
-                f"fade=t=in:st={spec.cta_fade_start}:d={spec.cta_fade_duration}:alpha=1[cta];"
+                f"fade=t=in:st="
+                f"{fade_start(spec.cta_fade_start, spec.cta_fade_duration, 'The CTA image')}"
+                f":d={spec.cta_fade_duration}:alpha=1[cta];"
             )
         # Stack the overlay layers by their sidebar z-index (higher = on top; the
         # background is always the base). Ties fall back to the fixed priority in
@@ -4113,6 +4143,11 @@ class VideoGenerator:
             legs: list[str] = []
             # Complementary split: music at v leaves the original at 1-v.
             vol = max(0.0, min(float(cfg.music_volume or 0.0), 1.0))
+            # The promo's own soundtrack, dropped while this row narrates: the
+            # script is the message, and a promo talking underneath it is not.
+            # Its whole leg is skipped rather than volume=0 — a built-but-unused
+            # label is an unconnected output, which FFmpeg refuses outright.
+            mute_promo = bool(has_voice and cfg.voice_mute_promo)
             # Where the "promo" leg's audio comes from. Normally the promo
             # input; in Promo Alternate mode the joined clips, which have to be
             # concatenated into one label first. Every clip is aformat'ed before
@@ -4122,7 +4157,7 @@ class VideoGenerator:
             # the pool carries audio — _promo_has_audio is False otherwise, and
             # the constructor has already warned by name.
             promo_a = f"[{promo_i}:a]"
-            if self._promo_has_audio and has_alt:
+            if self._promo_has_audio and has_alt and not mute_promo:
                 for k, idx in enumerate(alt_ix):
                     aparts.append(
                         f"[{idx}:a]{MUSIC_FORMAT},asetpts=PTS-STARTPTS[pa{k}a];")
@@ -4143,7 +4178,7 @@ class VideoGenerator:
                     promo_a = "[paseq]"
                 else:
                     promo_a = "[pa0a]"
-            if self._promo_has_audio:
+            if self._promo_has_audio and not mute_promo:
                 if tempos:
                     n = len(tempos)
                     step = main_dur / n
@@ -4182,13 +4217,19 @@ class VideoGenerator:
                 # With no original audio to balance against, the bed IS the mix:
                 # honouring "10%" literally would produce a near-silent video
                 # that reads as a bug rather than a setting.
-                bed_vol = vol if self._promo_has_audio else 1.0
+                # Muted promo, same rule as a promo with no audio track at
+                # all: the bed IS the background, so the split has nothing to
+                # split against and honouring "35%" literally would just make
+                # the whole video quiet.
+                bed_vol = vol if (self._promo_has_audio and not mute_promo) else 1.0
                 # Not warned in Promo Alternate mode with the clips muted: there
                 # the bed being the whole mix is the SETTING, not a surprise
                 # about this particular upload, and the warning would otherwise
                 # fire on every row of every batch and mean nothing.
-                if not self._promo_has_audio and not (has_alt
-                                                      and not cfg.promo_alt_audio):
+                # Not warned when the promo was muted on purpose either — that
+                # is the setting doing exactly what it says.
+                if (not self._promo_has_audio and not mute_promo
+                        and not (has_alt and not cfg.promo_alt_audio)):
                     spec.warnings.append(
                         ("Music: the Promo Alternate clips have no audio track"
                          if has_alt else
@@ -4322,10 +4363,10 @@ class VideoGenerator:
         `filename` lets the caller name the output. Naming policy (captions,
         hashtags, length caps) lives with the caller, not in the render engine.
         Omit it for the historical Caption-or-Headline name."""
-        # _spec_for binds the narration before anything reads a duration: the
-        # render length is max(promo, voice) and _resolve_positions deals every
-        # duration-dependent layer (CTA samples, gifs, music, background beds)
-        # against it.
+        # _spec_for binds the narration before anything reads a duration: a
+        # narrated row's render length IS its narration (see _render_duration)
+        # and _resolve_positions deals every duration-dependent layer (CTA
+        # samples, gifs, music, background beds) against it.
         spec = self._spec_for(row, row_number)
         # Repeated renders of one sheet must differ; see RenderConfig.variant_salt.
         # Guarded so the default (0) leaves every existing seed untouched.
@@ -4446,9 +4487,11 @@ class VideoGenerator:
     def _render_duration(self, spec: "RowSpec") -> Optional[float]:
         """How long this row's OUTPUT is — which is no longer always the promo.
 
-        The promo defined the render length outright until voiceover arrived. A
-        script that runs past the promo now loops the promo instead of being cut
-        off mid-sentence, so the length is max(promo, voice).
+        The promo defined the render length outright until voiceover arrived.
+        With `voice_loop_promo` on, a narrated row is as long as its NARRATION:
+        a script past the promo loops the promo instead of being cut off
+        mid-sentence, and a script that finishes early ends the video there.
+        Off, the promo is the length and a long script is cut (and warned).
 
         This is one accessor rather than a patch at the output `-t` because
         SIX places derive something from the render length: the CTA sample
@@ -4481,7 +4524,12 @@ class VideoGenerator:
         if promo is None:
             return None
         voice = float(getattr(spec, "voice_duration", 0.0) or 0.0)
-        if voice > promo and self.config.voice_loop_promo:
+        if voice > 0 and self.config.voice_loop_promo:
+            # The SCRIPT is the length, in both directions: a longer one loops
+            # the promo (and pads the CTA sequence), a shorter one ends the
+            # video on its last word rather than leaving the promo playing to
+            # nobody. A row with no narration still takes the promo's length,
+            # because there is no script to take one from.
             return voice
         return promo
 

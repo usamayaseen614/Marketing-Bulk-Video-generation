@@ -534,13 +534,20 @@ What that means in practice:
 * **Switching engines re-synthesizes.** The engine is part of the cache key, so the same
   script under the other engine is a different entry rather than the first one's audio
   served twice. Nothing is lost by switching back and forth; each is cached separately.
-* **A script longer than the promo makes the video longer.** The promo loops until the
-  narration finishes rather than the sentence being cut off. Turn *Loop the promo if the
-  script is longer* off to keep the old behaviour — the row is then warned that its
-  narration was trimmed.
-* **The other audio ducks.** The promo's own sound and the music bed drop while the voice
-  is talking and come back between phrases. Measured at about 18 dB with the default
-  strength. Turn ducking off to mix at flat levels instead.
+* **The script sets the length of a narrated row.** A longer script loops the promo (and
+  pads the CTA clips) until the narration finishes rather than being cut off mid-sentence;
+  a shorter one ends the video on its last word instead of leaving the promo playing to
+  nobody. Turn *The script sets the video length* off to make the promo the length either
+  way — a long script is then trimmed and the row is warned. A row with no narration is the
+  promo's length regardless. A fade-in set beyond a short row's end (the CTA, the CTA video,
+  the gif layer) is pulled back so the layer still appears, and says so on the row.
+* **The promo's own audio is muted while narrating.** The script is the message once there
+  is one. Music then becomes the whole background and plays at full volume, since the
+  *Music volume* slider is a promo/music split with nothing left to split against. Untick
+  *Mute the promo's own audio while narrating* to mix the promo's soundtrack in underneath.
+* **The other audio ducks.** The music bed — and the promo's own sound, when it is not
+  muted — drops while the voice is talking and comes back between phrases. Measured at
+  about 18 dB with the default strength. Turn ducking off to mix at flat levels instead.
 * **Synthesis happens once per unique script, before any row renders.** A 16,000-video batch
   dealt from a 60-script pool does 60 syntheses, not 16,000 — and none of it happens inside
   the render pool.

@@ -421,6 +421,7 @@ with st.sidebar:
     voice_duck = settings.VOICE_DUCK
     voice_duck_ratio = settings.VOICE_DUCK_RATIO
     voice_loop_promo = settings.VOICE_LOOP_PROMO
+    voice_mute_promo = settings.VOICE_MUTE_PROMO
     beat_max_words = settings.BEAT_MAX_WORDS
     screen_text_y = settings.SCREEN_TEXT_Y
     voice_enabled = False
@@ -525,12 +526,29 @@ with st.sidebar:
                  "the mix between them, so a voice at full scale would clip on "
                  "loud material.",
         )
-        voice_loop_promo = st.checkbox(
-            "Loop the promo if the script is longer", value=bool(settings.VOICE_LOOP_PROMO),
-            help="A script that outruns the promo makes the video longer, "
-                 "looping the clip until the narration finishes. Off instead "
-                 "cuts the narration where the promo ends, and warns the row.",
+        voice_mute_promo = st.checkbox(
+            "Mute the promo's own audio while narrating",
+            value=bool(settings.VOICE_MUTE_PROMO),
+            help="The script is the message once there is one, so the promo's "
+                 "own soundtrack is dropped on any row that narrates. Music "
+                 "then becomes the whole background and plays at full volume "
+                 "(the Music volume slider is a promo/music split, and there "
+                 "is nothing left to split against) — ducking still pulls it "
+                 "down under the voice. A row with no narration keeps the "
+                 "promo's audio either way.",
         )
+        voice_loop_promo = st.checkbox(
+            "The script sets the video length", value=bool(settings.VOICE_LOOP_PROMO),
+            help="A narrated row lasts exactly as long as its script: a longer "
+                 "script loops the promo and the CTA clips until it finishes, "
+                 "a shorter one ends the video on its last word. Off instead "
+                 "makes the promo the length — a long script is cut where the "
+                 "promo ends, and the row is warned. A row with no narration "
+                 "is the promo's length either way.",
+        )
+        if bool(st.session_state.get("promo_alt")):
+            st.caption("Promo Alternate clips have no length of their own, so "
+                       "the script always sets it in that mode.")
     elif voice_enabled:
         # Captions without a voice: only the controls that still mean something.
         beat_max_words = st.slider(
@@ -974,6 +992,7 @@ config = RenderConfig(
     voice_duck=bool(voice_duck),
     voice_duck_ratio=float(voice_duck_ratio),
     voice_loop_promo=bool(voice_loop_promo),
+    voice_mute_promo=bool(voice_mute_promo),
     beat_max_words=int(beat_max_words),
     screen_text_y=int(screen_text_y),
     video_x=int(video_x), video_y=int(video_y),

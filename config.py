@@ -216,11 +216,21 @@ VOICE_DUCK = _bool("BVG_VOICE_DUCK", True)
 VOICE_DUCK_THRESHOLD = _float("BVG_VOICE_DUCK_THRESHOLD", 0.03)
 VOICE_DUCK_RATIO = _float("BVG_VOICE_DUCK_RATIO", 8.0)
 
-# When the script runs longer than the promo, loop the promo until the script
-# finishes instead of cutting the narration mid-sentence. This makes the RENDER
-# LENGTH max(promo, voice) rather than the promo alone — see
+# The SCRIPT sets the length of a narrated row: a script past the promo loops
+# the promo (and the CTA clips) until it finishes rather than being cut off
+# mid-sentence, and a script that ends early ends the video with it. So the
+# RENDER LENGTH is the narration, not the promo — see
 # VideoGenerator._render_duration, which every duration-dependent layer reads.
+# A row with no narration is still the promo's length either way.
 VOICE_LOOP_PROMO = _bool("BVG_VOICE_LOOP_PROMO", True)
+
+# Silence the promo's own audio track on a NARRATED row. On by default: the
+# script is the message once there is one, and a promo's own voice-over talking
+# underneath it is the usual complaint. With the promo silent the music bed
+# becomes the whole background, so it plays at full volume — the same rule that
+# already applies to a promo with no audio track. A row with no narration is
+# untouched, and ducking still governs the music.
+VOICE_MUTE_PROMO = _bool("BVG_VOICE_MUTE_PROMO", True)
 
 # Caption beats: how the word timings are grouped into on-screen text. The
 # defaults are the TikTok look — a few words at a time. BEAT_MAX caps the PNG

@@ -117,9 +117,19 @@ for _w in SCRIPT.split():
     _t += 0.3
 SPEECH_END = _t                # ~3.7s
 
+# voice_loop_promo=False throughout, so the PROMO is the length: these cases
+# examine what happens AFTER the narration stops — the closing caption leaving
+# the screen, the music coming back up out of the duck — and there is no "after"
+# when the script sets the length (see tests/test_script_length.py for that
+# rule). The looping case below turns it back on explicitly.
 BASE = dict(bg_color="#101010", preset="ultrafast", crf=32,
             video_x=90, video_y=300, video_w=900, video_h=900,
-            voice_enabled=True, voice_set=["af_heart"], voice_speed=1.0)
+            voice_enabled=True, voice_set=["af_heart"], voice_speed=1.0,
+            voice_loop_promo=False,
+            # These cases measure the promo's own 440 Hz carrier in the mix —
+            # ducked, padded, split against the bed — so it has to be IN the
+            # mix. Muting it is the default and gets its own case below.
+            voice_mute_promo=False)
 # The caption band sits low; the headline sits high. Two disjoint bands means a
 # single frame can prove the caption changed AND the static text did not.
 CAPTION_BOX = (0, 1250, 1080, 1600)
@@ -146,8 +156,8 @@ def make(name, video=promo, row=ROW, with_music=False, **kw):
 
 
 def render(name, **kw) -> Path:
-    gen = make(name, **{k: v for k, v in kw.items()
-                        if k in {"video", "row", "with_music"}})
+    # Everything else in kw is a RenderConfig override — make() splits them.
+    gen = make(name, **kw)
     result = gen.render_row(1, kw.get("row", ROW), filename=f"{name}.mp4")
     assert result.ok, result.error
     return result.output_path
@@ -249,14 +259,15 @@ long_row = ROW.copy()
 long_row["Voiceover"] = LONG
 assert t + 0.4 > PROMO_DUR, "fixture must be longer than the promo"
 
-looped = render("looped", row=long_row)
+looped = render("looped", row=long_row, voice_loop_promo=True)
 assert abs(duration(looped) - (t + 0.4)) < 0.4, (
     f"promo should have looped to the script's {t + 0.4:.2f}s, "
     f"got {duration(looped):.2f}s")
 print(f"ok: promo looped — {PROMO_DUR}s promo rendered to "
       f"{duration(looped):.2f}s for a {t + 0.4:.2f}s script")
 
-# ...and with looping OFF the render stays on the promo, with a warning.
+# ...and with the script NOT setting the length, the render stays on the promo,
+# with a warning.
 cfg_nl = RenderConfig(**{**BASE, "voice_loop_promo": False})
 gen_nl = VideoGenerator(cfg_nl, bg_dir, promo, None, TMP / "w_nl", TMP / "o_nl",
                         voice_cache_dir=VOICE_CACHE)
@@ -299,6 +310,46 @@ sil_tail = band_db(silent_out, 800, 1000, start=0.5, length=1.5)
 assert sil_tail > -70, (f"silent promo + music + voice lost its audio "
                         f"({sil_tail} dB)")
 print(f"ok: silent promo + bed + voice keeps full-length audio ({sil_tail:.1f} dB)")
+
+
+# ----------------------------------- 5b. muting the promo while it narrates
+#
+# Measured WITHOUT music and AFTER the narration, which took two false failures
+# to get right: the bed's 300 Hz leaks into the 440 Hz band through band_db's
+# filter slope (and muting puts the bed at FULL volume, moving the very band
+# being read), while during speech the voice's own leakage sets a floor around
+# -45 dB that a ducked promo barely clears. After the speech the duck has
+# released and the promo carrier is unmasked.
+solo_muted = render("muted_solo", voice_mute_promo=True)
+solo_heard = render("unmuted_solo", voice_mute_promo=False)
+promo_off = band_db(solo_muted, 380, 520, start=SPEECH_END + 0.4, length=1.2)
+promo_on = band_db(solo_heard, 380, 520, start=SPEECH_END + 0.4, length=1.2)
+assert promo_on - promo_off > 10, (promo_on, promo_off)
+assert band_db(solo_muted, 800, 1000, start=1.0, length=2.0) > -60, "the voice went too"
+print(f"ok: promo muted while narrating — its 440 Hz carrier {promo_on:.1f} -> "
+      f"{promo_off:.1f} dB, the narration still there")
+
+# With music, the bed becomes the whole background and plays at full volume
+# rather than its 35% share. Read off the GRAPH rather than the spectrum: the
+# bed's 300 Hz and the promo's 440 Hz are close enough that each leaks into the
+# other's band through band_db's filter slope, and the compressor pulls a louder
+# input down harder — together they turned a 9 dB difference into 2.4 dB and
+# read as the rule not working.
+def mix_graph(**kw) -> str:
+    gen = make(f"graph{len(kw)}{kw.get('voice_mute_promo')}", with_music=True, **kw)
+    spec = gen._spec_for(ROW, 1)
+    gen._resolve_positions(spec)
+    return " ".join(str(c) for c in gen.build_ffmpeg_command(
+        spec, bg_dir / "b.png", bg_dir / "b.png", None, TMP / "graph.mp4"))
+
+
+muted_graph = mix_graph(voice_mute_promo=True)
+heard_graph = mix_graph(voice_mute_promo=False)
+assert "[apromo]" not in muted_graph, "the promo leg is still in the mix"
+assert "volume=1.0000[abed]" in muted_graph, muted_graph[-400:]
+assert "[apromo]" in heard_graph and "volume=0.3500[abed]" in heard_graph, heard_graph[-400:]
+print("ok: muted — no promo leg in the graph and the bed carries the "
+      "background at full volume")
 
 
 # ---------------------------------------------------- 6. the pre-flight guards
