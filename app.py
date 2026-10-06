@@ -1094,7 +1094,8 @@ with col2:
     zip_file = st.file_uploader(
         "Background images (ZIP, optional)", type=["zip"],
         help="Without a ZIP, videos render on the solid background color set in "
-             "the sidebar (Layout section).",
+             "the sidebar (Layout section). The images can also come from a "
+             "Drive folder — see 'Background images' under 3. CTA clips.",
     )
     cta_file = st.file_uploader("CTA image (PNG, optional)", type=["png"])
 
@@ -1505,6 +1506,53 @@ if gif_source == "drive_folder":
         with st.spinner("Reading Drive…"):
             _ok, _msg = _drv.check_source(clip_params["gifs_drive_folder"])
             (st.success if _ok else st.error)(f"**GIFs** — {_msg}")
+
+# ---- Background-image source. Its own selector, same as the pools below: the
+# images are independent of every clip layer. Files land in the same folder a ZIP
+# would have been extracted into, so BG_Image names and the random deal behave
+# identically whichever way they arrive.
+st.markdown("**Background images**")
+bg_image_source = st.radio(
+    "Where do the background images come from?",
+    options=["upload", "drive_folder"],
+    format_func=lambda m: {
+        "upload": "Upload a ZIP in the sidebar (as above)",
+        "drive_folder": "Paste a Google Drive folder link — the server "
+                        "downloads them itself (no upload)",
+    }[m],
+    horizontal=True,
+    key="bg_image_source",
+    help="Independent of where the clips, gifs and background videos come from.",
+)
+if bg_image_source == "drive_folder":
+    clip_params["bg_images_drive_folder"] = st.text_input(
+        "Background images folder — Drive link", key="bg_images_drive",
+        placeholder="https://drive.google.com/drive/folders/…",
+        help="Every image (PNG/JPG/WEBP/BMP) in this folder — and its "
+             "sub-folders — joins the background pool. Share it with the "
+             "service account first. An Excel BG_Image cell can name any file "
+             "in it; blank cells get a random one.",
+    ).strip()
+    st.caption(
+        "The sidebar ZIP uploader is ignored in this mode. Preview and *Render "
+        "row* don't read Drive either, so they show the solid background color; "
+        "the batch itself uses the folder."
+    )
+    if st.button("🔍 Check the background images folder",
+                 disabled=not clip_params.get("bg_images_drive_folder")):
+        from integrations import drive as _drv
+
+        with st.spinner("Reading Drive…"):
+            _ok, _msg = _drv.check_source(clip_params["bg_images_drive_folder"],
+                                          kind="image")
+            (st.success if _ok else st.error)(f"**Background images** — {_msg}")
+
+
+def _for_preview(frame):
+    """In Drive mode the preview workspace has no images, so a BG_Image cell that
+    names one would fail the preview. Blank them: the row shows the solid color."""
+    return frame.assign(BG_Image="") if bg_image_source != "upload" else frame
+
 
 # ---- Background-video source. Its own selector for the same reason the gifs
 # have one: the pool is independent of both clip layers everywhere else.
@@ -2063,7 +2111,9 @@ if preview_clicked and ready:
             try:
                 # The bg-video pool IS staged here: the editor payload frames
                 # the row's chosen clip so the box is draggable in the preview.
-                ws = build_workspace(Path(tmp), video_file, zip_file, cta_file,
+                ws = build_workspace(Path(tmp), video_file,
+                                     None if bg_image_source != "upload" else zip_file,
+                                     cta_file,
                                      font_file, cta_video_slot_files, gif_files,
                                      bg_video_files, music_files,
                                      promo_alt_files)
@@ -2072,8 +2122,8 @@ if preview_clicked and ready:
                 # so the preview shows the row's actual background — and the
                 # same per-promo text, or the editor would offer no Headline at
                 # all for a row whose only Headline comes from a grid.
-                df_preview, _ = generator.assign_backgrounds(
-                    text_grids.apply_overrides(df, grid_overrides, promo_choice))
+                df_preview, _ = generator.assign_backgrounds(_for_preview(
+                    text_grids.apply_overrides(df, grid_overrides, promo_choice)))
                 df_preview = apply_script_pool(
                     df_preview, int(preview_row), script_file,
                     caption_params.get("script_prompt", ""), config)
@@ -2103,7 +2153,9 @@ if render_row_clicked and ready:
     ):
         with tempfile.TemporaryDirectory(prefix="bvg_rowrender_") as tmp:
             try:
-                ws = build_workspace(Path(tmp), video_file, zip_file, cta_file,
+                ws = build_workspace(Path(tmp), video_file,
+                                     None if bg_image_source != "upload" else zip_file,
+                                     cta_file,
                                      font_file, cta_video_slot_files, gif_files,
                                      bg_video_files, music_files,
                                      promo_alt_files)
@@ -2113,8 +2165,8 @@ if render_row_clicked and ready:
                 # the saved editor edits (apply_saved_edits above), and the grids
                 # are applied for the selected promo so this really is the
                 # pairing the batch would produce.
-                df_render, bg_warnings = generator.assign_backgrounds(
-                    text_grids.apply_overrides(df, grid_overrides, promo_choice))
+                df_render, bg_warnings = generator.assign_backgrounds(_for_preview(
+                    text_grids.apply_overrides(df, grid_overrides, promo_choice)))
                 df_render = apply_script_pool(
                     df_render, int(preview_row), script_file,
                     caption_params.get("script_prompt", ""), config)
@@ -2250,6 +2302,12 @@ if generate_clicked and ready and gif_source == "drive_folder" \
              "or switch the GIF source back to upload.")
     generate_clicked = False
 
+if generate_clicked and ready and bg_image_source == "drive_folder" \
+        and not clip_params.get("bg_images_drive_folder"):
+    st.error("Not queued — paste the Google Drive folder link for the "
+             "background images, or switch their source back to upload.")
+    generate_clicked = False
+
 if generate_clicked and ready and bg_video_source == "drive_folder" \
         and not clip_params.get("bg_videos_drive_folder"):
     st.error("Not queued — paste the Google Drive folder link for the "
@@ -2286,7 +2344,11 @@ if generate_clicked and ready:
         assets = store.assets_dir(job_id)
 
         # All promo videos are staged; the runner picks one per batch.
-        stage_uploads(assets, promo_files, zip_file, cta_file, font_file,
+        stage_uploads(assets, promo_files,
+                      # Gated on the images' OWN source flag, like every pool
+                      # below: a ZIP left in the uploader must not shadow Drive.
+                      None if bg_image_source != "upload" else zip_file,
+                      cta_file, font_file,
                       # Clips come from the scrape in chained mode; the pipeline
                       # materialises them into the same cta_slot_N folders.
                       None if clip_source != "upload" else cta_video_slot_files,
@@ -2333,6 +2395,7 @@ if generate_clicked and ready:
         # this a pipeline job rather than a plain render — including a gif pool
         # that still has to come down from Drive.
         chained = (clip_source != "upload" or gif_source != "upload"
+                   or bg_image_source != "upload"
                    or bg_video_source != "upload"
                    or music_source != "upload"
                    or caption_mode == "generate")
@@ -2356,6 +2419,7 @@ if generate_clicked and ready:
                 "text_grids": sorted(grid_overrides),
                 "clip_source": clip_source,
                 "gif_source": gif_source,
+                "bg_image_source": bg_image_source,
                 "bg_video_source": bg_video_source,
                 "music_source": music_source,
                 "drive_folder": drive_folder.strip(),

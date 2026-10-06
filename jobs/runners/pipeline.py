@@ -391,6 +391,13 @@ def run(job: dict) -> dict:
             job, params, "bg_videos_drive_folder", "bg_videos",
             "background videos")
 
+    # ---- 1c'. background images — land in backgrounds/, the folder a ZIP
+    # upload would have been extracted into, so BG_Image names resolve the same
+    if params.get("bg_image_source") == "drive_folder":
+        result["bg_images"] = _drive_pool_stage(
+            job, params, "bg_images_drive_folder", "backgrounds",
+            "background images", kind="image")
+
     # ---- 1d. music (independent of every pool above)
     if params.get("music_source") == "drive_folder":
         result["music"] = _drive_pool_stage(

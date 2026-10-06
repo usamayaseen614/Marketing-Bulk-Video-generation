@@ -54,8 +54,19 @@ AUDIO_SUFFIXES = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".oga", ".opus",
                   ".flac", ".wma"}
 
 
+# Background images, by extension only. The renderer's index of a backgrounds/
+# folder (video_generator._build_bg_index) accepts exactly this set, so Drive must
+# not fetch anything wider — a .gif or .heic it downloaded would just sit there
+# unseen while the log reported a full folder.
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+
+
 def is_video(path: Path) -> bool:
     return Path(path).suffix.lower() in VIDEO_SUFFIXES
+
+
+def is_image(path: Path) -> bool:
+    return Path(path).suffix.lower() in IMAGE_SUFFIXES
 
 
 def is_audio(path: Path) -> bool:

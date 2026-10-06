@@ -1091,10 +1091,18 @@ def _looks_like_audio(name: str, mime: str) -> bool:
     return workspace.is_audio(str(name or ""))
 
 
-# What a source folder is being read FOR. The two differ only in which files
+def _looks_like_image(name: str, mime: str) -> bool:
+    """Background images: extension only, ignoring the mimeType. The renderer
+    indexes a backgrounds/ folder by extension, so an `image/gif` (or HEIC) that
+    Drive labelled as an image would download and then never be used."""
+    return workspace.is_image(str(name or ""))
+
+
+# What a source folder is being read FOR. They differ only in which files
 # count, so everything downstream takes this rather than growing a parallel set
-# of audio functions.
-_WANTED = {"video": _looks_like_video, "audio": _looks_like_audio}
+# of audio/image functions.
+_WANTED = {"video": _looks_like_video, "audio": _looks_like_audio,
+           "image": _looks_like_image}
 
 
 def _children(folder_id: str) -> list[dict]:
@@ -1347,7 +1355,7 @@ def check_source(link: str, kind: str = "video") -> tuple[bool, str]:
     except Exception as exc:  # noqa: BLE001
         return False, f"Could not read that folder: {exc}"
 
-    noun = {"video": "clips", "audio": "tracks"}[kind]
+    noun = {"video": "clips", "audio": "tracks", "image": "images"}[kind]
     if not files:
         return False, (
             f"“{info['name']}” opened fine, but there are no {kind} files in it "

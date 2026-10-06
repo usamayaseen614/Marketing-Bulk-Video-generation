@@ -36,6 +36,7 @@ import pandas as pd
 from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 import config
+import workspace
 from speech import synth as speech_synth
 from speech.beats import group_text, group_words
 
@@ -301,7 +302,7 @@ OPTIONAL_COLUMNS = [
 ]
 ALL_COLUMNS = REQUIRED_COLUMNS + OPTIONAL_COLUMNS
 
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+IMAGE_EXTENSIONS = workspace.IMAGE_SUFFIXES
 
 # Font fallback chain, first hit wins (Windows first since that's the primary target).
 FONT_CANDIDATES = [

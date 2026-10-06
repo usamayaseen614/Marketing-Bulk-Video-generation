@@ -118,7 +118,7 @@ rows alone determines how many videos are generated:
 
 | Column | Meaning | Example |
 |---|---|---|
-| `BG_Image` | Background filename inside the ZIP (case-insensitive, subfolders OK). **Blank/absent = randomly assigned** from the ZIP — no image repeats until all have been used. The ZIP itself is **optional**: without one, rows render on the sidebar's solid background color | `summer_bg.jpg` |
+| `BG_Image` | Background filename inside the ZIP **or the Drive folder** (case-insensitive, subfolders OK). **Blank/absent = randomly assigned** from that pool — no image repeats until all have been used. The pool itself is **optional**: with neither a ZIP nor a Drive folder, rows render on the sidebar's solid background color | `summer_bg.jpg` |
 | `Video_X` / `Video_Y` | **Top-left corner** of the box the promo video is placed into, per row. **Blank/absent = the sidebar default** (or a random per-row spot when *Randomize position per video* is on) | `90` / `300` |
 | `Video_Width` / `Video_Height` | Size of the video box, per row — the video is scaled to fit inside it, aspect ratio preserved. **Blank/absent = the sidebar default** | `900` / `900` |
 | `CTA_X` / `CTA_Y` | **Top-left corner** of the CTA image, per row. **Blank/absent = the sidebar default** | `340` / `1600` |
@@ -476,6 +476,17 @@ independent — you can fetch CTA clips from Drive while uploading gifs, or the 
 There are two options rather than four: uploading, or a single pooled Drive folder
 (downloaded straight into `assets/gifs/`). "Scrape a TikTok account" is deliberately absent —
 it harvests posts by view count, which means nothing for a pool of loops.
+
+### Where the background images come from
+
+Same two options as the gifs: upload a ZIP in the sidebar, or paste a single Drive folder
+link under **3. CTA clips → Background images**. The server downloads the folder (and its
+sub-folders) straight into `assets/backgrounds/` — the folder a ZIP is extracted into — so
+`BG_Image` names and the shuffled-deck random assignment behave exactly as with a ZIP. Only
+PNG/JPG/WEBP/BMP files are fetched. Sub-folders are flattened, so two files with the same
+name in different folders get a numbered suffix (`sky.png`, `sky_2.png`); name such a file
+in `BG_Image` by that suffixed name. The sidebar ZIP uploader is ignored in this mode, and **Preview / Render row
+don't read Drive** — they show the solid background color; the batch itself uses the folder.
 
 ### Where the music comes from
 
@@ -1045,7 +1056,7 @@ and sidesteps Windows font-path escaping. See the docstrings in
 ## Troubleshooting
 
 - **"Background image 'x' not found in the ZIP"** — a filled `BG_Image` cell must match a
-  file name inside the ZIP (matching is case-insensitive and ignores folder paths). Leave
+  file name inside the ZIP or Drive folder (matching is case-insensitive and ignores folder paths). Leave
   the cell blank to have a background assigned automatically.
 - **Text looks wrong / boxes instead of letters** — upload a TTF font in the sidebar that
   supports your language's characters.
