@@ -7,17 +7,31 @@
 #        docker compose --profile caddy up -d
 #      Then REMOVE the "ports" mapping on the app service below so the app is
 #      only reachable through Caddy, and edit Caddyfile with your domain/users.
+#
+# The app container runs BOTH the Streamlit UI and the background worker (see
+# supervisord.conf). Settings come from a .env file beside this one — copy
+# .env.example and fill it in.
 
 services:
   app:
     build: .
     restart: unless-stopped
+    env_file:
+      - .env
     ports:
       - "8501:8501"
     volumes:
+      # Job records, staged uploads and rendered videos. This is the one that
+      # matters: without it, a container restart loses queued jobs and any
+      # finished videos that had not reached Drive yet.
+      - app_data:/data
       # Renders write heavily to /tmp; keep it on a named volume so the
       # container filesystem stays small.
       - app_tmp:/tmp
+    # A render batch can take 15 minutes. Give the worker room to finish before
+    # Docker kills it — a killed job is requeued and resumed, but finishing
+    # cleanly is nicer.
+    stop_grace_period: 2m
 
   caddy:
     image: caddy:2
@@ -32,6 +46,7 @@ services:
       - caddy_config:/config
 
 volumes:
+  app_data:
   app_tmp:
   caddy_data:
   caddy_config:

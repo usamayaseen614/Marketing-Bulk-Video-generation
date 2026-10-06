@@ -3,3 +3,44 @@ pandas>=2.0
 openpyxl>=3.1
 Pillow>=10.0
 imageio-ffmpeg>=0.4.9
+
+# --- automation layer (background jobs, Drive, captions, scraping)
+python-dotenv>=1.0                  # optional .env for the settings in config.py
+google-api-python-client>=2.100     # Drive v3
+google-auth>=2.30                   # ADC / the VM's attached service account
+yt-dlp>=2025.1                      # TikTok scraping; keep this one current
+google-genai>=1.0                   # Gemini via Vertex AI (caption pools)
+
+# --- voiceover + timed captions (the speech/ package)
+#
+# TWO ENGINES, picked per batch in the sidebar. speech/synth.py imports each
+# lazily and degrades to "not installed here" per engine, so a machine with one,
+# both or neither all start normally.
+#
+# Marked for <3.13 because kokoro requires it and the local dev venv is 3.14 —
+# without the marker `pip install -r requirements.txt` fails outright there.
+# The Docker image is 3.12, so production gets it; speech/synth.py degrades to
+# "voiceover unavailable" anywhere it is missing.
+#
+# The Dockerfile installs torch from PyTorch's CPU index BEFORE this file, or
+# pip resolves the CUDA build and adds ~2.5 GB of unusable nvidia libraries.
+kokoro>=0.9.4; python_version < "3.13"
+
+# Kyutai's Pocket TTS, via the fork that adds word-level timestamps — the plain
+# `pocket-tts` synthesizes just as well but returns no timings, which would drop
+# the captions from synced to evenly spread. speech/synth.py accepts either and
+# prefers this one.
+#
+# It supports Python 3.10-3.14 and so does NOT need kokoro's marker, but it
+# carries the same one deliberately: it pulls PyTorch, and the point of the
+# marker here is to keep the 3.14 dev venv lean rather than to express what the
+# package can run on. Drop the marker to get working voiceover locally.
+#
+# Cheap to add beside kokoro, because they share almost the whole stack. Resolved
+# for the image's Python 3.12: kokoro alone is 89 packages, both together are 97,
+# and the eight it adds are einops, scipy, sentencepiece and its `serve` CLI's
+# fastapi/starlette/uvicorn/python-multipart. torch, numpy, huggingface-hub,
+# safetensors, typer and pydantic are already there for kokoro. numpy>=2 is the
+# only version floor either one asserts and kokoro leaves numpy unpinned, so the
+# two resolve together with no conflict (verified with `pip install --dry-run`).
+pocket-tts-timestamped>=1.0; python_version < "3.13"
