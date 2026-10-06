@@ -19,6 +19,7 @@ The static layers are pre-rendered with Pillow because:
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import logging
 import math
@@ -1536,15 +1537,25 @@ class VideoGenerator:
         """Case-insensitive index of every image in the extracted ZIP, keyed both by
         bare filename and by relative path, so 'promo1.jpg' and 'summer/promo1.jpg'
         both resolve regardless of how the ZIP is structured. Also returns the
-        sorted list of unique image names (relative paths) for random assignment."""
+        sorted list of unique image names (relative paths) for random assignment.
+
+        Every name in that list resolves to a different file — the deal treats
+        each as its own card, so two names for one file would put that image
+        twice into a batch and never show the other."""
+        files = [p for p in sorted(bg_dir.rglob("*"))
+                 if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS]
         index: dict[str, Path] = {}
         names: list[str] = []
-        for path in sorted(bg_dir.rglob("*")):
-            if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS:
-                rel = path.relative_to(bg_dir).as_posix().lower()
-                index.setdefault(rel, path)
-                index.setdefault(path.name.lower(), path)
+        # Relative paths first, so a sub-folder's bare filename (sub/x.png) can
+        # never shadow a root file's own path (x.png). A path already taken is a
+        # case twin on Linux (Sky.png beside sky.png): left out, not listed twice.
+        for path in files:
+            rel = path.relative_to(bg_dir).as_posix().lower()
+            if rel not in index:
+                index[rel] = path
                 names.append(rel)
+        for path in files:
+            index.setdefault(path.name.lower(), path)
         return index, names
 
     def resolve_bg(self, name: str) -> Path:
@@ -1556,14 +1567,22 @@ class VideoGenerator:
             raise FileNotFoundError(f"Background image '{name}' not found in the ZIP")
         return path
 
-    def assign_backgrounds(self, df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
-        """Fill blank or missing BG_Image cells with images from the uploaded ZIP.
+    def assign_backgrounds(self, df: pd.DataFrame,
+                           batch: int = 1) -> tuple[pd.DataFrame, list[str]]:
+        """Fill blank or missing BG_Image cells with images from the background
+        pool (the uploaded ZIP or the Drive folder).
 
-        Images are dealt like a shuffled deck: none repeats until every image
-        has been used once (repeats are unavoidable when rows outnumber images,
-        which adds a warning). Images explicitly referenced by other rows are
-        excluded from the deal, and the shuffle is seeded from the ZIP contents
-        and row count — so the preview and re-runs see the same assignment.
+        Images are dealt like a shuffled deck across the WHOLE job, not per
+        batch: batch `batch` (1-based) takes the cards after every earlier
+        batch's, so none repeats until every image has been used once — 140
+        batches of 100 rows draw 14,000 different images when the pool has them.
+        Dealing per batch handed every batch the same 100 images. Repeats are
+        unavoidable once the job outruns the pool, which adds a warning. Images
+        explicitly referenced by other rows are excluded from the deal, and no
+        batch repeats an image while the pool can cover one batch. The order
+        comes from a hash of each name and the row count, never from anything
+        that changes between runs — so the preview, re-runs and a resumed job
+        all see the same assignment.
         """
         df = df.copy()
         if "BG_Image" not in df.columns:
@@ -1589,23 +1608,53 @@ class VideoGenerator:
         pool = [n for n in self._bg_names if self.resolve_bg(n) not in used_paths]
         if not pool:
             pool = list(self._bg_names)
-        if needed > len(pool):
+
+        # This batch's cards in the job-wide deal. Every batch has the same
+        # blank rows (only text cells differ per promo), so earlier batches took
+        # exactly (batch - 1) * needed cards.
+        size = len(pool)
+        start = (max(1, int(batch)) - 1) * needed
+        if start + needed > size:
+            # Constant text on purpose: render.py keeps one copy of a repeated
+            # warning, so this reads once per job rather than once per batch.
             warnings.append(
-                f"{needed} rows need a background but only {len(pool)} unused "
-                f"images are in the ZIP — some backgrounds will repeat."
+                f"More videos need a background than there are unused images "
+                f"({size:,}) — some backgrounds will repeat."
             )
 
-        rng = random.Random(
-            zlib.crc32(("|".join(self._bg_names) + f"|{len(df)}").encode("utf-8"))
-        )
-        deck: list[str] = []
-        assigned: list[str] = []
-        for _ in range(needed):
-            if not deck:  # reshuffle a fresh deck only once the pool is exhausted
-                deck = pool.copy()
-                rng.shuffle(deck)
-            assigned.append(deck.pop())
-        df.loc[blank_mask, "BG_Image"] = assigned
+        def shuffled(k: int) -> list[str]:
+            # Ordered by a per-name hash, not shuffled from one seed over the
+            # whole pool: a pool that differs by a few images (a re-uploaded ZIP
+            # with one more) moves each card only that many places instead of
+            # reshuffling the whole job.
+            return sorted(pool, key=lambda n: hashlib.blake2b(
+                f"{len(df)}|{k}|{n}".encode("utf-8"), digest_size=8).digest())
+
+        # A fresh order each time the pool runs out. Built from deck 0 on every
+        # call because each deck's fix-up below depends on the previous deck's
+        # final tail.
+        # ponytail: O(cards dealt so far) hashes per call, about a second over
+        # a 140 x 100 job; keep the decks between batches if jobs reach millions.
+        decks: list[list[str]] = []
+        for k in range((start + needed - 1) // size + 1):
+            deck = shuffled(k)
+            # The batch straddling this deck's start took `tail` cards from the
+            # end of the previous deck and takes `needed - tail` from here. Any
+            # image it already has is swapped further into this deck, so no batch
+            # shows one image twice while the pool can cover a whole batch.
+            tail = (k * size) % needed
+            if k and tail and size >= needed:
+                taken = set(decks[k - 1][size - tail:])
+                head = needed - tail
+                spare = [j for j in range(head, size) if deck[j] not in taken]
+                for i in range(head):
+                    if deck[i] in taken:
+                        j = spare.pop()
+                        deck[i], deck[j] = deck[j], deck[i]
+            decks.append(deck)
+
+        df.loc[blank_mask, "BG_Image"] = [
+            decks[i // size][i % size] for i in range(start, start + needed)]
         return df, warnings
 
     # ------------------------------------------------------------- PIL layers

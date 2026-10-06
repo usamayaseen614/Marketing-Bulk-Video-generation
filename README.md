@@ -118,7 +118,7 @@ rows alone determines how many videos are generated:
 
 | Column | Meaning | Example |
 |---|---|---|
-| `BG_Image` | Background filename inside the ZIP **or the Drive folder** (case-insensitive, subfolders OK). **Blank/absent = randomly assigned** from that pool — no image repeats until all have been used. The pool itself is **optional**: with neither a ZIP nor a Drive folder, rows render on the sidebar's solid background color | `summer_bg.jpg` |
+| `BG_Image` | Background filename inside the ZIP **or the Drive folder** (case-insensitive, subfolders OK). **Blank/absent = randomly assigned** from that pool — no image repeats until all have been used, counted across the **whole job**, not per batch (140 batches × 100 rows draws 14,000 different images when the pool has that many; a filled cell pins its image on that row in every batch). The pool itself is **optional**: with neither a ZIP nor a Drive folder, rows render on the sidebar's solid background color | `summer_bg.jpg` |
 | `Video_X` / `Video_Y` | **Top-left corner** of the box the promo video is placed into, per row. **Blank/absent = the sidebar default** (or a random per-row spot when *Randomize position per video* is on) | `90` / `300` |
 | `Video_Width` / `Video_Height` | Size of the video box, per row — the video is scaled to fit inside it, aspect ratio preserved. **Blank/absent = the sidebar default** | `900` / `900` |
 | `CTA_X` / `CTA_Y` | **Top-left corner** of the CTA image, per row. **Blank/absent = the sidebar default** | `340` / `1600` |
@@ -483,7 +483,10 @@ Same two options as the gifs: upload a ZIP in the sidebar, or paste a single Dri
 link under **3. CTA clips → Background images**. The server downloads the folder (and its
 sub-folders) straight into `assets/backgrounds/` — the folder a ZIP is extracted into — so
 `BG_Image` names and the shuffled-deck random assignment behave exactly as with a ZIP. Only
-PNG/JPG/WEBP/BMP files are fetched. Sub-folders are flattened, so two files with the same
+PNG/JPG/WEBP/BMP files are fetched, up to 50,000 per folder (`BVG_DRIVE_MAX_SOURCE_IMAGES`;
+clip, gif, background-video and music folders keep their 5,000 cap). A resumed job keeps
+the images it started with — the folder is not fetched again once rendering has begun, so
+edits to it apply to the next job. Sub-folders are flattened, so two files with the same
 name in different folders get a numbered suffix (`sky.png`, `sky_2.png`); name such a file
 in `BG_Image` by that suffixed name. The sidebar ZIP uploader is ignored in this mode, and **Preview / Render row
 don't read Drive** — they show the solid background color; the batch itself uses the folder.

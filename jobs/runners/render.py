@@ -415,7 +415,11 @@ def _render_batches(job: dict, df: pd.DataFrame, ws, n_batches: int,
                         # sheet — RowSpec.from_row reads row['Headline'] and has no idea a
                         # grid was involved, which is why nothing downstream changed.
                         df_promo = text_grids.apply_overrides(df, overrides, promo_idx)
-                        df_run, bg_warnings = generator.assign_backgrounds(df_promo)
+                        # Given the batch number, so the background deal runs
+                        # across the whole job instead of restarting — and
+                        # repeating the same images — in every batch.
+                        df_run, bg_warnings = generator.assign_backgrounds(
+                            df_promo, batch=batch)
                     except Exception as exc:  # noqa: BLE001 — see above
                         logger.exception("Job %s: batch %d/%d could not be prepared "
                                          "on promo %s", job_id, batch, n_batches,

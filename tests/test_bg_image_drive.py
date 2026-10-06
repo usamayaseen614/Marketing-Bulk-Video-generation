@@ -108,4 +108,53 @@ index, idx_names = video_generator.VideoGenerator._build_bg_index(ws.bg_dir)
 assert {"blue.png", "sunset.jpg", "deep.webp"} <= set(index), sorted(index)
 print("ok: the downloaded folder rehydrates into a pool BG_Image can name")
 
+# A resumed job must deal from the pool the first run dealt from: once its
+# render items exist, the pipeline does not fetch background images again.
+calls = []
+real_stage, real_render = pipeline._drive_pool_stage, pipeline.render_runner.run
+pipeline._drive_pool_stage = lambda job, params, key, *a, **kw: calls.append(key) or {}
+pipeline.render_runner.run = lambda job: {}
+try:
+    params = {"bg_image_source": "drive_folder", "bg_images_drive_folder": "bgs"}
+    fresh = store.new_job_id()
+    store.make_job_dirs(fresh)
+    store.create_job(kind=store.KIND_PIPELINE, params=params, label="bg-resume",
+                     job_id=fresh)
+    pipeline.run({"id": fresh, "params": params})
+    assert calls == ["bg_images_drive_folder"], calls
+    store.add_items(fresh, [{"idx": 1, "name": ""}])
+    resumed = pipeline.run({"id": fresh, "params": params})
+    assert calls == ["bg_images_drive_folder"], calls
+    assert resumed["bg_images"].get("skipped"), resumed
+finally:
+    pipeline._drive_pool_stage, pipeline.render_runner.run = real_stage, real_render
+print("ok: a resumed job keeps the background pool it was dealt from")
+
+# Image folders get their own, higher cap: a 14,000-video job wants 14,000
+# images, while a video folder that size is still refused at 5,000.
+import config
+
+TREE["big_img"] = [{"id": f"b{i}", "name": f"bg_{i}.jpg", "mimeType": "image/jpeg",
+                    "size": "1"} for i in range(6000)]
+TREE["big_vid"] = [{"id": f"v{i}", "name": f"clip_{i}.mp4", "mimeType": "video/mp4",
+                    "size": "1"} for i in range(6000)]
+META["big_img"] = {"id": "big_img", "name": "Big images", "mimeType": FOLDER}
+META["big_vid"] = {"id": "big_vid", "name": "Big videos", "mimeType": FOLDER}
+assert config.DRIVE_MAX_SOURCE_FILES < 6000 <= config.DRIVE_MAX_SOURCE_IMAGES
+assert len(drive.list_videos("big_img", kind="image")) == 6000
+try:
+    drive.list_videos("big_vid")
+except drive.DriveError as exc:
+    assert "BVG_DRIVE_MAX_SOURCE_FILES" in str(exc), exc
+else:
+    raise AssertionError("a 6,000-video folder should still be refused")
+config.DRIVE_MAX_SOURCE_IMAGES = 5999
+try:
+    drive.list_videos("big_img", kind="image")
+except drive.DriveError as exc:
+    assert "BVG_DRIVE_MAX_SOURCE_IMAGES" in str(exc), exc
+else:
+    raise AssertionError("the image cap should apply to image folders")
+print("ok: image folders use BVG_DRIVE_MAX_SOURCE_IMAGES, videos keep their cap")
+
 print("\nall bg-image-drive checks passed")

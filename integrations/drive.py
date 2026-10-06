@@ -499,19 +499,26 @@ def unique_names(names: Iterable[str]) -> list[str]:
     folder, so uniqueness has to be enforced here or a batch silently ends up
     with duplicates that are impossible to tell apart. Returns a list rather
     than a dict precisely because the interesting case is repeated names, which
-    a name-keyed mapping would collapse."""
-    seen: dict[str, int] = {}
+    a name-keyed mapping would collapse.
+
+    Two collisions the counter alone missed, each of which silently overwrote a
+    download: a generated `sky_2.png` landing on a real `sky_2.png`, and
+    `Sky.png` beside `sky.png` — one file on Windows, and one entry in the
+    case-insensitive background index everywhere. So every original name is
+    reserved up front, and all comparisons ignore case."""
+    names = list(names)
+    reserved = {n.lower() for n in names}
+    used: set[str] = set()
     out: list[str] = []
     for name in names:
-        count = seen.get(name, 0)
-        seen[name] = count + 1
-        if count == 0:
-            out.append(name)
-            continue
         stem, dot, ext = name.rpartition(".")
-        base = stem if dot else name
-        suffix = f".{ext}" if dot else ""
-        out.append(f"{base}_{count + 1}{suffix}")
+        base, suffix = (stem, f".{ext}") if dot else (name, "")
+        candidate, n = name, 1
+        while candidate.lower() in used or (n > 1 and candidate.lower() in reserved):
+            n += 1
+            candidate = f"{base}_{n}{suffix}"
+        used.add(candidate.lower())
+        out.append(candidate)
     return out
 
 
@@ -1185,7 +1192,11 @@ def list_videos(folder_id: str, recursive: bool = True,
     job has to rebuild the identical list or it would download the same clip
     again under a different name."""
     root = folder_info(folder_id)["id"]
-    limit = max_files if max_files is not None else config.DRIVE_MAX_SOURCE_FILES
+    limit_var = ("BVG_DRIVE_MAX_SOURCE_IMAGES" if kind == "image"
+                 else "BVG_DRIVE_MAX_SOURCE_FILES")
+    limit = max_files if max_files is not None else (
+        config.DRIVE_MAX_SOURCE_IMAGES if kind == "image"
+        else config.DRIVE_MAX_SOURCE_FILES)
     wanted = _WANTED[kind]
 
     found: list[tuple[tuple, str, dict]] = []
@@ -1219,7 +1230,7 @@ def list_videos(folder_id: str, recursive: bool = True,
         raise DriveError(
             f"That folder holds {len(found):,} {kind} files, more than the "
             f"{limit:,}-file limit. Point at a folder with just the files you "
-            "want, or raise BVG_DRIVE_MAX_SOURCE_FILES."
+            f"want, or raise {limit_var}."
         )
     return [f[2] for f in found]
 

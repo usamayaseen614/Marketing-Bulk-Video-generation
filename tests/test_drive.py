@@ -30,6 +30,15 @@ print("edge cases ok")
 # empty input
 assert drive.unique_names([]) == []
 
+# a generated name must not land on a real one, wherever it sits in the list
+for src in (["sky.png", "sky_2.png", "sky.png"], ["sky.png", "sky.png", "sky_2.png"]):
+    got = drive.unique_names(src)
+    assert len({g.lower() for g in got}) == 3 and got[0] == "sky.png", got
+# case twins are one file on Windows and one key in the background index
+got = drive.unique_names(["Sky.png", "sky.png"])
+assert got == ["Sky.png", "sky_2.png"], got
+print("collisions with real and case-twin names avoided")
+
 # ---- query escaping: a folder name with an apostrophe must not break the query
 assert drive._escape("Usama's clips") == "Usama\\'s clips"
 print("query escaping ok:", drive._escape("Usama's clips"))

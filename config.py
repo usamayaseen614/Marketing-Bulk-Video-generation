@@ -392,6 +392,11 @@ DRIVE_DOWNLOAD_CONCURRENCY = _int("BVG_DRIVE_DOWNLOAD_CONCURRENCY", 8)
 # "first 5,000" of a folder is how you get a batch built from the wrong clips.
 DRIVE_MAX_SOURCE_FILES = _int("BVG_DRIVE_MAX_SOURCE_FILES", 5000)
 
+# The same guard for a background-IMAGE folder, set far higher: one image per
+# video means a 14,000-video job wants a 14,000-image folder, and images are
+# small enough that the count, not the bytes, is the only thing to cap.
+DRIVE_MAX_SOURCE_IMAGES = _int("BVG_DRIVE_MAX_SOURCE_IMAGES", 50000)
+
 
 def drive_configured(override: str = "") -> bool:
     """True when there is somewhere to upload to.

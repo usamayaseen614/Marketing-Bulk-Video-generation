@@ -2121,9 +2121,11 @@ if preview_clicked and ready:
                 # Same deterministic background assignment as the real batch,
                 # so the preview shows the row's actual background — and the
                 # same per-promo text, or the editor would offer no Headline at
-                # all for a row whose only Headline comes from a grid.
+                # all for a row whose only Headline comes from a grid. Promo N
+                # is first rendered in batch N, so that is the deal shown.
                 df_preview, _ = generator.assign_backgrounds(_for_preview(
-                    text_grids.apply_overrides(df, grid_overrides, promo_choice)))
+                    text_grids.apply_overrides(df, grid_overrides, promo_choice)),
+                    batch=promo_choice + 1)
                 df_preview = apply_script_pool(
                     df_preview, int(preview_row), script_file,
                     caption_params.get("script_prompt", ""), config)
@@ -2164,9 +2166,11 @@ if render_row_clicked and ready:
                 # this row renders with its actual background. df already carries
                 # the saved editor edits (apply_saved_edits above), and the grids
                 # are applied for the selected promo so this really is the
-                # pairing the batch would produce.
+                # pairing the batch would produce — background included, from
+                # the promo's first batch.
                 df_render, bg_warnings = generator.assign_backgrounds(_for_preview(
-                    text_grids.apply_overrides(df, grid_overrides, promo_choice)))
+                    text_grids.apply_overrides(df, grid_overrides, promo_choice)),
+                    batch=promo_choice + 1)
                 df_render = apply_script_pool(
                     df_render, int(preview_row), script_file,
                     caption_params.get("script_prompt", ""), config)

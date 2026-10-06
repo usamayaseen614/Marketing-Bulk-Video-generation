@@ -393,10 +393,19 @@ def run(job: dict) -> dict:
 
     # ---- 1c'. background images — land in backgrounds/, the folder a ZIP
     # upload would have been extracted into, so BG_Image names resolve the same
+    # Not on a resume, though: the backgrounds are dealt across the whole job,
+    # so rows still to render must see exactly the pool the first run dealt
+    # from. Fetching an image that failed the first time would shift cards
+    # under them and repeat images inside a half-rendered batch.
     if params.get("bg_image_source") == "drive_folder":
-        result["bg_images"] = _drive_pool_stage(
-            job, params, "bg_images_drive_folder", "backgrounds",
-            "background images", kind="image")
+        if store.item_counts(job_id)["total"]:
+            logger.info("Job %s: rendering already started — keeping the "
+                        "background images as first dealt", job_id)
+            result["bg_images"] = {"skipped": "rendering already started"}
+        else:
+            result["bg_images"] = _drive_pool_stage(
+                job, params, "bg_images_drive_folder", "backgrounds",
+                "background images", kind="image")
 
     # ---- 1d. music (independent of every pool above)
     if params.get("music_source") == "drive_folder":
