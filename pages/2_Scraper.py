@@ -1,5 +1,9 @@
 """
-pages/2_TikTok_Scraper.py — build the clip bank.
+pages/2_Scraper.py — build the clip bank from TikTok, Instagram or YouTube.
+
+The platform is picked once at the top and both tabs follow it. Underneath,
+each one is a module in scrapers/ with the same handful of functions, so
+everything below is written once.
 
 Two ways in, and they are deliberately not the same shape:
 
@@ -23,14 +27,55 @@ from pathlib import Path
 import streamlit as st
 
 import config as settings
+import scrapers
 from jobs import store
 from scrapers import tiktok
 from ui_common import get_session_id, offer_file_download
 
-st.set_page_config(page_title="TikTok Scraper", page_icon="🎵", layout="wide")
+st.set_page_config(page_title="Scraper", page_icon="🎵", layout="wide")
 store.init_db()
 
-st.title("🎵 TikTok Scraper")
+st.title("🎵 Scraper")
+
+platform = st.radio(
+    "Platform", options=list(scrapers.PLATFORMS),
+    format_func=scrapers.PLATFORMS.get, horizontal=True, key="scrape_platform",
+)
+NAME = scrapers.PLATFORMS[platform]
+pmod = scrapers.module(platform)
+
+# (profile example, single-video example)
+EXAMPLES = {
+    "tiktok": ("https://www.tiktok.com/@someaccount",
+               "https://www.tiktok.com/@someaccount/video/7231234567890123456"),
+    "instagram": ("https://www.instagram.com/someaccount/",
+                  "https://www.instagram.com/reel/DZ-dSUgSRiy/"),
+    "youtube": ("https://www.youtube.com/@somechannel",
+                "https://www.youtube.com/shorts/BfEVQW9Uc7I"),
+}
+
+if platform == "instagram":
+    st.caption(
+        "Reels only — what Instagram shows a logged-out visitor on the "
+        "profile's Reels tab, pinned reels first. Each reel lands as a "
+        "720×1280 MP4."
+    )
+elif platform == "youtube":
+    st.caption(
+        "The channel's **Shorts** tab — or paste a link to its /videos or "
+        "/streams tab, or a playlist, to pull that instead. Videos longer than "
+        f"{settings.SCRAPE_YT_MAX_DURATION:g}s are skipped: every clip is cut "
+        "into 10s segments, and one hour-long upload would be 360 of them."
+    )
+
+if platform in settings.PROXY_PLATFORMS and not settings.proxy_configured():
+    st.warning(
+        f"**No proxy configured for {NAME}.** Fine from a home connection, but "
+        f"from a cloud server {NAME} serves its pages with the data stripped "
+        "out, so a scrape from the VM will fail. Set `BVG_DECODO_USER` and "
+        "`BVG_DECODO_PASS` (the social-media dashboard's Decodo account) in "
+        "the VM's `.env` — see the Setup page."
+    )
 
 tab_account, tab_single = st.tabs(["📁 Whole account", "🔗 Single video"])
 
@@ -38,15 +83,24 @@ tab_account, tab_single = st.tabs(["📁 Whole account", "🔗 Single video"])
 
 with tab_account:
     st.caption(
-        "Pull ASMR clips from an account, trim them, and drop them into Drive "
+        f"Pull ASMR clips from an account on {NAME}, trim them, and drop them into Drive "
         "pre-sorted into slot folders — ready to drag into the generator's sidebar."
     )
 
     account = st.text_input(
-        "TikTok account URL or @handle",
-        placeholder="https://www.tiktok.com/@someaccount",
-        help="The profile to pull from. Clips come newest-first, TikTok's own order.",
+        f"{NAME} account URL or @handle",
+        placeholder=EXAMPLES[platform][0],
+        help="The profile to pull from, newest posts first.",
     )
+    # A bare @handle says nothing about where it lives; a pasted link does,
+    # and scraping @bob on the wrong platform would quietly pull a stranger.
+    linked = scrapers.detect(account, default=platform)
+    if linked != platform:
+        st.warning(f"That's a {scrapers.PLATFORMS[linked]} link — switch "
+                   f"**Platform** above to {scrapers.PLATFORMS[linked]}.")
+    account_problem = "" if linked != platform else scrapers.not_an_account(platform, account)
+    if account_problem:
+        st.warning(account_problem)
 
     asset = st.radio(
         "What to pull",
@@ -62,16 +116,17 @@ with tab_account:
     is_music = asset == "music"
     if is_music:
         st.info(
-            "**What actually lands.** TikTok does not publish the original "
+            f"**What actually lands.** {NAME} does not publish the original "
             "music file for a normal post, so each track is pulled out of the "
             "post itself — which means it is that post's full audio (the "
             "sound plus any voiceover over it), not an isolated stem, and it "
             "costs the same bandwidth as downloading the video would.\n\n"
-            "Posts sharing a named sound are collapsed to one file, so an "
-            "account with 500 posts usually yields far fewer tracks. Creators' "
-            "own audio (“original sound”) has no distinct name to "
-            "match on, so those are deduplicated by content instead and near-"
-            "identical ones can slip through.\n\n"
+            "Posts sharing a sound are collapsed to one file where the "
+            "platform identifies the sound (TikTok names it, Instagram gives "
+            "it an id), so an account with 500 posts usually yields far fewer "
+            "tracks. Where it does not (TikTok's “original sound”, most "
+            "YouTube Shorts) tracks are deduplicated by content instead, and "
+            "near-identical ones can slip through.\n\n"
             "Music scrapes keep their own history, so this will not skip "
             "anything just because the account was scraped for videos before."
         )
@@ -108,9 +163,10 @@ with tab_account:
 
     limit = col_b.number_input(
         "Max videos to scan", 10, 5000, settings.SCRAPE_MAX_VIDEOS, 10,
-        help="Cap on how far back the profile is walked. Enumeration runs at "
-             "roughly 0.26s per post, so 1,500 takes about 6-7 minutes before any "
-             "downloading starts.",
+        help="Cap on how far back the profile is walked. Listing runs at "
+             "roughly 0.26s per post on TikTok and 0.4s on Instagram (YouTube "
+             "is faster), so 1,500 takes 6-10 minutes before any downloading "
+             "starts.",
     )
 
     skip_known = col_c.checkbox(
@@ -184,14 +240,17 @@ with tab_account:
         "on purpose — going faster gets the server's IP blocked."
     )
 
-    if st.button("🚀 Start scrape", type="primary", disabled=not account.strip()):
-        handle = tiktok.account_name(account)
+    if st.button("🚀 Start scrape", type="primary",
+                 disabled=not account.strip() or linked != platform
+                 or bool(account_problem)):
+        handle = pmod.account_name(account)
         job_id = store.new_job_id()
         store.make_job_dirs(job_id)
         store.create_job(
             kind=store.KIND_SCRAPE,
             params={
                 "account": account.strip(),
+                "platform": platform,
                 "asset": asset,
                 "mode": mode,
                 "batches": int(n_batches),
@@ -201,13 +260,14 @@ with tab_account:
                 "skip_known": bool(skip_known),
                 "drive_folder": drive_folder.strip(),
             },
-            label=f"{'music' if is_music else 'scrape'}-{handle}",
+            label=("" if platform == "tiktok" else f"{platform}-")
+                  + f"{'music' if is_music else 'scrape'}-{handle}",
             notify_email=notify_email.strip(),
             submitted_by=get_session_id(),
             job_id=job_id,
         )
         st.success(
-            f"**Queued a {'music scrape' if is_music else 'scrape'} of @{handle}.** "
+            f"**Queued a {NAME} {'music scrape' if is_music else 'scrape'} of @{handle}.** "
             "You can close this tab — it runs in the background"
             + (f" and emails {notify_email.strip()} when it's done."
                if notify_email.strip() else ".")
@@ -227,7 +287,9 @@ with tab_account:
         import time as _time
         for row in history:
             cols = st.columns([3, 2, 2, 1], vertical_alignment="center")
-            cols[0].markdown(f"**@{row['account']}**")
+            # Ledger keys are "instagram:bob" / "youtube:bob"; TikTok's are bare.
+            where, _, name = row["account"].rpartition(":")
+            cols[0].markdown(f"**{scrapers.PLATFORMS.get(where, 'TikTok')} · @{name}**")
             cols[1].caption(f"{row['clips']} clips remembered")
             cols[2].caption(
                 "last " + _time.strftime("%Y-%m-%d", _time.localtime(row["last_seen"]))
@@ -259,11 +321,12 @@ with tab_single:
     )
 
     video_link = st.text_input(
-        "TikTok video link",
-        placeholder="https://www.tiktok.com/@someaccount/video/7231234567890123456",
-        help="A link to a single post. Share links (vm.tiktok.com/…) work too, "
-             "as does a bare video ID copied out of a scrape's metadata sheet. "
-             "A profile link belongs in the other tab.",
+        f"{NAME} video link",
+        placeholder=EXAMPLES[platform][1],
+        help="A link to a single post"
+             + (" — share links (vm.tiktok.com/…) work too" if platform == "tiktok" else "")
+             + ". A bare video ID copied out of a scrape's metadata sheet works "
+               "as well. A profile link belongs in the other tab.",
     )
 
     want_trim = st.checkbox(
@@ -289,21 +352,23 @@ with tab_single:
     else:
         single_start = single_duration = None
 
-    link_ok = tiktok.is_video_url(video_link)
+    link_ok = (pmod.is_video_url(video_link)
+               and scrapers.detect(video_link, default=platform) == platform)
     if video_link.strip() and not link_ok:
         st.warning(
-            "That doesn't look like a link to a single post. Use the **Whole "
-            "account** tab for a profile."
+            f"That doesn't look like a link to a single {NAME} post. Use the "
+            "**Whole account** tab for a profile, or switch **Platform** above "
+            "for another site's link."
         )
 
     if st.button("⬇️ Fetch video", type="primary", key="fetch_single",
                  disabled=not link_ok):
         st.session_state.pop("single_fetch", None)
         try:
-            # Can run to ~15s: TikTok's extraction fails intermittently on
-            # links that are perfectly fine, so this retries before believing it.
-            with st.spinner("Asking TikTok for that video…"):
-                fetched = tiktok.fetch_single_video(
+            # Can run to ~15s: extraction fails intermittently on links that
+            # are perfectly fine, so this retries before believing it.
+            with st.spinner(f"Asking {NAME} for that video…"):
+                fetched = pmod.fetch_single_video(
                     video_link, _single_dir(),
                     trim_start=single_start,
                     trim_duration=single_duration,
@@ -318,7 +383,10 @@ with tab_single:
         except tiktok.ScrapeError as exc:
             st.error(str(exc))
         except Exception as exc:  # noqa: BLE001 — yt-dlp raises its own zoo
-            st.error(f"That fetch failed: {tiktok.explain_failure(str(exc))}")
+            # explain_failure decodes TikTok's errors; elsewhere it would
+            # call a perfectly ordinary YouTube failure a photo carousel.
+            st.error("That fetch failed: " + (tiktok.explain_failure(str(exc))
+                                              if platform == "tiktok" else str(exc)))
         else:
             st.session_state["single_fetch"] = {
                 "clip": fetched.clip,
@@ -332,7 +400,7 @@ with tab_single:
     #
     # Rendered from session state rather than from the fetch above, because
     # offer_file_download reruns the page to gate a large file — on that rerun
-    # the button was not pressed, and re-fetching would hit TikTok twice for
+    # the button was not pressed, and re-fetching would hit the site twice for
     # one click.
 
     saved = st.session_state.get("single_fetch")

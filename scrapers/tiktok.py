@@ -31,7 +31,11 @@ design and are not obvious:
 
   * **Datacenter IPs are the real risk.** All of the above was measured from a
     residential connection. TikTok blocks cloud egress far more aggressively,
-    so a cookies file may be needed on the VM (BVG_SCRAPE_COOKIES_FILE).
+    so a cookies file may be needed on the VM (BVG_SCRAPE_COOKIES_FILE), or
+    `tiktok` added to BVG_PROXY_PLATFORMS to go through Decodo.
+
+The trim / split / hash / planning helpers below are platform-neutral:
+scrapers/instagram.py and scrapers/youtube.py reuse them rather than copying.
 
 There is also a single-link path (`fetch_single_video`) for grabbing one video
 on its own. It shares the trimming and naming code with the profile scrape but
@@ -53,6 +57,7 @@ from pathlib import Path
 from typing import Iterable, Optional, Protocol
 
 import config
+from scrapers.proxy import url_for as proxy_url_for
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +171,9 @@ class ClipInfo:
     track: str = ""
     artists: str = ""
     album: str = ""
+    # A platform's own id for the sound (Instagram's audio_asset_id). When
+    # there is one, it is the dedup key outright — see sound_key.
+    sound_id: str = ""
 
     @property
     def likely_photo(self) -> bool:
@@ -220,7 +228,12 @@ def sound_key(clip: ClipInfo) -> str:
     But it must not over-collapse either. A creator's own audio is titled
     "original sound - <their handle>", which is one NAME across hundreds of
     genuinely different recordings -- so those return "" and fall back to the
-    byte hash."""
+    byte hash.
+
+    A platform that hands out a real id for the sound (Instagram does) needs
+    none of that guesswork: one recording, one id, own audio included."""
+    if clip.sound_id:
+        return "id:" + clip.sound_id
     track = re.sub(r"\s+", " ", (clip.track or "").strip().lower())
     if not track or track == _GENERIC_SOUND:
         return ""
@@ -257,8 +270,17 @@ class ClipSource(Protocol):
 class YtDlpSource:
     """yt-dlp implementation of ClipSource."""
 
-    def __init__(self, cookies_file: Optional[str] = None):
+    PLATFORM = "tiktok"   # which BVG_PROXY_PLATFORMS entry routes it via Decodo
+    NAME = "TikTok"
+    # This platform's link handling; scrapers/youtube.py swaps in its own.
+    video_url = staticmethod(video_url)
+    account_name = staticmethod(account_name)
+
+    def __init__(self, cookies_file: Optional[str] = None,
+                 proxy: Optional[str] = None):
         self.cookies_file = cookies_file or config.SCRAPE_COOKIES_FILE
+        # None = whatever config says for this platform; "" = go direct.
+        self.proxy = proxy_url_for(self.PLATFORM) if proxy is None else proxy
 
     def _base_opts(self) -> dict:
         opts = {
@@ -269,7 +291,14 @@ class YtDlpSource:
         }
         if self.cookies_file and Path(self.cookies_file).is_file():
             opts["cookiefile"] = self.cookies_file
+        if self.proxy:
+            opts["proxy"] = self.proxy
         return opts
+
+    def _video_opts(self) -> dict:
+        """How to pick the video rendition — the one thing that differs most
+        between platforms. See config.SCRAPE_FORMAT for TikTok's reasoning."""
+        return {"format": config.SCRAPE_FORMAT}
 
     def _ydl(self, extra: dict):
         try:
@@ -324,7 +353,7 @@ class YtDlpSource:
         # ignoreerrors must be OFF here: a silent failure would look like a
         # successful download of nothing.
         with self._ydl({"outtmpl": str(dest_dir / f"{clip.video_id}.%(ext)s"),
-                        "format": config.SCRAPE_FORMAT,
+                        **self._video_opts(),
                         "ignoreerrors": False}) as ydl:
             ydl.download([clip.url])
 
@@ -417,7 +446,7 @@ class YtDlpSource:
             entries = [e for e in (info.get("entries") or []) if e]
             info = entries[0] if entries else None
         if not info:
-            raise ScrapeError(f"TikTok returned nothing for {clip.url}")
+            raise ScrapeError(f"{self.NAME} returned nothing for {clip.url}")
 
         enriched = _clip_from_info(
             info, url=clip.url, uploader_fallback=clip.uploader)
@@ -442,7 +471,7 @@ class YtDlpSource:
         is opaque until TikTok redirects it, so if one ever resolves to a
         profile this caps the damage at one video instead of the whole
         account."""
-        target = video_url(url)
+        target = self.video_url(url)
         if not target:
             raise ScrapeError("No link given.")
         dest_dir = Path(dest_dir)
@@ -452,7 +481,7 @@ class YtDlpSource:
         # the one video, so a silent None is a failure the caller must hear.
         opts = {
             "outtmpl": str(dest_dir / "%(id)s.%(ext)s"),
-            "format": config.SCRAPE_FORMAT,
+            **self._video_opts(),
             "ignoreerrors": False,
             "noplaylist": True,
             "playlist_items": "1",
@@ -466,19 +495,26 @@ class YtDlpSource:
         if not info:
             raise ScrapeError(
                 f"Could not read {target}. The post may be private or deleted, "
-                "or TikTok may be blocking this server's IP — try supplying a "
-                "cookies file (BVG_SCRAPE_COOKIES_FILE)."
+                f"or {self.NAME} may be blocking this server's IP — try "
+                "supplying a cookies file (BVG_SCRAPE_COOKIES_FILE), or adding "
+                f"{self.PLATFORM} to BVG_PROXY_PLATFORMS."
             )
 
         clip = _clip_from_info(
             info,
             url=info.get("webpage_url") or info.get("original_url") or target,
-            uploader_fallback=account_name(target),
+            uploader_fallback=self.account_name(target),
         )
         if not clip.video_id:
-            raise ScrapeError(f"TikTok returned no video id for {target}.")
+            raise ScrapeError(f"{self.NAME} returned no video id for {target}.")
         produced = _produced_file(dest_dir, clip.video_id)
         return clip, self._recover_audio(clip.url or target, produced, clip.video_id)
+
+
+def make_source(account: str = "") -> YtDlpSource:
+    """What the scrape runner asks for. The class is looked up at call time,
+    which is what lets a test swap in a fake; `account` pins the proxy exit."""
+    return YtDlpSource(proxy=proxy_url_for("tiktok", account))
 
 
 def _produced_file(dest_dir: Path, video_id: str) -> Path:
@@ -733,12 +769,25 @@ def fetch_single_video(url: str, dest_dir: Path,
             "That is a photo carousel, not a video — there is no video file "
             "on it to download."
         )
+    source = source or YtDlpSource(proxy=proxy_url_for("tiktok", url))
+    return fetch_and_trim(url, dest_dir, source,
+                          trim_start, trim_duration, attempts, retry_delay,
+                          explain=explain_failure, who="TikTok")
 
+
+def fetch_and_trim(url: str, dest_dir: Path, source,
+                   trim_start: Optional[float] = None,
+                   trim_duration: Optional[float] = None,
+                   attempts: Optional[int] = None,
+                   retry_delay: Optional[float] = None,
+                   explain=str, who: str = "The platform") -> SingleFetch:
+    """The platform-neutral half of a single fetch: ask `source.fetch_one`
+    until it answers, then keep the file whole or split it. Each platform's
+    fetch_single_video checks its own kind of link and then ends up here."""
     dest_dir = Path(dest_dir)
     shutil.rmtree(dest_dir, ignore_errors=True)
     raw_dir = dest_dir / "raw"
 
-    source = source or YtDlpSource()
     tries = max(1, int(config.SINGLE_FETCH_ATTEMPTS if attempts is None else attempts))
     pause = (config.SINGLE_FETCH_RETRY_DELAY if retry_delay is None
              else float(retry_delay))
@@ -759,9 +808,9 @@ def fetch_single_video(url: str, dest_dir: Path,
             if attempt < tries and pause > 0:
                 time.sleep(pause * attempt)
     else:
-        reason = (explain_failure(str(failure)) or "TikTok refused the link").rstrip(". ")
+        reason = (explain(str(failure)) or f"{who} refused the link").rstrip(". ")
         if tries > 1:
-            reason += (f". Gave up after {tries} tries — TikTok's extraction is "
+            reason += (f". Gave up after {tries} tries — {who}'s extraction is "
                        "flaky, so the same link may well work in a minute")
         raise ScrapeError(reason + ".") from failure
 

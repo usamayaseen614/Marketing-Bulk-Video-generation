@@ -8,7 +8,12 @@ imageio-ffmpeg>=0.4.9
 python-dotenv>=1.0                  # optional .env for the settings in config.py
 google-api-python-client>=2.100     # Drive v3
 google-auth>=2.30                   # ADC / the VM's attached service account
-yt-dlp>=2025.1                      # TikTok scraping; keep this one current
+# Scraping (TikTok, Instagram, YouTube); keep this one current. The extras are
+# load-bearing: `deno` is the JS runtime yt-dlp now wants for YouTube (it finds
+# the binary beside Python's scripts on its own), and `curl-cffi` is the
+# browser-TLS client scrapers/instagram.py talks to Instagram with — pinned by
+# yt-dlp to a range it can also use itself.
+yt-dlp[default,deno,curl-cffi]>=2026.1
 google-genai>=1.0                   # Gemini via Vertex AI (caption pools)
 
 # --- voiceover + timed captions (the speech/ package)

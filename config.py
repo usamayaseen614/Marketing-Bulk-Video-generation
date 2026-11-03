@@ -524,6 +524,22 @@ SCRAPE_AUDIO_FORMAT = _str("BVG_SCRAPE_AUDIO_FORMAT") or "bestaudio/best"
 SCRAPE_AUDIO_CODEC = _str("BVG_SCRAPE_AUDIO_CODEC") or "mp3"
 SCRAPE_AUDIO_QUALITY = _str("BVG_SCRAPE_AUDIO_QUALITY") or "192"
 
+# YouTube serves video and audio as separate streams, so the format merges
+# them (ffmpeg). H.264 first: a Short comes back 1080x1920 avc1 + m4a, which
+# plays everywhere untouched — measured 2026-10-07.
+SCRAPE_YT_FORMAT = (_str("BVG_SCRAPE_YT_FORMAT")
+                    or "bv*[vcodec^=avc1]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b")
+# Long videos are skipped when scraping a /videos tab. Every clip is split into
+# consecutive 10 s segments, so one hour-long upload would otherwise mean a
+# gigabyte download and 360 near-identical clips of one person talking.
+SCRAPE_YT_MAX_DURATION = _float("BVG_SCRAPE_YT_MAX_DURATION", 180.0)
+
+# Instagram's GraphQL document ids. Meta rotates these now and then; the
+# symptom is an HTTP 200 carrying `errors`, and the fix is a new id here (the
+# web app's network tab shows the current one) rather than a code change.
+SCRAPE_IG_CLIPS_DOC_ID = _str("BVG_IG_CLIPS_DOC_ID") or "27234427476213202"
+SCRAPE_IG_POST_DOC_ID = _str("BVG_IG_POST_DOC_ID") or "27130156389949648"
+
 # Single-video fetches from the scraper page land here, one folder per browser
 # session. They are synchronous and have no job row, so they need a home the
 # orphan sweep in store.reap_old_jobs() will not pull out from under a user
@@ -544,6 +560,29 @@ SINGLE_FETCH_TTL_HOURS = _float("BVG_SINGLE_FETCH_TTL_HOURS", 6.0)
 # their video is a photo carousel, which it is not.
 SINGLE_FETCH_ATTEMPTS = _int("BVG_SINGLE_FETCH_ATTEMPTS", 3)
 SINGLE_FETCH_RETRY_DELAY = _float("BVG_SINGLE_FETCH_RETRY_DELAY", 2.0)
+
+# The Decodo residential proxy — the same account the social-media dashboard
+# uses. See scrapers/proxy.py.
+#
+# Instagram serves a datacenter IP (the VM's) a stripped reels page with no data
+# in it: an HTTP 200 that is an access gate, not a throttle, so retrying from the
+# VM never clears it. A residential exit does.
+#
+# BVG_PROXY_URL is a full pre-built URL — exactly what the dashboard keeps in
+# Secret Manager as PROXY_URL. Otherwise it is composed from the Decodo
+# username/password, with one sticky exit per account.
+PROXY_URL = _str("BVG_PROXY_URL")
+DECODO_USER = _str("BVG_DECODO_USER")
+DECODO_PASS = _str("BVG_DECODO_PASS")
+PROXY_COUNTRY = _str("BVG_PROXY_COUNTRY", "us")
+# Which platforms go through it. Residential traffic is billed per GB, so a
+# platform that works from the VM's own IP should stay off this list.
+PROXY_PLATFORMS = {p.strip().lower() for p in
+                   _str("BVG_PROXY_PLATFORMS", "instagram").split(",") if p.strip()}
+
+
+def proxy_configured() -> bool:
+    return bool(PROXY_URL or (DECODO_USER and DECODO_PASS))
 
 
 # --------------------------------------------------------------------------- paths

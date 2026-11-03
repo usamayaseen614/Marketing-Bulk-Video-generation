@@ -442,8 +442,8 @@ place — `assets/cta_slot_N/` — so the renderer cannot tell which was used.
 |---|---|
 | **Upload files in the sidebar** | The original path: one uploader per clip slot |
 | **Paste a Google Drive folder link** | The server downloads the clips from Drive itself — nothing goes through your browser |
-| **Use a previous scrape on this machine** | Clips a TikTok scrape already left on the VM, selected in place |
-| **Scrape a TikTok account now** | Scrape and render as one submitted job |
+| **Use a previous scrape on this machine** | Clips a scrape already left on the VM, selected in place |
+| **Scrape an account now** | Scrape (TikTok, Instagram or YouTube — the pasted link decides) and render as one submitted job |
 
 **The Drive option is there because uploading is the slow part.** If the clips already live
 in Drive, a browser upload drags them down your home connection and pushes the same bytes
@@ -474,7 +474,7 @@ Notes:
 The gif pool has its **own** source selector, right below the CTA-clip one, and the two are
 independent — you can fetch CTA clips from Drive while uploading gifs, or the other way round.
 There are two options rather than four: uploading, or a single pooled Drive folder
-(downloaded straight into `assets/gifs/`). "Scrape a TikTok account" is deliberately absent —
+(downloaded straight into `assets/gifs/`). "Scrape an account" is deliberately absent —
 it harvests posts by view count, which means nothing for a pool of loops.
 
 ### Where the background images come from
@@ -672,7 +672,7 @@ downloaded.
 | Page | What it does |
 |---|---|
 | **📋 Jobs** | Queued / running / finished batches, live progress, per-row errors, downloads |
-| **🎵 TikTok Scraper** | Paste an account, get clips downloaded, trimmed to 10s, and dropped into Drive pre-sorted into `batch_NN/slot_N` folders — plus a `metadata.xlsx` of views, likes, duration and post date so curating 500 clips means sorting by views, not scrubbing thumbnails |
+| **🎵 Scraper** | Pick TikTok, Instagram or YouTube, paste an account, get clips downloaded, trimmed to 10s, and dropped into Drive pre-sorted into `batch_NN/slot_N` folders — plus a `metadata.xlsx` of views, likes, duration and post date so curating 500 clips means sorting by views, not scrubbing thumbnails |
 | **🔧 Setup** | What's configured (email, Drive, Gemini, worker) with a test button for each, and caption-pool generation |
 
 #### Scraping the overlay music instead of the videos
@@ -708,6 +708,28 @@ Three things about it are worth knowing before you run one:
   sound file TikTok does publish — and the flat-enumeration hint that flags them is unreliable
   enough to drop real videos too. A post that turns out to have no audio at all is counted as
   a skip, same as any other download failure.
+
+#### Instagram and YouTube
+
+The scraper page's **Platform** switch covers both, with the same two tabs (whole account,
+single video), the same trim, batch layout, metadata sheet and music mode. What differs:
+
+* **Instagram is reels only** — what a logged-out visitor sees on the profile's Reels tab,
+  pinned reels first — and each reel lands as a 720×1280 H.264 MP4. yt-dlp cannot list an
+  Instagram profile, so `scrapers/instagram.py` uses the same logged-out GraphQL walk as the
+  social-media dashboard, plus one post query per reel for its video file.
+* **Instagram blocks cloud-server IPs.** From the VM it serves the reels page with the data
+  stripped out, and no amount of retrying fixes that. Set `BVG_DECODO_USER` /
+  `BVG_DECODO_PASS` (or `BVG_PROXY_URL`) to the dashboard's Decodo account and Instagram's
+  requests go through a residential exit, one sticky IP per account. The video files try
+  Instagram's CDN directly first, because residential traffic is billed per GB and video is
+  nearly all of it.
+* **YouTube scrapes the channel's Shorts tab** unless you paste a `/videos` or `/streams`
+  link or a playlist. Videos longer than `BVG_SCRAPE_YT_MAX_DURATION` (180s) are skipped.
+  Shorts download as 1080×1920 H.264.
+* Each platform keeps its own dedup history and its own Drive folder
+  (`scrapes/instagram/<account>`, `scrapes/youtube/<account>`), because creators reuse one
+  handle everywhere.
 
 ### Batches, mixing, and the two filenames
 

@@ -318,6 +318,13 @@ BVG_SCRAPE_BATCH_SIZE={settings.SCRAPE_BATCH_SIZE}
 BVG_SCRAPE_SLOTS={settings.SCRAPE_SLOTS}
 BVG_SCRAPE_TRIM_START={settings.SCRAPE_TRIM_START}
 BVG_SCRAPE_TRIM_DURATION={settings.SCRAPE_TRIM_DURATION}
-BVG_SCRAPE_COOKIES_FILE={settings.SCRAPE_COOKIES_FILE or '<not set>'}""",
+BVG_SCRAPE_COOKIES_FILE={settings.SCRAPE_COOKIES_FILE or '<not set>'}
+
+# decodo proxy (Instagram needs it from a cloud server)
+BVG_PROXY_URL={'<set>' if settings.PROXY_URL else '<not set>'}
+BVG_DECODO_USER={'<set>' if settings.DECODO_USER else '<not set>'}
+BVG_DECODO_PASS={'<set>' if settings.DECODO_PASS else '<not set>'}
+BVG_PROXY_COUNTRY={settings.PROXY_COUNTRY}
+BVG_PROXY_PLATFORMS={','.join(sorted(settings.PROXY_PLATFORMS)) or '<none>'}""",
         language="bash",
     )

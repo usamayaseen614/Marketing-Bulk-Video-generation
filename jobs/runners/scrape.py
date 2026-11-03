@@ -1,11 +1,14 @@
 """
-jobs/runners/scrape.py — the TikTok scrape job.
+jobs/runners/scrape.py — the scrape job, for TikTok, Instagram and YouTube.
 
 Batch mode and dump mode share one pipeline; only the Drive folder layout at
 the end differs:
 
     batch:  <root>/scrapes/<account>/batch_01/slot_1/…  + metadata.xlsx
     dump:   <root>/scrapes/<account>/dump_<date>/…      + metadata.xlsx
+
+(Instagram and YouTube land under scrapes/instagram/<account> and
+scrapes/youtube/<account>: creators reuse one handle everywhere.)
 
 Rate limiting is the binding constraint, not bandwidth: ~1 clip per 1-2s. Going
 faster gets the IP blocked, which costs far more than the time it saves.
@@ -25,6 +28,7 @@ from typing import Optional
 import pandas as pd
 
 import config
+import scrapers
 from jobs import store
 from scrapers import tiktok
 
@@ -62,14 +66,17 @@ def _metadata_frame(clips: dict[str, tiktok.ClipInfo],
             "Likes": clip.like_count,
             "Comments": clip.comment_count,
             "Reposts": clip.repost_count,
-            "Original_Duration_s": clip.duration,
+            # From the item when the clip object is fresh from a re-enumeration
+            # (a resumed job): Instagram only learns these at download time.
+            "Original_Duration_s": (clip.duration if clip.duration is not None
+                                    else meta.get("source_duration")),
             "Trimmed_Duration_s": meta.get("trimmed_duration"),
             # Blank for clips that never downloaded — "no" would read as a
             # verdict on a file that does not exist.
             "Audio": ("" if "has_audio" not in meta
                       else ("yes" if meta.get("has_audio") else "NO")),
             "Posted": clip.posted_date(),
-            "Title": clip.title,
+            "Title": clip.title or meta.get("title") or "",
             "URL": clip.url,
             "File": item.get("name") or "",
             "Segments": len((item.get("meta") or {}).get("segments") or []) or 1,
@@ -142,7 +149,14 @@ def run(job: dict) -> dict:
     started = time.time()
 
     account_input = params.get("account") or ""
-    account = tiktok.account_name(account_input)
+    # An explicit platform from the scraper page; otherwise the link says (the
+    # pipeline's "scrape now" passes only a link), and a bare @handle is TikTok.
+    platform = params.get("platform") or scrapers.detect(account_input)
+    platform_mod = scrapers.module(platform)
+    problem = scrapers.not_an_account(platform, account_input)
+    if problem:
+        raise tiktok.ScrapeError(problem)
+    account = platform_mod.account_name(account_input)
     # What to pull: the videos, or just the sound behind each post. Kept apart
     # from `mode` (which is layout) because they answer different questions --
     # a music scrape has no slot semantics, so it forces the dump layout below.
@@ -151,7 +165,8 @@ def run(job: dict) -> dict:
     # The dedup ledger is keyed on the account alone, so a music scrape of an
     # account already scraped for videos would find every post "already seen"
     # and pull nothing. Give the two runs separate histories.
-    ledger = f"{account}#music" if is_music else account
+    ledger = scrapers.ledger_key(platform, account)
+    ledger = f"{ledger}#music" if is_music else ledger
     mode = "dump" if is_music else params.get("mode", "batch")
     n_batches = int(params.get("batches") or 1)
     limit = int(params.get("limit") or config.SCRAPE_MAX_VIDEOS)
@@ -170,7 +185,7 @@ def run(job: dict) -> dict:
     raw_dir = work / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
 
-    source = tiktok.YtDlpSource()
+    source = platform_mod.make_source(account)
 
     # ---- 1. enumerate
     store.set_stage(job_id, "enumerating")
@@ -185,8 +200,13 @@ def run(job: dict) -> dict:
     # flat enumeration, not a verdict, so it also drops real videos. Letting the
     # download decide is what the video path does for every other uncertainty
     # too; a post that turns out to have no audio lands in `skipped` below.
-    likely_photos = [] if is_music else [c for c in found if c.likely_photo]
-    candidates = found if is_music else [c for c in found if not c.likely_photo]
+    #
+    # TikTok only: `duration is None` is a photo hint there, but YouTube's
+    # Shorts listing and Instagram's reels listing never carry a duration at
+    # all, so the same test would throw away every clip they have.
+    photo_hint = platform == "tiktok" and not is_music
+    likely_photos = [c for c in found if c.likely_photo] if photo_hint else []
+    candidates = [c for c in found if not (photo_hint and c.likely_photo)]
 
     known = store.known_clip_ids(ledger) if skip_known else set()
     duplicates = [c for c in candidates if c.video_id in known]
@@ -198,7 +218,8 @@ def run(job: dict) -> dict:
 
     if not fresh:
         return {
-            "account": account, "videos_found": len(candidates),
+            "account": account, "platform": platform,
+            "videos_found": len(candidates),
             "photos_skipped": len(likely_photos), "duplicates": len(duplicates),
             "downloaded": 0, "trimmed": 0, "batches": 0,
             "elapsed": time.time() - started,
@@ -322,14 +343,18 @@ def run(job: dict) -> dict:
                       "content_hash": digest,
                       "segments": [p.name for p in segments],
                       "has_audio": audible,
-                      "trimmed_duration": tiktok.probe_duration(segments[0], ffmpeg)},
+                      "trimmed_duration": tiktok.probe_duration(segments[0], ffmpeg),
+                      "title": clip.title, "source_duration": clip.duration},
             )
             if len(segments) > 1:
                 logger.info("Job %s: %s -> %d segments",
                             job_id, clip.video_id, len(segments))
         except Exception as exc:  # noqa: BLE001 — photo posts land here, by design
             skipped += 1
-            message = tiktok.explain_failure(str(exc))
+            # TikTok's decoder only: elsewhere "Unable to extract" means
+            # something other than a photo carousel.
+            message = (tiktok.explain_failure(str(exc)) if platform == "tiktok"
+                       else str(exc))
             store.update_item(job_id, item["idx"], render_status=store.ITEM_FAILED,
                               render_error=message[:400])
             logger.info("Job %s: skipped %s — %s", job_id, video_id, message[:120])
@@ -400,7 +425,8 @@ def run(job: dict) -> dict:
     # ---- 7. upload
     drive_result = ({} if params.get("upload") is False else
                     _upload(job, account, mode, plan, items_by_id,
-                            clips_dir, sheet_path, is_music=is_music))
+                            clips_dir, sheet_path, is_music=is_music,
+                            platform=platform))
 
     elapsed = time.time() - started
     batches_built = len({p.batch for p in plan if p.batch}) if mode != "dump" else 0
@@ -409,6 +435,7 @@ def run(job: dict) -> dict:
 
     result = {
         "account": account,
+        "platform": platform,
         "asset": asset,
         "videos_found": len(candidates),
         "photos_skipped": len(likely_photos) + skipped,
@@ -431,7 +458,7 @@ def run(job: dict) -> dict:
 
 def _upload(job: dict, account: str, mode: str, plan: list[tiktok.PlannedClip],
             items_by_id: dict, clips_dir: Path, sheet_path: Path,
-            is_music: bool = False) -> dict:
+            is_music: bool = False, platform: str = "tiktok") -> dict:
     """Push clips into Drive, pre-split into the slot folders the sidebar
     uploaders expect — the user drags 5 folders in instead of hand-sorting 50
     loose files."""
@@ -447,7 +474,9 @@ def _upload(job: dict, account: str, mode: str, plan: list[tiktok.PlannedClip],
     drive.set_target(destination)
 
     try:
-        root_id = drive.ensure_path(["scrapes", account])
+        root_id = drive.ensure_path(
+            ["scrapes", account] if platform == "tiktok"
+            else ["scrapes", platform, account])
         link = drive.folder_link(root_id)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Job %s: could not prepare the Drive folder", job_id)

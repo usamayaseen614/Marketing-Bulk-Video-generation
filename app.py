@@ -1352,7 +1352,8 @@ clip_source = st.radio(
                         "downloads them itself (no upload)",
         "scrape_job": f"Use a previous scrape already on this machine "
                       f"({len(available)} available)",
-        "scrape_now": "Scrape a TikTok account now, as part of this run",
+        "scrape_now": "Scrape an account now (TikTok, Instagram or YouTube), "
+                      "as part of this run",
     }[m],
     horizontal=False,
 )
@@ -1435,8 +1436,10 @@ elif clip_source == "scrape_job":
 
 elif clip_source == "scrape_now":
     clip_params["account"] = st.text_input(
-        "TikTok account URL or @handle",
+        "Account link (or a TikTok @handle)",
         placeholder="https://www.tiktok.com/@someaccount",
+        help="A TikTok, Instagram or YouTube profile link — the link says "
+             "which site to scrape. A bare @handle is taken as TikTok.",
     )
     col_l, col_s, col_d = st.columns(3)
     clip_params["scrape_limit"] = col_l.number_input(
