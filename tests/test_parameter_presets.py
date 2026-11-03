@@ -68,6 +68,7 @@ for node in ast.walk(ast.parse((ROOT / "app.py").read_text())):
 assert not excluded.intersection(values)
 
 values.update(bg_video_opacity=15, bg_video_min_seconds=12.5,
+              caption_mode="none",
               script_prompt="=A literal prompt\n第二行", subliminal_targets=["Headline", "Footer"],
               voice_set_kokoro=["af_heart", "am_adam"], cta_speed_10=1.75)
 first = pp.save("  Campaign A  ", values)

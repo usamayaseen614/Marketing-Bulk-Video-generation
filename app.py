@@ -1702,24 +1702,29 @@ if music_source == "upload" and not music_files and music_volume:
 # ---- captions
 st.subheader(t("4. Captions"))
 _pool = store.active_pool()
-if _pool:
-    st.caption(t("Active pool: **{0:,} unique pairs** left to draw from · theme *{1}*", _pool['combinations'], _pool.get('theme')))
 caption_mode = st.radio(
     t("Captions"),
-    options=["existing", "generate"],
-    format_func=option_labels(["existing", "generate"], lambda m: {
+    options=["existing", "generate", "none"],
+    format_func=option_labels(["existing", "generate", "none"], lambda m: {
         "existing": (t("Use the active caption pool") if _pool
                      else t("No pool — name files from the sheet's Headline")),
         "generate": t("Generate a fresh pool first (Gemini)"),
+        "none": t("None — no captions; name files from Headline"),
     }[m]),
     horizontal=True,
     key=keep("caption_mode"),
 )
-caption_params: dict = {}
+caption_params: dict = {"caption_mode": caption_mode}
+if _pool and caption_mode != "none":
+    st.caption(t("Active pool: **{0:,} unique pairs** left to draw from · theme *{1}*", _pool['combinations'], _pool.get('theme')))
+if caption_mode == "none":
+    st.session_state[keep("fixed_tail")] = False
+    st.session_state[keep("hashtag_source")] = "none"
 
 fixed_tail = st.checkbox(
     t("End every filename with a fixed call-to-action line"),
     value=False, key=keep("fixed_tail"),
+    disabled=caption_mode == "none",
     help=t("One of the lines below is picked at random for each video and added "
          "after its caption. Hashtags are switched off while this is on — the "
          "name carries one ending, not two, and both would not fit inside the "
@@ -1749,10 +1754,11 @@ hashtag_source = st.radio(
     format_func=option_labels(["pool", "excel", "none"], lambda m: {
         "pool": t("From the caption pool"),
         "excel": t("From an Excel file I upload"),
-        "none": t("None — filenames are the caption only"),
+        "none": (t("None — filenames use Headline") if caption_mode == "none"
+                 else t("None — filenames are the caption only")),
     }[m]),
     horizontal=True,
-    disabled=bool(fixed_tail), key=keep("hashtag_source"),
+    disabled=bool(fixed_tail) or caption_mode == "none", key=keep("hashtag_source"),
     help=t("Hashtags are optional. Without them the short filename is just the "
          "caption, still capped at 90 characters."),
 )
@@ -2093,7 +2099,7 @@ if ready and df is not None:
                   "ever reused, so this batch would be refused before it rendered. Raise "
                   "*Captions* in section 4 to at least {2:,}.", _planned, total_videos, total_videos)
             )
-    elif _pool:
+    elif caption_mode == "existing" and _pool:
         _unused, _total_caps = store.pool_remaining(_pool["id"])
         if _unused < total_videos:
             st.warning(

@@ -24,6 +24,8 @@
   "Where does the music come from?": "音乐来源",
   "4. Captions": "4. 发布文案",
   "Captions": "发布文案",
+  "None — no captions; name files from Headline": "None — 不使用发布文案，按 Headline 命名文件",
+  "None — filenames use Headline": "None — 不使用话题标签，按 Headline 命名文件",
   "End every filename with a fixed call-to-action line": "在每个文件名末尾添加固定的行动引导语",
   "One of the lines below is picked at random for each video and added after its caption. Hashtags are switched off while this is on — the name carries one ending, not two, and both would not fit inside the 90-character cap.": "每个视频会随机选择下面的一条引导语，追加到发布文案之后。启用后将关闭话题标签，以免文件名超过 90 个字符。",
   "Hashtags": "话题标签",

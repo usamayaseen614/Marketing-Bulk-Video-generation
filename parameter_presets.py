@@ -108,7 +108,7 @@ def parameters() -> dict[str, Parameter]:
         "trim_duration": Parameter("Trim length", "Sources", float(config.SCRAPE_TRIM_DURATION), 1, 60, unit="s"),
         "clip_strategy": Parameter("Which clips to use", "Sources", "top_views", options=("top_views", "all")),
         "clips_per_slot": Parameter("Clips per slot", "Sources", 10, 1, 50),
-        "caption_mode": Parameter("Captions", "Captions", "existing", options=("existing", "generate")),
+        "caption_mode": Parameter("Captions", "Captions", "existing", options=("existing", "generate", "none")),
         "fixed_tail": Parameter("End every filename with a fixed call-to-action line", "Captions", False),
         "hashtag_source": Parameter("Hashtags", "Captions", defaults.HASHTAG_SOURCE, options=("pool", "excel", "none")),
         "script_source": Parameter("Scripts", "Captions", "upload", options=("upload", "generate")),

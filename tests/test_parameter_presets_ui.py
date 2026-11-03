@@ -23,6 +23,7 @@ _app_path = Path(_app_dir.name) / "app.py"
 _app_path.write_text(
     (ROOT / "app.py").read_text()
     + '\nst.session_state["_test_render_config"] = asdict(config)\n'
+    + 'st.session_state["_test_caption_params"] = caption_params\n'
     + 'st.session_state["_test_cta_slots"] = [[f.name for f in slot] for slot in cta_video_slot_files]\n',
     encoding="utf-8")
 at = AppTest.from_file(str(_app_path), default_timeout=30).run()
@@ -185,4 +186,46 @@ assert control("slider", "Background video opacity (%)").value == 22
 from jobs import store
 assert store.list_jobs() == []
 assert not list(Path(os.environ["BVG_JOBS_ROOT"]).glob("*/assets"))
+
+store.init_db()
+pool_id = store.save_pool("Exhausted pool", ["Already used"], ["#old"])
+store.take_captions(pool_id, 1)
+for previous in ("existing", "generate"):
+    control("radio", "Captions").set_value(previous)
+    run()
+    control("radio", "Hashtags").set_value("excel")
+    run()
+    assert any("Hashtag sets (.xlsx)" in u.label for u in at.get("file_uploader"))
+    control("checkbox", "End every filename with a fixed call-to-action line").check()
+    run()
+    control("radio", "Captions").set_value("none")
+    run()
+    tags = control("radio", "Hashtags")
+    tail = control("checkbox", "End every filename with a fixed call-to-action line")
+    assert tags.value == "none" and tags.disabled
+    assert tail.value is False and tail.disabled
+    assert not any("Hashtag sets (.xlsx)" in u.label for u in at.get("file_uploader"))
+    assert not any(u.label == "Caption theme" for u in at.text_input)
+    assert not any("active pool" in w.value.lower() for w in at.warning)
+    assert not any("Active pool:" in c.value for c in at.caption)
+    params = at.session_state["_test_caption_params"]
+    assert params["caption_mode"] == "none" and params["hashtag_source"] == "none"
+    assert params["fixed_tail"] is False and not params.get("generate_pool")
+
+control("button", "Overwrite selected").click()
+run()
+control("radio", "Captions").set_value("existing")
+run()
+assert not control("radio", "Hashtags").disabled
+assert not control("checkbox", "End every filename with a fixed call-to-action line").disabled
+control("button", "Apply preset").click()
+run()
+assert control("radio", "Captions").value == "none"
+assert control("radio", "Hashtags").value == "none"
+at.button(key="switch_language").click()
+run()
+assert control("radio", "发布文案").value == "none"
+assert "None — 不使用发布文案，按 Headline 命名文件" in control("radio", "发布文案").options
+assert control("radio", "话题标签").value == "none"
+assert control("radio", "话题标签").disabled
 print("ALL PARAMETER UI TESTS PASSED")

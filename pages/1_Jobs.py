@@ -149,7 +149,8 @@ def show_captions(job: dict, sheet: Path, label: str) -> None:
         cols = [c for c in preferred if c in frame.columns]
         cols += [c for c in frame.columns if c not in cols]
 
-        if is_render and "Caption" in frame.columns:
+        if (is_render and "Caption" in frame.columns
+                and (job.get("params") or {}).get("caption_mode") != "none"):
             st.caption(
                 t("The **short filename** is what to upload; its caption is the "
                 "text to paste. Click a cell to select it, or take the CSV.")

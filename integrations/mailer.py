@@ -171,6 +171,8 @@ def _render_body(job: dict, status: str, result: dict) -> str:
                "a fixed call-to-action line instead of hashtags"
                if tailed else
                "once with a single hashtag and once with all of them")
+        if (job.get("params") or {}).get("caption_mode") == "none":
+            how = "under the same Headline-based name without captions or hashtags"
         lines.append(
             f"{uploaded:,} of {rendered:,} uploaded to Google Drive "
             f"({drive_files:,} files — each video is published twice, {how})")

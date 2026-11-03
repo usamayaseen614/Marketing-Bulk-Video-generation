@@ -414,7 +414,7 @@ def run(job: dict) -> dict:
             job, params, "music_drive_folder", "music", "music", kind="audio")
 
     # ---- 2. captions
-    if params.get("generate_pool"):
+    if params.get("generate_pool") and params.get("caption_mode") != "none":
         try:
             result["caption_pool"] = _captions_stage(job, params)
         except Exception as exc:  # noqa: BLE001

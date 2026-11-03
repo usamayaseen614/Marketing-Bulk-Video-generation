@@ -861,6 +861,15 @@ Your evening routine deserves better than this #skincareroutine #asmrsounds #for
 The exception is a caption too long to fit even beside a single hashtag: it is being
 truncated either way, so the full set is kept rather than losing tags for nothing.
 
+### No publishing captions
+
+Choose **Captions → None** to skip caption generation and ignore the active
+pool and the sheet's `Caption` / `Hashtags` columns. Hashtags and the fixed
+call-to-action are switched off. Files use each video's `Headline`, including
+per-promo text overrides, with the usual length limit and duplicate numbering.
+The output manifests leave `Caption` and `Hashtags` blank. Voiceover and
+on-screen text keep their own settings.
+
 ### A fixed call-to-action instead of hashtags
 
 Tick **End every filename with a fixed call-to-action line** in *4. Captions* and each
