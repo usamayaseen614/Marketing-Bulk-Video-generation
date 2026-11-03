@@ -707,6 +707,14 @@ batch in ~20–40 minutes.
   CID=$(sudo docker ps --format '{{.ID}} {{.Image}}' | grep bulk-video-generator | cut -d' ' -f1)
   sudo docker exec $CID python -c "from jobs import store; print(store.reap_old_jobs(0))"
   ```
+- **Disk: saved jobs are the one thing the purge leaves alone.** Every batch
+  queued from the main page keeps a copy of its settings and input files under
+  `/data/jobs/_presets` for **Reuse a previous job** — inputs only, never
+  rendered output. Identical files are stored once, the newest 30 saved jobs
+  are kept (`BVG_PRESETS_MAX`; 0 = no limit), and deleting one from the page
+  frees any file no other saved job uses once it has gone an hour unused
+  (the worker sweeps every 15 minutes between jobs). Budget for one copy of
+  each distinct promo set you work with.
 
   That deletes every finished job's folder immediately, ignoring the retention
   window — including jobs whose output was never published, so check the Jobs

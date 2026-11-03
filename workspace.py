@@ -17,10 +17,11 @@ Two callers, one layout:
 from __future__ import annotations
 
 import io
+import shutil
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 
 # How many promo videos one render may cycle through, one per batch. They are
@@ -121,14 +122,89 @@ class Workspace:
         return self.video_paths[batch_index % len(self.video_paths)]
 
 
+# Write granularity, and so how often a progress callback hears about it.
+_COPY_CHUNK = 8 * 1024 * 1024
+
+
+def _write_file(f, dest: Path, progress: Optional[Callable[[int], None]]) -> None:
+    """Write one upload to `dest`, reporting bytes as they land.
+
+    A file loaded from a saved job (presets.StoredFile) carries a `path` and is
+    copied disk-to-disk, so a multi-gigabyte promo is never pulled into memory
+    just to be written back out. Copied, not hard-linked: see presets.py."""
+    src = getattr(f, "path", None)
+    if src is not None:
+        with open(src, "rb") as fin, open(dest, "wb") as fout:
+            if progress is None:
+                shutil.copyfileobj(fin, fout, _COPY_CHUNK)
+                return
+            while chunk := fin.read(_COPY_CHUNK):
+                fout.write(chunk)
+                progress(len(chunk))
+        return
+    data = memoryview(f.getvalue())
+    with open(dest, "wb") as fout:
+        for offset in range(0, len(data), _COPY_CHUNK):
+            piece = data[offset:offset + _COPY_CHUNK]
+            fout.write(piece)
+            if progress:
+                progress(len(piece))
+
+
+def _extract_zip(zip_file, dest: Path,
+                 progress: Optional[Callable[[int], None]]) -> None:
+    """extractall(), one member at a time so a progress bar can move. Reports
+    the archive's own size in total — the same unit staged_bytes() counted."""
+    src = getattr(zip_file, "path", None)
+    source = src if src is not None else io.BytesIO(zip_file.getvalue())
+    reported = 0
+    with zipfile.ZipFile(source) as zf:
+        for member in zf.infolist():
+            # extract() sanitises member names the same way extractall() does.
+            zf.extract(member, dest)
+            if progress:
+                progress(member.compress_size)
+                reported += member.compress_size
+    if progress:
+        # Headers and the central directory are the remainder.
+        size = getattr(zip_file, "size", None)
+        if size is not None and int(size) > reported:
+            progress(int(size) - reported)
+
+
+def staged_bytes(*groups) -> int:
+    """Total size of the uploads a stage_uploads() call will write, for sizing
+    a progress bar. Takes single files, lists, lists of lists and Nones — the
+    same shapes stage_uploads accepts — so a caller can pass its arguments
+    straight through."""
+    total = 0
+    for group in groups:
+        if group is None:
+            continue
+        if isinstance(group, (list, tuple)):
+            total += staged_bytes(*group)
+            continue
+        size = getattr(group, "size", None)
+        total += int(size) if size is not None else len(group.getvalue())
+    return total
+
+
 def stage_uploads(dest: Path, video_file, zip_file, cta_file, font_file,
                   cta_video_slot_files=None, gif_files=None,
                   bg_video_files=None, music_files=None,
-                  promo_alt_files=None) -> None:
+                  promo_alt_files=None, *,
+                  progress: Optional[Callable[[int], None]] = None) -> None:
     """Write the in-memory uploads to disk where FFmpeg/PIL can read them.
 
     `video_file` may be a single upload or a list of up to MAX_PROMO_VIDEOS —
     a multi-batch render uses a different promo video per batch.
+
+    Any "upload" may also be a file loaded from a saved job (presets.py); it
+    is copied from disk rather than from memory.
+
+    `progress`, when given, is called with the number of bytes written each
+    time a chunk lands; the calls add up to staged_bytes() of the same
+    arguments.
 
     New parameters are APPENDED, never inserted: app.py's Preview, Render Row
     and submit paths all call this positionally."""
@@ -145,7 +221,7 @@ def stage_uploads(dest: Path, video_file, zip_file, cta_file, font_file,
     alt_dir.mkdir(parents=True, exist_ok=True)
     for f in promo_alt_files or []:
         if f is not None:
-            (alt_dir / Path(f.name).name).write_bytes(f.getvalue())
+            _write_file(f, alt_dir / Path(f.name).name, progress)
 
     promos = video_file if isinstance(video_file, (list, tuple)) else [video_file]
     promos = [f for f in promos if f is not None][:MAX_PROMO_VIDEOS]
@@ -159,23 +235,22 @@ def stage_uploads(dest: Path, video_file, zip_file, cta_file, font_file,
         # input.mp4 stays the first one's name so anything reading a single
         # promo keeps working unchanged.
         name = "input.mp4" if i == 1 else f"input_{i}.mp4"
-        (dest / name).write_bytes(promo.getvalue())
+        _write_file(promo, dest / name, progress)
 
     # The CTA image is optional — no file written when none was uploaded.
     if cta_file is not None:
-        (dest / "cta.png").write_bytes(cta_file.getvalue())
+        _write_file(cta_file, dest / "cta.png", progress)
 
     # Backgrounds are optional — without a ZIP the folder stays empty and rows
     # render on the configured solid background color.
     bg_dir = dest / "backgrounds"
     bg_dir.mkdir(exist_ok=True)
     if zip_file is not None:
-        with zipfile.ZipFile(io.BytesIO(zip_file.getvalue())) as zf:
-            zf.extractall(bg_dir)
+        _extract_zip(zip_file, bg_dir, progress)
 
     if font_file is not None:
         suffix = Path(font_file.name).suffix.lower()
-        (dest / f"custom_font{suffix}").write_bytes(font_file.getvalue())
+        _write_file(font_file, dest / f"custom_font{suffix}", progress)
 
     # One sub-folder per CTA slot, keeping each sample's original filename so the
     # Excel CTA_Clip_<n> cells can pin one by name. Empty slots still get their
@@ -185,7 +260,7 @@ def stage_uploads(dest: Path, video_file, zip_file, cta_file, font_file,
         slot_dir = dest / f"cta_slot_{i}"
         slot_dir.mkdir(parents=True, exist_ok=True)
         for f in files or []:
-            (slot_dir / Path(f.name).name).write_bytes(f.getvalue())
+            _write_file(f, slot_dir / Path(f.name).name, progress)
 
     # One flat folder for the gif pool. Always created, so a job resumed after
     # a restart can tell "no gifs were uploaded" from "the folder is missing".
@@ -193,7 +268,7 @@ def stage_uploads(dest: Path, video_file, zip_file, cta_file, font_file,
     gif_dir.mkdir(parents=True, exist_ok=True)
     for f in gif_files or []:
         if f is not None:
-            (gif_dir / Path(f.name).name).write_bytes(f.getvalue())
+            _write_file(f, gif_dir / Path(f.name).name, progress)
 
     # The background-video pool: one flat folder, same shape as the gifs.
     # NOT inside backgrounds/ (_build_bg_index only sees images there) and not
@@ -204,7 +279,7 @@ def stage_uploads(dest: Path, video_file, zip_file, cta_file, font_file,
     bgv_dir.mkdir(parents=True, exist_ok=True)
     for f in bg_video_files or []:
         if f is not None:
-            (bgv_dir / Path(f.name).name).write_bytes(f.getvalue())
+            _write_file(f, bgv_dir / Path(f.name).name, progress)
 
     # The music pool: one flat folder, same shape again. Its own folder rather
     # than sharing bg_videos/ because the two are filtered by different suffix
@@ -213,7 +288,7 @@ def stage_uploads(dest: Path, video_file, zip_file, cta_file, font_file,
     music_dir.mkdir(parents=True, exist_ok=True)
     for f in music_files or []:
         if f is not None:
-            (music_dir / Path(f.name).name).write_bytes(f.getvalue())
+            _write_file(f, music_dir / Path(f.name).name, progress)
 
 
 def workspace_from_dir(assets: Path, work_dir: Path) -> Workspace:
@@ -302,9 +377,10 @@ def workspace_from_dir(assets: Path, work_dir: Path) -> Workspace:
 def build_workspace(tmp: Path, video_file, zip_file, cta_file, font_file,
                     cta_video_slot_files=None, gif_files=None,
                     bg_video_files=None, music_files=None,
-                    promo_alt_files=None) -> Workspace:
+                    promo_alt_files=None, *,
+                    progress: Optional[Callable[[int], None]] = None) -> Workspace:
     """Stage the uploads into `tmp` and return the Workspace over them."""
     stage_uploads(tmp, video_file, zip_file, cta_file, font_file,
                   cta_video_slot_files, gif_files, bg_video_files, music_files,
-                  promo_alt_files)
+                  promo_alt_files, progress=progress)
     return workspace_from_dir(tmp, tmp / "work")

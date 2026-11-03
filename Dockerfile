@@ -99,7 +99,7 @@ RUN mkdir -p static
 # Streamlit page code.
 RUN python -c "\
 import importlib, sys; \
-mods = ['config','workspace','results','batching','packing','video_generator', \
+mods = ['config','workspace','presets','results','batching','packing','video_generator', \
         'text_grids', \
         'preview_editor','jobs.store','jobs.worker','jobs.runners.render', \
         'jobs.runners.scrape','jobs.runners.captions','integrations.drive', \

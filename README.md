@@ -416,10 +416,10 @@ So the video made from **row 2** on **video 3.mp4** reads `sakfjn`.
    but it's exactly what the batch will produce for that row, including motion-only
    behavior the static preview can't show (side-clip sequencing, fades, the subliminal
    effect).
-4. Click **🚀 Generate All Videos** — the batch is **queued** and the click returns
-   immediately. **You can close the tab.** Rendering, captioning and uploading happen in
-   a background worker process, so a closed tab, a slept laptop or a dropped connection
-   no longer kills a batch.
+4. Click **🚀 Generate All Videos** — the batch is **queued** once its files are copied
+   into the job (a progress bar shows how far along that is), then **you can close the
+   tab.** Rendering, captioning and uploading happen in a background worker process, so a
+   closed tab, a slept laptop or a dropped connection no longer kills a batch.
 5. Watch it on the **📋 Jobs** page — live progress, per-row failures with their reason
    (e.g. a background missing from the ZIP), and warnings. One bad row never stops the
    batch. An email arrives when it finishes, on success *and* on failure.
@@ -431,7 +431,39 @@ If the worker is interrupted mid-batch, the job resumes rather than restarting: 
 at video 250 of 300 costs the one video in flight, not the 250 already done.
 
 Uploaded assets are deleted as soon as a job finishes; finished job folders are reaped
-after a configurable retention period (7 days by default).
+after a configurable retention period (7 days by default). The copy kept for **Reuse a
+previous job** (below) is separate and survives both.
+
+### Reuse a previous job
+
+Every batch you queue is saved — every setting on the page and every file it used — under
+**♻️ Reuse a previous job** at the top of the main page.
+
+- **Load** puts every setting back exactly as that job was queued and uses its files
+  wherever you don't upload a new one. A 📎 note under each uploader says which saved files
+  are standing in; upload into that slot to replace them, or click **✕ Don't use** to drop
+  them. Edits saved from the preview editor come back too — they are written into the
+  saved sheet.
+- **🗑️ Delete** removes a saved job for good. A file another saved job still uses is kept.
+- **↺ Clear the form** (shown after a Load) puts every field back to its default and
+  removes every upload.
+
+Saved jobs live on the server under `BVG_JOBS_ROOT/_presets` (override with
+`BVG_PRESETS_ROOT`). A file is stored once however many saved jobs use it, so re-using the
+same promos costs no extra disk, and queuing the same job again unchanged replaces its
+older copy rather than adding one. The newest 30 are kept (`BVG_PRESETS_MAX`, 0 = keep
+everything until deleted by hand). Jobs queued before this feature existed were not saved.
+The per-row preview choices (row number, which promo to preview) and the "Which scrape"
+pick are not saved — the scrapes on the server change over time.
+
+### Upload progress
+
+While the browser is uploading, a panel in the bottom-right corner shows every file in
+flight together: how many are done, how many MB of the total, speed and time left. While
+an upload is running the browser asks before leaving the page, because Streamlit cannot
+resume an interrupted upload. Copying files into a job (or into a preview) has its own
+progress bar, and the **📋 Jobs** page shows Drive uploads, Drive downloads and caption
+generation as progress bars of their own.
 
 ### Where the CTA clips come from
 

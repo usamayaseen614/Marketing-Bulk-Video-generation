@@ -94,6 +94,20 @@ JOB_RETENTION_DAYS = _int("BVG_JOB_RETENTION_DAYS", 7)
 # what "confirmed" means, and refuses to confirm anything it cannot prove.
 JOB_PURGE_ON_FINISH = _bool("BVG_JOB_PURGE_ON_FINISH", True)
 
+# Saved job settings and files (presets.py): every batch queued from the main
+# page is saved here so a later batch can load it back from a dropdown.
+#
+# Under JOBS_ROOT so it lands on the same mounted volume, and `_`-prefixed so
+# the orphan sweep in store.reap_old_jobs() never mistakes it for a job folder.
+# NOT inside any job folder, because those are purged the moment a job's output
+# reaches Drive — which is exactly when a saved copy starts being the only one.
+PRESETS_ROOT = Path(_str("BVG_PRESETS_ROOT") or (JOBS_ROOT / "_presets")).resolve()
+
+# How many saved jobs to keep. The oldest beyond this are deleted on the next
+# save. Files are shared between saved jobs by content, so re-using the same
+# promos costs no extra disk; 0 keeps everything until deleted by hand.
+PRESETS_MAX = max(0, _int("BVG_PRESETS_MAX", 30))
+
 # The one place the app writes bulk data OUTSIDE JOBS_ROOT: the Jobs page moves
 # a result ZIP over 5 GB here so Tornado can stream it from disk rather than
 # buffering it in Python memory.

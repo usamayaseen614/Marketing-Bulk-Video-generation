@@ -8,6 +8,7 @@ workspace.py, which the headless worker imports.
 from __future__ import annotations
 
 import shutil
+import time
 import uuid
 from pathlib import Path
 
@@ -59,6 +60,80 @@ def _human_size(n: int) -> str:
     if n < 1024 * 1024:
         return f"{n / 1024:.0f} KB"
     return f"{n / 1024 / 1024:.1f} MB"
+
+
+def human_bytes(n: float) -> str:
+    """1.2 GB, 340 MB, 12 KB — for progress text, where _human_size's MB
+    ceiling reads badly on an 18 GB promo set."""
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit in ("B", "KB") else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} GB"
+
+
+class ByteProgress:
+    """An st.progress bar driven by byte counts.
+
+    The instance is the callback: pass it as `progress=` to
+    workspace.stage_uploads or presets.save, which call it with each chunk's
+    size. Redraws are throttled — an 18 GB staging reports in 8 MB chunks, and
+    two thousand websocket messages in a minute make the page lag behind the
+    work it is describing."""
+
+    _MIN_REDRAW_SECONDS = 0.25
+
+    def __init__(self, total: int, text: str):
+        self.total = max(0, int(total))
+        self.done = 0
+        self.text = text
+        self._started = time.monotonic()
+        self._last_draw = 0.0
+        self._bar = st.progress(0.0, text=self._label())
+
+    def __call__(self, n_bytes: int) -> None:
+        self.done += int(n_bytes)
+        self._draw()
+
+    def phase(self, text: str) -> None:
+        """Change the caption without resetting the count (one bar, several
+        steps)."""
+        self.text = text
+        self._draw(force=True)
+
+    def clear(self) -> None:
+        self._bar.empty()
+
+    def _draw(self, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._last_draw < self._MIN_REDRAW_SECONDS:
+            return
+        self._last_draw = now
+        fraction = 1.0 if not self.total else min(1.0, self.done / self.total)
+        self._bar.progress(fraction, text=self._label())
+
+    def _label(self) -> str:
+        if not self.total:
+            return self.text
+        pct = min(100, int(100 * self.done / self.total))
+        label = (f"{self.text} — {human_bytes(self.done)} of "
+                 f"{human_bytes(self.total)} ({pct}%)")
+        elapsed = time.monotonic() - self._started
+        if self.done and elapsed > 2 and self.done < self.total:
+            rate = self.done / elapsed
+            label += (f" · {human_bytes(rate)}/s · about "
+                      f"{_human_duration((self.total - self.done) / rate)} left")
+        return label
+
+
+def _human_duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60} min"
+    return f"{seconds // 3600}h {seconds % 3600 // 60:02d}m"
 
 
 @st.cache_data(show_spinner=False, max_entries=16)

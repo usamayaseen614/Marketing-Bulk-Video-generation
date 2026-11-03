@@ -27,6 +27,7 @@ import time
 from typing import Callable, Optional
 
 import config
+import presets
 from jobs import store
 
 logger = logging.getLogger("worker")
@@ -187,6 +188,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                 removed = store.reap_old_jobs()
                 if removed:
                     logger.info("Reaped %d job folder(s) past retention", len(removed))
+                # Files of deleted saved jobs outlive the delete by a grace
+                # period (see presets.GC_GRACE_SECONDS); this is what finally
+                # frees them when nobody saves or deletes anything afterwards.
+                freed = presets.gc_blobs()
+                if freed:
+                    logger.info("Freed %d file(s) no saved job uses", len(freed))
 
             store.requeue_stale_jobs()
             job = store.claim_next_job(kinds=args.kinds)

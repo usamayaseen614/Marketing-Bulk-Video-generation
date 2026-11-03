@@ -9,6 +9,7 @@ comes from the job database rather than session state.
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 
@@ -70,18 +71,40 @@ def stage_for(job: dict) -> str:
             else store.STAGE_RENDER)
 
 
+# "downloading clip 1 40/200", "captions 3/16", "packing batch_02 (2/5)": the
+# stages that count for themselves already say how far along they are.
+_STAGE_COUNT = re.compile(r"(\d+)\s*/\s*(\d+)")
+# Stages whose count is already drawn by the bars above it.
+_STAGE_DRAWN = re.compile(r"^(rendering|uploading \d+/\d+)")
+
+
 def render_progress(job: dict) -> None:
     counts = store.item_counts(job["id"], stage=stage_for(job))
     total = counts["total"]
-    if not total:
-        return
-    finished = counts["rendered"] + counts["render_failed"]
-    st.progress(
-        min(1.0, finished / total),
-        text=f"Rendered {counts['rendered']}/{total}"
-              + (f" · {counts['render_failed']} failed" if counts["render_failed"] else "")
-              + (f" · {counts['uploaded']} uploaded" if counts["uploaded"] else ""),
-    )
+    stage = job.get("stage") or ""
+    if total:
+        finished = counts["rendered"] + counts["render_failed"]
+        st.progress(
+            min(1.0, finished / total),
+            text=f"Rendered {counts['rendered']}/{total}"
+                  + (f" · {counts['render_failed']} failed" if counts["render_failed"] else ""),
+        )
+        # Drive gets a bar of its own once uploading starts. Before, it was a
+        # count tacked onto the render bar — which sits at 100% for the whole
+        # upload phase, so an hour of uploading looked like nothing happening.
+        if (counts["uploaded"] or counts["upload_failed"]
+                or stage.startswith("uploading")):
+            st.progress(
+                min(1.0, counts["uploaded"] / total),
+                text=f"Uploaded {counts['uploaded']}/{total} to Drive"
+                      + (f" · {counts['upload_failed']} failed"
+                         if counts["upload_failed"] else ""),
+            )
+    match = _STAGE_COUNT.search(stage)
+    if match and not _STAGE_DRAWN.match(stage):
+        done, of = int(match.group(1)), int(match.group(2))
+        if of > 0:
+            st.progress(min(1.0, done / of), text=stage[:1].upper() + stage[1:])
 
 
 @st.cache_data(show_spinner=False)
