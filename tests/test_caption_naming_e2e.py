@@ -53,7 +53,7 @@ assert "Caption" not in df.columns, "sheet should start without captions"
 
 store.create_job(
     kind=store.KIND_RENDER,
-    params={"render_config": asdict(RenderConfig(crf=30, preset="veryfast")),
+    params={"hashtag_source": "pool", "render_config": asdict(RenderConfig(crf=30, preset="veryfast")),
             "workers": 4, "make_zip": False, "captions": True},
     label="caption-naming-test",
     items=[{"idx": i} for i in range(1, len(df) + 1)],
@@ -147,7 +147,7 @@ stage_uploads(store.assets_dir(job2), Fake(SA / "promo.mp4"),
 df.to_excel(store.assets_dir(job2) / "input.xlsx", index=False, engine="openpyxl")
 store.create_job(
     kind=store.KIND_RENDER,
-    params={"render_config": asdict(RenderConfig(crf=30, preset="veryfast")),
+    params={"hashtag_source": "pool", "render_config": asdict(RenderConfig(crf=30, preset="veryfast")),
             "workers": 4, "make_zip": False, "batches": 2},
     label="pool-too-small", items=[{"idx": i} for i in range(1, len(df) * 2 + 1)],
     job_id=job2,

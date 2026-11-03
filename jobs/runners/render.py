@@ -62,6 +62,7 @@ import pandas as pd
 
 import batching
 import config
+import generation_defaults as defaults
 import results
 import text_grids
 from batching import Slot
@@ -107,7 +108,7 @@ def _hashtag_override(job_id: str, params: dict) -> Optional[list[str]]:
     if params.get("fixed_tail"):
         # A fixed CTA line replaces hashtags outright — see naming.FIXED_TAILS.
         return []
-    source = params.get("hashtag_source", "pool")
+    source = params.get("hashtag_source", defaults.HASHTAG_SOURCE)
     if source == "none":
         return []
     if source != "excel":
@@ -262,7 +263,7 @@ def _assign_names(job_id: str, slots: list[Slot], n_rows: int,
         "pool_id": pool["id"] if pool else None,
         "theme": pool.get("theme") if pool else None,
         "hashtag_source": "fixed_tail" if fixed_tail else
-                          (params or {}).get("hashtag_source", "pool"),
+                          (params or {}).get("hashtag_source", defaults.HASHTAG_SOURCE),
         "reason": None if pool else
                   "No caption pool — names fall back to the sheet's Headline.",
     }
@@ -1161,7 +1162,7 @@ def run(job: dict) -> dict:
     n_rows = len(df)
     n_batches = max(1, int(params.get("batches") or 1))
     n_folders = max(1, int(params.get("folders") or n_batches))
-    workers = max(1, int(params.get("workers") or 2))
+    workers = max(1, int(params.get("workers") or defaults.max_workers()))
 
     ws = workspace_from_dir(assets, work)
     slots = batching.plan_render(n_batches, n_rows)

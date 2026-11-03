@@ -37,6 +37,7 @@ import pandas as pd
 from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 import config
+import generation_defaults as defaults
 import workspace
 from speech import synth as speech_synth
 from speech.beats import group_text, group_words
@@ -155,7 +156,7 @@ GIF_MAX_TOTAL_CLIPS = 40
 # frame for at least BG_VIDEO_MIN_SECONDS by repeating ITSELF a whole number of
 # times. The floor is longer than the gifs' because this layer is ambience
 # rather than punctuation — a bed that changes every 5 seconds reads as flicker.
-BG_VIDEO_MIN_SECONDS = 10.0
+BG_VIDEO_MIN_SECONDS = defaults.BG_VIDEO_MIN_SECONDS
 BG_VIDEO_MAX_TOTAL_CLIPS = 40
 
 # Promo Alternate: the pool that REPLACES the promo video. Dealt by the same
@@ -182,14 +183,13 @@ PROMO_ALT_SECONDS = 20.0
 # The music bed: a flat pool of AUDIO files sequenced exactly like the gifs and
 # the background videos — tracks are drawn until their combined length covers
 # the promo, each held for at least MUSIC_MIN_SECONDS by repeating ITSELF a
-# whole number of times. The floor is longer again than the background videos'
-# because a track that swaps every ten seconds reads as a fault, not a bed.
+# whole number of times. Its default floor matches the background videos'.
 #
 # Mixed against the promo's own audio by music_volume: at 0.10 the bed is at
 # 10% and the promo at 90%, a straight complementary split. amix runs with
 # normalize=0, so those numbers are the linear gains they claim to be rather
 # than something amix re-scales behind them.
-MUSIC_MIN_SECONDS = 30.0
+MUSIC_MIN_SECONDS = defaults.MUSIC_MIN_SECONDS
 MUSIC_MAX_TOTAL_CLIPS = 20
 # Sample rate / layout every track is forced to before concat. Concat refuses
 # inputs that disagree, and a pool of user-supplied files disagrees as a matter
@@ -212,8 +212,8 @@ MUSIC_FORMAT = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=ster
 # chipmunk. It accepts 0.5-100, and the spread cap below keeps every tempo far
 # inside that — the real limit is quality, since WSOLA warbles on speech well
 # before the filter complains.
-SPLIT_AUDIO_CHUNKS = 8
-SPLIT_AUDIO_SPREAD = 0.35
+SPLIT_AUDIO_CHUNKS = defaults.SPLIT_AUDIO_CHUNKS
+SPLIT_AUDIO_SPREAD = defaults.SPLIT_AUDIO_SPREAD / 100.0
 # Past ~0.6 the slow chunks smear badly and the fast ones gabble. Also keeps
 # 1/(1-spread) bounded well under atempo's ceiling.
 SPLIT_AUDIO_MAX_SPREAD = 0.6
@@ -838,7 +838,7 @@ class RenderConfig:
     # ALWAYS directly below the texts (it shares text_z with a lower tie-break,
     # so no sidebar z setting can put it over them). 0 opacity = layer off even
     # when a pool exists. The box defaults to the full canvas.
-    bg_video_opacity: float = 0.08
+    bg_video_opacity: float = defaults.BG_VIDEO_OPACITY / 100.0
     bg_video_x: int = 0
     bg_video_y: int = 0
     bg_video_w: int = CANVAS_W
@@ -935,7 +935,7 @@ class RenderConfig:
     text_z: int = 5
     fps: int = FPS                # output frame rate; see FPS_CHOICES
     crf: int = 18                 # 16-28; lower = higher quality / bigger files
-    preset: str = "medium"        # x264 speed/size tradeoff
+    preset: str = defaults.ENCODER_PRESET        # x264 speed/size tradeoff
     # When True, video_x/video_y are ignored and each row's video box gets a
     # seeded-random position avoiding the CTA and explicitly-placed texts.
     randomize_video_pos: bool = False
@@ -949,12 +949,11 @@ class RenderConfig:
     variant_salt: int = 0
     audio_bitrate: str = "192k"
     include_audio: bool = True
-    # ---- the music bed. 0 = off, and off means the audio path is byte-for-byte
-    # what it always was: `-map <promo>:a?` straight into AAC, no filter graph.
+    # ---- the music bed. 0 disables music; split-audio can still warp the promo.
     # Above 0 the promo's audio drops to (1 - music_volume) and the bed comes in
     # at music_volume, a complementary split — "music at 10%" leaves the original
     # at 90%. Linear gain, not perceptual: 0.10 is about -20dB.
-    music_volume: float = 0.0
+    music_volume: float = defaults.MUSIC_VOLUME / 100.0
     # Dwell floor for the music sequence. Scoped batch-wide for the same reason
     # as gif_min_seconds and bg_video_min_seconds — it is pacing, and a per-row
     # column would make the FFmpeg input count vary row to row.
@@ -965,7 +964,7 @@ class RenderConfig:
     # sound drift apart in the middle by design. Pitch is preserved (atempo).
     # The chunk tempos are drawn from the row's seed, so every output video in a
     # batch warps differently and re-rendering a sheet reproduces it exactly.
-    split_audio: bool = False
+    split_audio: bool = defaults.SPLIT_AUDIO
     split_audio_chunks: int = SPLIT_AUDIO_CHUNKS
     # How far tempos stray from 1.0. 0.35 gives roughly 0.74x-1.54x.
     split_audio_spread: float = SPLIT_AUDIO_SPREAD
@@ -1007,7 +1006,7 @@ class RenderConfig:
     # cycle, granularity splits by "word" or "char". all_intra forces every output
     # frame to be independently coded so the "no whole frame" property survives a
     # frame-by-frame scrub of OUR file — at a big file-size cost.
-    subliminal_targets: list = field(default_factory=list)
+    subliminal_targets: list = field(default_factory=lambda: list(defaults.SUBLIMINAL_TARGETS))
     # How each frame is built from the token groups:
     #   "hide" — show the whole text MINUS one rotating group (~1/K hidden).
     #            Each token is lit (K-1)/K of the time, so it stays bright and
@@ -1030,11 +1029,11 @@ class RenderConfig:
     # "hidden exactly once per cycle" property and stays bright; higher hides more
     # per frame (fainter). Clamped so at least one token is hidden and at least
     # one shown (no frame is ever whole, none ever fully blank).
-    subliminal_hide_pct: int = 33
-    subliminal_k: int = 3
+    subliminal_hide_pct: int = defaults.SUBLIMINAL_HIDE_PCT
+    subliminal_k: int = defaults.SUBLIMINAL_K
     subliminal_phase: int = 0
     subliminal_granularity: str = "word"   # "word" | "char"
-    subliminal_all_intra: bool = True
+    subliminal_all_intra: bool = defaults.SUBLIMINAL_ALL_INTRA
     # ---- voiceover + timed captions (see the speech/ package and config.py,
     # which documents what each of these is for and why the defaults are what
     # they are). Off by default; every one of these is a no-op while it is.

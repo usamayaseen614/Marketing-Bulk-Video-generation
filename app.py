@@ -6,7 +6,6 @@ Run with:  streamlit run app.py
 
 import io
 import logging
-import os
 import tempfile
 import uuid
 from dataclasses import asdict
@@ -25,6 +24,8 @@ from speech import synth as speech_synth
 from captions import naming as caption_naming
 import presets
 import presets_ui
+import parameter_presets_ui
+import generation_defaults as defaults
 import upload_progress
 from jobs import store
 from preview_editor import preview_editor
@@ -248,6 +249,7 @@ presets_ui.panel()
 # ---- sidebar: layout & output configuration
 with st.sidebar:
     st.header("⚙️ Settings")
+    parameter_presets_ui.panel()
 
     st.subheader("Layout")
     layout_mode = st.radio(
@@ -298,6 +300,7 @@ with st.sidebar:
     )
     bg_video_files = st.file_uploader(
         "Background videos (MP4, optional)", type=["mp4"],
+        on_change=presets_ui.upload_changed, args=("bg_video_pool",),
         key=presets_ui.uploader_key("bg_video_pool"),
         accept_multiple_files=True,
         help="A pool of translucent overlay videos. They play one after "
@@ -314,12 +317,12 @@ with st.sidebar:
                                            multiple=True)
     # Not gated on the uploader: the pool may arrive from Drive instead.
     bg_video_opacity = st.slider(
-        "Background video opacity (%)", 1, 50, 8, key=keep("bg_video_opacity"),
+        "Background video opacity (%)", 1, 50, defaults.BG_VIDEO_OPACITY, key=keep("bg_video_opacity"),
         help="How visible the background videos are. Keep it low (≈8–15) so "
              "texts stay legible.",
     )
     bg_video_min_seconds = st.number_input(
-        "Minimum seconds per background video", 1.0, 120.0, 10.0, 0.5,
+        "Minimum seconds per background video", 1.0, 120.0, defaults.BG_VIDEO_MIN_SECONDS, 0.5,
         key=keep("bg_video_min_seconds"),
         help="The dwell floor. Clips play one after another for the length of "
              "the video; one shorter than this repeats itself until it clears "
@@ -346,6 +349,7 @@ with st.sidebar:
     music_files = st.file_uploader(
         "Music tracks (optional)",
         type=["mp3", "wav", "m4a", "aac", "ogg", "opus", "flac"],
+        on_change=presets_ui.upload_changed, args=("music_pool",),
         key=presets_ui.uploader_key("music_pool"), accept_multiple_files=True,
         help="A pool of music laid under the promo video's own sound. Tracks "
              "play one after another for the length of each video — the same "
@@ -357,7 +361,7 @@ with st.sidebar:
     music_files = presets_ui.with_saved("music_pool", music_files, multiple=True)
     # Not gated on the uploader: the pool may arrive from Drive instead.
     music_volume = st.slider(
-        "Music volume (%)", 0, 100, 0, key=keep("music_volume"),
+        "Music volume (%)", 0, 100, defaults.MUSIC_VOLUME, key=keep("music_volume"),
         help="The music's share of the mix. The promo video's original audio "
              "takes the rest — 10% music leaves the original at 90%. 0 turns "
              "the layer off completely, and the audio comes out exactly as it "
@@ -378,7 +382,7 @@ with st.sidebar:
              "that swaps every few seconds reads as a fault rather than a mix.",
     )
     split_audio = st.checkbox(
-        "Split the audio track (random speed)", value=False,
+        "Split the audio track (random speed)", value=defaults.SPLIT_AUDIO,
         key=keep("split_audio"),
         help="Cuts the promo video's OWN audio into equal chunks and replays "
              "each at its own random speed, so it runs fast in places and slow "
@@ -662,6 +666,7 @@ with st.sidebar:
         presets_ui.with_saved(f"cta_clip_{i}", st.file_uploader(
             f"Clip {i} — sample videos (MP4)", type=["mp4"],
             accept_multiple_files=True,
+            on_change=presets_ui.upload_changed, args=(f"cta_clip_{i}",),
             key=presets_ui.uploader_key(f"cta_clip_{i}"),
             help="One of these is chosen per output video for this position.",
         ), multiple=True)
@@ -740,6 +745,7 @@ with st.sidebar:
         promo_alt_files = st.file_uploader(
             "Promo Alternate clips (MP4)", type=["mp4"],
             accept_multiple_files=True,
+            on_change=presets_ui.upload_changed, args=("promo_alt_pool",),
             key=presets_ui.uploader_key("promo_alt_pool"),
             help="A different selection plays in each output video, every clip "
                  "used once before any repeats.",
@@ -783,6 +789,7 @@ with st.sidebar:
     )
     gif_files = st.file_uploader(
         "GIF clips (MP4)", type=["mp4"], accept_multiple_files=True,
+        on_change=presets_ui.upload_changed, args=("gif_pool",),
         key=presets_ui.uploader_key("gif_pool"),
         help="One flat pool, not slots — a random selection plays in each "
              "output video, every gif used once before any repeats. Ignored "
@@ -917,7 +924,7 @@ with st.sidebar:
     subliminal_targets = st.multiselect(
         "Apply to",
         options=["Headline", "Subheading", "Footer"],
-        default=[],
+        default=list(defaults.SUBLIMINAL_TARGETS),
         max_selections=2, key=keep("subliminal_targets"),
         help="Which texts get the effect (up to two at a time; empty = off): no "
              "single frame shows the whole text, but it cycles fast enough to "
@@ -940,10 +947,10 @@ with st.sidebar:
                  "change that brightness ratio.",
         )
         subliminal_k = st.slider(
-            "Frames per cycle (K)", 2, 8, 3, key=keep("subliminal_k"),
+            "Frames per cycle (K)", 2, 8, defaults.SUBLIMINAL_K, key=keep("subliminal_k"),
             help="The number of distinct frames before the effect repeats "
                  "(K/fps seconds). Higher K = a longer, less obviously repeating "
-                 "cycle. 3 is a good default.",
+                 "cycle. Defaults to 7.",
         )
         # Pattern + amount apply to the hide style only (show is always the even
         # 1/K comb).
@@ -960,7 +967,7 @@ with st.sidebar:
                      "out in the same frames every cycle.",
             )
             subliminal_hide_pct = st.slider(
-                "Hidden per frame (%)", 15, 70, 33, key=keep("subliminal_hide_pct"),
+                "Hidden per frame (%)", 15, 70, defaults.SUBLIMINAL_HIDE_PCT, key=keep("subliminal_hide_pct"),
                 disabled=subliminal_pattern != "random",
                 help="Random pattern only. ~33% (≈100/K) keeps every character "
                      "hidden exactly once per cycle and stays bright. Higher "
@@ -969,7 +976,7 @@ with st.sidebar:
             )
         else:
             subliminal_pattern = "ordered"
-            subliminal_hide_pct = 33
+            subliminal_hide_pct = defaults.SUBLIMINAL_HIDE_PCT
         subliminal_granularity = st.radio(
             "Split by", ["word", "char"], horizontal=True,
             key=keep("subliminal_granularity"),
@@ -978,7 +985,7 @@ with st.sidebar:
         )
         subliminal_all_intra = st.checkbox(
             "Preserve frame-by-frame (larger files)",
-            value=True, key=keep("subliminal_all_intra"),
+            value=defaults.SUBLIMINAL_ALL_INTRA, key=keep("subliminal_all_intra"),
             help="Encode every frame independently so a frame-scrub of THIS file "
                  "never shows the whole text. Turning this off shrinks files but "
                  "lets the codec blur frames together.",
@@ -986,10 +993,10 @@ with st.sidebar:
     else:
         subliminal_mode = "hide"
         subliminal_pattern = "random"
-        subliminal_hide_pct = 33
-        subliminal_k = 3
+        subliminal_hide_pct = defaults.SUBLIMINAL_HIDE_PCT
+        subliminal_k = defaults.SUBLIMINAL_K
         subliminal_granularity = "word"
-        subliminal_all_intra = True
+        subliminal_all_intra = defaults.SUBLIMINAL_ALL_INTRA
 
     st.subheader("Output")
     fps = st.select_slider(
@@ -1004,23 +1011,23 @@ with st.sidebar:
     preset = st.select_slider(
         "Encoder speed",
         options=["veryfast", "faster", "fast", "medium", "slow"],
-        value="medium", key=keep("encoder_preset"),
+        value=defaults.ENCODER_PRESET, key=keep("encoder_preset"),
         help="Faster presets render quicker but produce slightly larger files.",
     )
     # One render only keeps 1-2 cores busy (the compositing pipeline inside
     # FFmpeg is serial), so many-core machines need many concurrent renders to
     # saturate. The slider tops out at the core count; RAM is the real
     # ceiling — budget roughly 2-6 GB per render when subliminal texts are on.
-    max_workers = max(4, os.cpu_count() or 4)
+    max_workers = defaults.max_workers()
     workers = st.slider(
-        "Parallel renders", 1, max_workers, min(2, max_workers),
+        "Parallel renders", 1, max_workers, max_workers,
         key=keep("workers"),
-        help="Concurrent FFmpeg processes. 2 is a good default on office "
-             "machines; on a many-core VM push toward ~1 per 2 cores "
-             "(e.g. 48 on 112 cores). Watch RAM: ~2-6 GB per render.",
+        help="Concurrent FFmpeg processes. Defaults to the panel maximum on "
+             "this machine. Each render uses roughly 2–6 GB of RAM.",
     )
     font_file = st.file_uploader(
         "Custom font (TTF/OTF, optional)", type=["ttf", "otf"],
+        on_change=presets_ui.upload_changed, args=("font",),
         key=presets_ui.uploader_key("font"),
         help=f"Upload your own font, then pick “{FONT_CUSTOM}” as the default "
              "font above (or set a `*_Font` cell to it) to use it.",
@@ -1099,6 +1106,7 @@ col1, col2 = st.columns(2)
 with col1:
     excel_file = presets_ui.with_saved(
         "excel", st.file_uploader("Excel file (.xlsx)", type=["xlsx"],
+                                  on_change=presets_ui.upload_changed, args=("excel",),
                                   key=presets_ui.uploader_key("excel")),
         multiple=False)
     # Declared BEFORE the uploader it disables: Streamlit refuses to change a
@@ -1115,6 +1123,7 @@ with col1:
     promo_files = st.file_uploader(
         f"Promo video(s) (MP4) — up to {MAX_PROMO_VIDEOS}", type=["mp4"],
         accept_multiple_files=True, disabled=promo_alt,
+        on_change=presets_ui.upload_changed, args=("promos",),
         key=presets_ui.uploader_key("promos"),
         help="Upload one to use it in every video. Upload several and a "
              "multi-batch render gives each batch its own promo video, cycling "
@@ -1158,11 +1167,13 @@ with col2:
         help="Without a ZIP, videos render on the solid background color set in "
              "the sidebar (Layout section). The images can also come from a "
              "Drive folder — see 'Background images' under 3. CTA clips.",
+        on_change=presets_ui.upload_changed, args=("bg_zip",),
         key=presets_ui.uploader_key("bg_zip"),
     )
     zip_file = presets_ui.with_saved("bg_zip", zip_file, multiple=False)
     cta_file = presets_ui.with_saved(
         "cta_image", st.file_uploader("CTA image (PNG, optional)", type=["png"],
+                                      on_change=presets_ui.upload_changed, args=("cta_image",),
                                       key=presets_ui.uploader_key("cta_image")),
         multiple=False)
 
@@ -1258,6 +1269,7 @@ with st.expander(
     for column, role in zip(st.columns(len(TEXT_ROLES)), TEXT_ROLES):
         upload = column.file_uploader(
             f"{role} by promo (.xlsx)", type=["xlsx"],
+            on_change=presets_ui.upload_changed, args=(grid_keys[role],),
             key=presets_ui.uploader_key(grid_keys[role]),
             disabled=promo_alt,
             help=f"One column per promo video, one row per row of the main "
@@ -1819,6 +1831,7 @@ if voice_enabled and script_source == "upload":
     script_file = st.file_uploader(
         "Script pool (.txt / .xlsx) — one script per line or per paragraph",
         type=["txt", "md", "xlsx", "csv"],
+        on_change=presets_ui.upload_changed, args=("scripts",),
         key=presets_ui.uploader_key("scripts"),
         help="Used only for rows with an empty `Voiceover` cell. Scripts are "
              "dealt round-robin so the spread across the batch is even, and "
@@ -1841,7 +1854,9 @@ hashtag_file = None
 if hashtag_source == "excel":
     hashtag_file = st.file_uploader(
         "Hashtag sets (.xlsx) — one set per row in the first column",
-        type=["xlsx"], key=presets_ui.uploader_key("hashtags"),
+        type=["xlsx"],
+        on_change=presets_ui.upload_changed, args=("hashtags",),
+        key=presets_ui.uploader_key("hashtags"),
         help="e.g. a column of rows like '#asmr #satisfying #fyp'. They are "
              "cycled across the batch, so the spread is even.",
     )
@@ -2167,7 +2182,7 @@ batch_label = col_label.text_input(
          "Excel file name.",
 )
 drive_folder = st.text_input(
-    "Google Drive folder link (optional)", value="", disabled=not ready,
+    "Google Drive folder link (optional)", value=settings.DRIVE_ROOT_FOLDER_ID, disabled=not ready,
     key=keep("drive_folder"),
     placeholder="https://drive.google.com/drive/folders/…",
     help="Paste a folder link to send THIS batch somewhere specific. Leave "

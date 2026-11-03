@@ -122,7 +122,7 @@ BASE = dict(bg_color="#101010", preset="ultrafast", crf=32,
 
 
 def render(name: str, video=promo, **kw) -> Path:
-    cfg = RenderConfig(**BASE, **kw)
+    cfg = RenderConfig(**{**BASE, "split_audio": False, "music_volume": 0.0, **kw})
     gen = VideoGenerator(cfg, bg_dir, video, None, TMP / f"work_{name}",
                          TMP / f"out_{name}", music_paths=music)
     assert not gen.input_warnings, gen.input_warnings
@@ -133,10 +133,8 @@ def render(name: str, video=promo, **kw) -> Path:
 
 # -------------------------------------------------- 1. nothing on = nothing changed
 #
-# The default audio path must keep the SHAPE it always had: a plain
-# `-map <promo>:a?` and no filter graph. A regression here silently routes every
-# existing user's batches through new code for no reason.
-plain_cfg = RenderConfig(**BASE)
+# Disabling both audio features keeps the direct promo-audio mapping.
+plain_cfg = RenderConfig(**BASE, split_audio=False, music_volume=0.0)
 plain_gen = VideoGenerator(plain_cfg, bg_dir, promo, None, TMP / "w0", TMP / "o0")
 plain_spec = RowSpec.from_row(row, 1)
 plain_gen._resolve_positions(plain_spec)

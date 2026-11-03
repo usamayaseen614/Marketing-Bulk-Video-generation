@@ -47,6 +47,7 @@ from typing import Optional
 
 import batching
 import config
+import generation_defaults as defaults
 import workspace
 from jobs import store
 from jobs.runners import render as render_runner
@@ -347,7 +348,7 @@ def _captions_stage(job: dict, params: dict) -> dict:
 
     # Only generate hashtag sets if the pool is actually the hashtag source —
     # a fixed CTA line replaces them, so generating any is money for nothing.
-    wants_pool_hashtags = (params.get("hashtag_source", "pool") == "pool"
+    wants_pool_hashtags = (params.get("hashtag_source", defaults.HASHTAG_SOURCE) == "pool"
                            and not params.get("fixed_tail"))
     return pool_module.build_pool(
         theme=theme,

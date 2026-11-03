@@ -3,9 +3,8 @@ presets_ui.py — the main page's side of presets.py.
 
 Three jobs:
 
-  * Recording which form fields make up a job. A widget joins by being keyed
-    through keep(): `st.slider(..., key=keep("music_volume"))`. Whatever was
-    registered during the run that queues a batch is what gets saved.
+  * Recording form fields through keep(), including retained values for
+    controls hidden by a mode or toggle.
   * The "Reuse a previous job" panel: a dropdown of saved jobs with Load and
     Delete, and a way back to an empty form.
   * Saved files standing in for uploads. Streamlit cannot put a file INTO an
@@ -20,7 +19,9 @@ keys — and a keyed widget no longer resets when its default changes, which is
 what follow_default() is for.
 
 Every key carries a counter that Load and Clear bump, so each of them rebuilds
-the whole form as brand-new widgets. Deleting a widget's state is NOT enough:
+the whole form as brand-new widgets. Parameter-only loading has a separate
+counter for settings, leaving uploaders and task information in place.
+Deleting a widget's state is NOT enough:
 Streamlit leaves the browser showing the old value and sends it straight back
 on the next click, so a "cleared" field would look and act uncleared. Saved
 values are stored under the plain name (`music_volume`), never the counted
@@ -36,6 +37,8 @@ import streamlit as st
 
 import config
 import presets
+import parameter_presets
+import generation_defaults as defaults
 from ui_common import human_bytes
 
 _FIELDS = "_preset_fields"      # names registered by keep() during this run
@@ -45,6 +48,12 @@ _NONCE = "_form_nonce"          # bumped to rebuild every widget at once
 _FLASH = "_preset_flash"        # (kind, message) shown on the next run
 _PICK = "_preset_pick"          # the dropdown's own key
 _FOLLOW = "_follows_default__"  # prefix for follow_default()'s markers
+_PARAMETER_VALUES = "_parameter_values"
+_PARAMETER_NONCE = "_parameter_nonce"
+_PARAMETERS = parameter_presets.parameters()
+_KEPT_VALUES = "_kept_values"
+_UPLOAD_SLOTS = "_upload_slots"
+_KEPT_UPLOADS = "_kept_uploads"
 
 # Session state tied to the sheet and preview on screen. Replacing the form
 # replaces the sheet, so all of it goes — the saved sheet already carries any
@@ -74,6 +83,13 @@ _SLOT_LABELS = {
 
 def start_run() -> None:
     """Call once at the top of every run, before any widget."""
+    # Capture fields before a changed toggle hides them and Streamlit cleans
+    # up their widget state at the end of this run.
+    st.session_state[_PARAMETER_VALUES] = parameter_values()
+    kept = st.session_state.setdefault(_KEPT_VALUES, {})
+    for name in st.session_state.get(_FIELDS, []):
+        if name not in _PARAMETERS and _key(name) in st.session_state:
+            kept[name] = st.session_state[_key(name)]
     st.session_state[_FIELDS] = []
 
 
@@ -82,7 +98,11 @@ def _key(name: str) -> str:
     Plain until the first Load or Clear, so an ordinary session keeps the
     names it always had."""
     nonce = st.session_state.get(_NONCE, 0)
-    return f"{name}__{nonce}" if nonce else name
+    key = f"{name}__{nonce}" if nonce else name
+    parameter_nonce = st.session_state.get(_PARAMETER_NONCE, 0)
+    if name in _PARAMETERS and parameter_nonce:
+        key += f"__params_{parameter_nonce}"
+    return key
 
 
 def keep(name: str) -> str:
@@ -91,7 +111,16 @@ def keep(name: str) -> str:
     fields = st.session_state.setdefault(_FIELDS, [])
     if name not in fields:
         fields.append(name)
-    return _key(name)
+    key = _key(name)
+    if key not in st.session_state:
+        if name in _PARAMETERS:
+            st.session_state[key] = st.session_state.get(
+                _PARAMETER_VALUES, {}).get(name, _PARAMETERS[name].default)
+        elif name in st.session_state.get(_KEPT_VALUES, {}):
+            st.session_state[key] = st.session_state[_KEPT_VALUES][name]
+        elif name in defaults.MATERIAL_FOLDERS:
+            st.session_state[key] = defaults.MATERIAL_FOLDERS[name]
+    return key
 
 
 def value(name: str, default=None):
@@ -111,15 +140,50 @@ def follow_default(name: str, default) -> None:
     marker = _FOLLOW + name
     previous = st.session_state.get(marker)
     st.session_state[marker] = default
-    if previous is not None and previous != default:
+    if (_key(name) not in st.session_state
+            and name not in st.session_state.get(_PARAMETER_VALUES, {})) or (
+            previous is not None and previous != default):
         st.session_state[_key(name)] = default
 
 
 def current_values() -> dict:
-    """Every registered field's value as it stands in this run, by name."""
-    return {name: st.session_state[_key(name)]
-            for name in st.session_state.get(_FIELDS, [])
-            if _key(name) in st.session_state}
+    """Current and retained hidden fields, under stable names."""
+    return {**st.session_state.get(_KEPT_VALUES, {}), **parameter_values(), **{
+        name: st.session_state[_key(name)]
+        for name in st.session_state.get(_FIELDS, [])
+        if _key(name) in st.session_state}}
+
+
+def parameter_values() -> dict:
+    values = dict(st.session_state.get(_PARAMETER_VALUES, {}))
+    for name in _PARAMETERS:
+        if _key(name) in st.session_state:
+            values[name] = st.session_state[_key(name)]
+    return values
+
+
+def apply_parameters(values: dict) -> None:
+    """Apply validated settings without replacing uploaders or sheet edits."""
+    # Changing slot count or mode may hide an uploader. Preserve its files
+    # before Streamlit discards the hidden widget at the end of the run.
+    kept = st.session_state.setdefault(_KEPT_UPLOADS, {})
+    for slot in st.session_state.get(_UPLOAD_SLOTS, []):
+        uploaded = st.session_state.get(_key(slot))
+        if uploaded:
+            kept[slot] = uploaded if isinstance(uploaded, list) else [uploaded]
+    for name in _PARAMETERS:
+        st.session_state.pop(_key(name), None)
+    st.session_state[_PARAMETER_NONCE] = int(st.session_state.get(_PARAMETER_NONCE, 0)) + 1
+    st.session_state[_PARAMETER_VALUES] = dict(values)
+    for name, saved in values.items():
+        st.session_state[_key(name)] = saved
+    for key in list(st.session_state):
+        if str(key).startswith(_FOLLOW):
+            st.session_state.pop(key, None)
+    for key in _SHEET_STATE:
+        if key not in ("row_edits", "excel_file_key"):
+            st.session_state.pop(key, None)
+    st.session_state.pop("sample_script", None)
 
 
 # --------------------------------------------------------------------------- files
@@ -127,11 +191,20 @@ def current_values() -> dict:
 def uploader_key(name: str) -> str:
     """Key for a file uploader. Changing it is also the only way to empty an
     uploader, which Load and Clear do to all of them at once."""
+    slots = st.session_state.setdefault(_UPLOAD_SLOTS, [])
+    if name not in slots:
+        slots.append(name)
     return _key(name)
 
 
+def upload_changed(slot: str) -> None:
+    # Removing/replacing an upload must not resurrect the pre-preset copy.
+    st.session_state.get(_KEPT_UPLOADS, {}).pop(slot, None)
+
+
 def has_saved(slot: str) -> bool:
-    return bool((st.session_state.get(_FILES) or {}).get(slot))
+    return bool((st.session_state.get(_KEPT_UPLOADS) or {}).get(slot)
+                or (st.session_state.get(_FILES) or {}).get(slot))
 
 
 def with_saved(slot: str, uploaded, *, multiple: bool, where=None):
@@ -140,7 +213,8 @@ def with_saved(slot: str, uploaded, *, multiple: bool, where=None):
     standing in, with a button to stop using them."""
     if (multiple and uploaded) or (not multiple and uploaded is not None):
         return uploaded
-    stored = (st.session_state.get(_FILES) or {}).get(slot) or []
+    kept = (st.session_state.get(_KEPT_UPLOADS) or {}).get(slot) or []
+    stored = kept or (st.session_state.get(_FILES) or {}).get(slot) or []
     if not stored:
         return uploaded
     where = where or st
@@ -148,7 +222,8 @@ def with_saved(slot: str, uploaded, *, multiple: bool, where=None):
     size = human_bytes(sum(f.size for f in stored))
     what = (f"`{stored[0].name}`" if len(stored) == 1
             else f"{len(stored)} files")
-    where.caption(f"📎 Using {what} ({size}) from **{loaded.get('name', 'a saved job')}** "
+    source = "current uploads" if kept else loaded.get('name', 'a saved job')
+    where.caption(f"📎 Using {what} ({size}) from **{source}** "
                   "— upload here to replace.")
     where.button("✕ Don't use", key=f"_drop_saved_{slot}", type="tertiary",
                  on_click=_drop_slot, args=(slot,),
@@ -157,6 +232,7 @@ def with_saved(slot: str, uploaded, *, multiple: bool, where=None):
 
 
 def _drop_slot(slot: str) -> None:
+    st.session_state.get(_KEPT_UPLOADS, {}).pop(slot, None)
     files = dict(st.session_state.get(_FILES) or {})
     files.pop(slot, None)
     st.session_state[_FILES] = files
@@ -227,6 +303,10 @@ def _reset_form() -> None:
     for key in _SHEET_STATE:
         st.session_state.pop(key, None)
     st.session_state[_NONCE] = int(st.session_state.get(_NONCE, 0)) + 1
+    st.session_state.pop(_PARAMETER_VALUES, None)
+    st.session_state.pop(_PARAMETER_NONCE, None)
+    st.session_state.pop(_KEPT_VALUES, None)
+    st.session_state.pop(_KEPT_UPLOADS, None)
     st.session_state.pop(_FILES, None)
     st.session_state.pop(_LOADED, None)
 
@@ -239,6 +319,12 @@ def _load(preset_id: str) -> None:
     _reset_form()
     for name, saved in (record.get("values") or {}).items():
         st.session_state[_key(name)] = saved
+    st.session_state[_PARAMETER_VALUES] = {
+        name: saved for name, saved in (record.get("values") or {}).items()
+        if name in _PARAMETERS}
+    st.session_state[_KEPT_VALUES] = {
+        name: saved for name, saved in (record.get("values") or {}).items()
+        if name not in _PARAMETERS}
     files, missing = presets.load(record)
     st.session_state[_FILES] = files
     st.session_state[_LOADED] = {"id": record["id"],

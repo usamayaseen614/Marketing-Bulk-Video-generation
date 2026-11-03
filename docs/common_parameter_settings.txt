@@ -1,0 +1,26 @@
+Background video opacity (%): 10%
+Minimum seconds per background video: 20 seconds
+Music volume (%): 10%
+Minimum seconds per track: 20 seconds
+Split the audio track (random speed): checked
+Chunks: 4
+Speed variation (%): 10%
+Apply to: Subheading
+Frames per cycle (K): 7
+Hidden per frame (%): 55%
+Split by: word
+Preserve frame-by-frame (larger files): unchecked
+Encoder speed: veryfast
+Parallel renders: （最大）
+Where do the GIFs come from?: Paste a Google Drive folder link — the server downloads them itself (no upload)
+GIF folder — Drive link: https://drive.google.com/drive/folders/1tCEeNU-CahLwu71VOPBztoUB1HdbVMbt
+Where do the background images come from?: Paste a Google Drive folder link — the server downloads them itself (no upload)
+Background images folder — Drive link: https://drive.google.com/drive/folders/1_9dJDCgnYkSfZ_OZu6W2OLj7fTSZ5Bad
+Where do the background videos come from?: Paste a Google Drive folder link — the server downloads them itself (no upload)
+Background videos folder — Drive link: https://drive.google.com/drive/folders/1uxgshH4u-D403vXDIzfBqzgYFnhVkbFK
+Where does the music come from?: Paste a Google Drive folder link — the server downloads it itself (no upload)
+Music folder — Drive link: https://drive.google.com/drive/folders/1wfO3ji64J0ubz6O7jRQtePN-Vk4WK5h2
+Hashtags: None — filenames are the caption only
+Publish which names?: YouTube only — yt.zip (short names)
+Notify email (optional): founder@quislab.com
+Google Drive folder link (optional): https://drive.google.com/drive/folders/1cUAGsM-EZh1EJIcH3GBaruWPI7lnSChU

@@ -66,7 +66,7 @@ print("promo staging:", [p.name for p in ws.video_paths], "(cycles past the end)
 
 store.create_job(
     kind=store.KIND_RENDER,
-    params={"render_config": asdict(RenderConfig(crf=30, preset="veryfast")),
+    params={"hashtag_source": "pool", "render_config": asdict(RenderConfig(crf=30, preset="veryfast")),
             "workers": 4, "batches": N_BATCHES, "folders": N_BATCHES,
             "make_zip": False},
     label="multibatch-test",
