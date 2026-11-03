@@ -35,6 +35,8 @@ import time
 
 import streamlit as st
 
+from i18n import t, option_labels
+
 import config
 import presets
 import parameter_presets
@@ -221,13 +223,12 @@ def with_saved(slot: str, uploaded, *, multiple: bool, where=None):
     loaded = st.session_state.get(_LOADED) or {}
     size = human_bytes(sum(f.size for f in stored))
     what = (f"`{stored[0].name}`" if len(stored) == 1
-            else f"{len(stored)} files")
-    source = "current uploads" if kept else loaded.get('name', 'a saved job')
-    where.caption(f"📎 Using {what} ({size}) from **{source}** "
-                  "— upload here to replace.")
-    where.button("✕ Don't use", key=f"_drop_saved_{slot}", type="tertiary",
+            else t("{0} files", len(stored)))
+    source = t("current uploads") if kept else loaded.get('name', t('a saved job'))
+    where.caption(t("📎 Using {0} ({1}) from **{2}** — upload here to replace.", what, size, source))
+    where.button(t("✕ Don't use"), key=f"_drop_saved_{slot}", type="tertiary",
                  on_click=_drop_slot, args=(slot,),
-                 help="Stop using the saved file(s) for this one upload.")
+                 help=t("Stop using the saved file(s) for this one upload."))
     return list(stored) if multiple else stored[0]
 
 
@@ -270,23 +271,22 @@ def _describe_files(record: dict) -> str:
         elif slot == "excel" and entries:
             parts.append(f"`{entries[0].get('name')}`")
         elif slot in _SLOT_LABELS:
-            one, many = _SLOT_LABELS[slot]
+            one, many = map(t, _SLOT_LABELS[slot])
             parts.append(f"{n} {one if n == 1 else many}")
     if clip_files:
-        parts.append(f"{clip_files} CTA clip(s) in {clip_slots} slot(s)")
+        parts.append(t("{0} CTA clip(s) in {1} slot(s)", clip_files, clip_slots))
     if grids:
-        parts.append(f"{grids} per-promo text sheet(s)")
-    return " · ".join(parts) or "no files"
+        parts.append(t("{0} per-promo text sheet(s)", grids))
+    return " · ".join(parts) or t("no files")
 
 
 def _label(record: dict) -> str:
     summary = record.get("summary") or {}
-    when = time.strftime("%d %b %H:%M", time.localtime(float(record.get("created_at") or 0)))
-    bits = [f"{record.get('name') or 'Untitled'} — {when}"]
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(record.get("created_at") or 0)))
+    bits = [f"{record.get('name') or t('Untitled')} — {when}"]
     if summary.get("videos"):
-        bits.append(f"{int(summary['videos']):,} videos")
-    bits.append(f"{presets.file_count(record)} files, "
-                f"{human_bytes(presets.total_size(record))}")
+        bits.append(t("{0} videos", f"{int(summary['videos']):,}"))
+    bits.append(t("{0} files, {1}", presets.file_count(record), human_bytes(presets.total_size(record))))
     return " · ".join(bits)
 
 
@@ -314,7 +314,7 @@ def _reset_form() -> None:
 def _load(preset_id: str) -> None:
     record = presets.get(preset_id)
     if record is None:
-        st.session_state[_FLASH] = ("error", "That saved job no longer exists.")
+        st.session_state[_FLASH] = ("error", t("That saved job no longer exists."))
         return
     _reset_form()
     for name, saved in (record.get("values") or {}).items():
@@ -328,19 +328,18 @@ def _load(preset_id: str) -> None:
     files, missing = presets.load(record)
     st.session_state[_FILES] = files
     st.session_state[_LOADED] = {"id": record["id"],
-                                 "name": record.get("name") or "Untitled"}
+                                 "name": record.get("name") or t("Untitled")}
     if missing:
         st.session_state[_FLASH] = (
             "warning",
-            f"Loaded **{record.get('name')}**, but {len(missing)} of its files "
-            "are no longer on the server and need uploading again: "
-            + ", ".join(f"`{n}`" for n in missing[:10])
+            t("Loaded **{0}**, but {1} of its files are no longer on the server and need uploading again: ", record.get('name'), len(missing))
+            + t(", ".join(f"`{n}`" for n in missing[:10]))
             + (" …" if len(missing) > 10 else ""))
 
 
 def _delete(preset_id: str) -> None:
     record = presets.get(preset_id) or {}
-    name = record.get("name") or "that saved job"
+    name = record.get("name") or t("that saved job")
     presets.delete(preset_id)
     st.session_state.pop(_PICK, None)
     loaded = st.session_state.get(_LOADED) or {}
@@ -350,15 +349,15 @@ def _delete(preset_id: str) -> None:
         st.session_state.pop(_FILES, None)
         st.session_state.pop(_LOADED, None)
         st.session_state[_FLASH] = (
-            "info", f"Deleted **{name}**. Its files were on this form, so they "
-                    "have been taken off it — upload them again to use them.")
+            "info", t("Deleted **{0}**. Its files were on this form, so they have been taken off"
+                      " it — upload them again to use them.", name))
     else:
-        st.session_state[_FLASH] = ("success", f"Deleted **{name}**.")
+        st.session_state[_FLASH] = ("success", t("Deleted **{0}**.", name))
 
 
 def _clear() -> None:
     _reset_form()
-    st.session_state[_FLASH] = ("success", "Form cleared.")
+    st.session_state[_FLASH] = ("success", t("Form cleared."))
 
 
 def panel() -> None:
@@ -366,14 +365,14 @@ def panel() -> None:
     flash = st.session_state.pop(_FLASH, None)
     records = presets.list_presets()
     loaded = st.session_state.get(_LOADED)
-    with st.expander("♻️ Reuse a previous job — its settings and files",
+    with st.expander(t("♻️ Reuse a previous job — its settings and files"),
                      expanded=bool(loaded or flash)):
         if flash:
             getattr(st, flash[0], st.info)(flash[1])
         if not records:
-            st.caption("Nothing saved yet. Every batch you queue is saved here — "
+            st.caption(t("Nothing saved yet. Every batch you queue is saved here — "
                        "every setting and every file — so a later batch can "
-                       "start from it instead of from scratch.")
+                       "start from it instead of from scratch."))
         else:
             by_id = {r["id"]: r for r in records}
             ids = list(by_id)
@@ -383,31 +382,29 @@ def panel() -> None:
             col_pick, col_load, col_del = st.columns(
                 [5, 1.2, 1.2], vertical_alignment="bottom")
             pick = col_pick.selectbox(
-                "Previous jobs (newest first)", ids, key=_PICK,
-                format_func=lambda i: _label(by_id[i]),
-                help="Load puts back every setting this job was queued with "
-                     "and uses its files wherever you don't upload new ones.")
-            col_load.button("Load", type="primary", width="stretch",
+                t("Previous jobs (newest first)"), ids, key=_PICK,
+                format_func=option_labels(ids, lambda i: t(_label(by_id[i]))),
+                help=t("Load puts back every setting this job was queued with "
+                     "and uses its files wherever you don't upload new ones."))
+            col_load.button(t("Load"), type="primary", width="stretch",
                             on_click=_load, args=(pick,),
-                            help="Replaces everything on this form.")
-            with col_del.popover("🗑️ Delete"):
+                            help=t("Replaces everything on this form."), key="_ui_presets_ui_390_" + str("Load"))
+            with col_del.popover(t("🗑️ Delete")):
                 record = by_id[pick]
                 st.markdown(
-                    f"Delete **{record.get('name')}** and its "
-                    f"{presets.file_count(record)} saved file(s)? This can't "
-                    "be undone. Files another saved job also uses are kept.")
-                st.button("Delete it", type="primary", key="_preset_delete",
+                    t("Delete **{0}** and its {1} saved file(s)? This can't be undone. Files "
+                      "another saved job also uses are kept.", record.get('name'), presets.file_count(record)))
+                st.button(t("Delete it"), type="primary", key="_preset_delete",
                           on_click=_delete, args=(pick,))
-            st.caption("Files: " + _describe_files(by_id[pick]))
+            st.caption(t("Files: ") + t(_describe_files(by_id[pick])))
             st.caption(
-                f"{len(records)} saved job(s) using "
-                f"{human_bytes(presets.disk_usage())} on the server"
-                + (f" · the newest {config.PRESETS_MAX} are kept"
+                t("{0} saved job(s) using {1} on the server", len(records), human_bytes(presets.disk_usage()))
+                + (t(" · the newest {0} are kept", config.PRESETS_MAX)
                    if config.PRESETS_MAX else ""))
         if loaded:
-            st.info(f"This form was loaded from **{loaded['name']}**. Its files "
-                    "are used wherever you don't upload a new one (📎 marks "
-                    "them). Change anything you like, then generate as usual.")
-            st.button("↺ Clear the form", on_click=_clear,
-                      help="Every field back to its default, every upload and "
-                           "saved file removed.")
+            st.info(t("This form was loaded from **{0}**. Its files are used wherever you don't "
+                      "upload a new one (📎 marks them). Change anything you like, then generate "
+                      "as usual.", loaded['name']))
+            st.button(t("↺ Clear the form"), on_click=_clear,
+                      help=t("Every field back to its default, every upload and "
+                           "saved file removed."), key="_ui_presets_ui_411_" + str("↺ Clear the form"))

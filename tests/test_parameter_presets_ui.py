@@ -17,11 +17,15 @@ import generation_defaults as defaults
 import parameter_presets as pp
 import presets
 
-at = AppTest.from_string(
+_app_dir = tempfile.TemporaryDirectory(prefix="parameterui_app_")
+_app_path = Path(_app_dir.name) / "app.py"
+(_app_path.parent / "pages").symlink_to(ROOT / "pages", target_is_directory=True)
+_app_path.write_text(
     (ROOT / "app.py").read_text()
     + '\nst.session_state["_test_render_config"] = asdict(config)\n'
     + 'st.session_state["_test_cta_slots"] = [[f.name for f in slot] for slot in cta_video_slot_files]\n',
-    default_timeout=30).run()
+    encoding="utf-8")
+at = AppTest.from_file(str(_app_path), default_timeout=30).run()
 
 
 def control(kind, label):

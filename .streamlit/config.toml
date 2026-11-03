@@ -2,6 +2,8 @@
 # top-right toolbar. Switch back to "auto" (or delete this line) to restore them.
 [client]
 toolbarMode = "minimal"
+# The app renders navigation labels in the selected interface language.
+showSidebarNavigation = false
 
 [global]
 # Loading a saved job writes each field's value into session state, which

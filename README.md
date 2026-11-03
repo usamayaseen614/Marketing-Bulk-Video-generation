@@ -66,6 +66,8 @@ python fetch_fonts.py
 streamlit run app.py
 ```
 
+Use **简体中文** / **English** in the top-right corner to switch the interface language across all pages. The choice is retained when navigating and refreshing; form settings and uploaded assets stay in place. A bookmarked `?lang=zh-CN` link opens directly in Simplified Chinese.
+
 The app opens in your browser at `http://localhost:8501`.
 
 ### Try it with sample data

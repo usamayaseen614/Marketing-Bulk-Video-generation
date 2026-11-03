@@ -13,6 +13,8 @@ import uuid
 from pathlib import Path
 
 import streamlit as st
+
+from i18n import t
 from streamlit import config as st_config
 
 import config
@@ -90,7 +92,7 @@ class ByteProgress:
         self.text = text
         self._started = time.monotonic()
         self._last_draw = 0.0
-        self._bar = st.progress(0.0, text=self._label())
+        self._bar = st.progress(0.0, text=t(self._label()))
 
     def __call__(self, n_bytes: int) -> None:
         self.done += int(n_bytes)
@@ -115,25 +117,24 @@ class ByteProgress:
 
     def _label(self) -> str:
         if not self.total:
-            return self.text
+            return t(self.text)
         pct = min(100, int(100 * self.done / self.total))
-        label = (f"{self.text} — {human_bytes(self.done)} of "
-                 f"{human_bytes(self.total)} ({pct}%)")
+        label = t("{0} — {1} of {2} ({3}%)", t(self.text),
+                  human_bytes(self.done), human_bytes(self.total), pct)
         elapsed = time.monotonic() - self._started
         if self.done and elapsed > 2 and self.done < self.total:
             rate = self.done / elapsed
-            label += (f" · {human_bytes(rate)}/s · about "
-                      f"{human_duration((self.total - self.done) / rate)} left")
+            label += (t(" · {0}/s · about {1} left", human_bytes(rate), human_duration((self.total - self.done) / rate)))
         return label
 
 
 def human_duration(seconds: float) -> str:
     seconds = max(0, int(seconds))
     if seconds < 60:
-        return f"{seconds}s"
+        return t("{0}s", seconds)
     if seconds < 3600:
-        return f"{seconds // 60} min"
-    return f"{seconds // 3600}h {seconds % 3600 // 60:02d}m"
+        return t("{0} min", seconds // 60)
+    return t("{0}h {1:02d}m", seconds // 3600, seconds % 3600 // 60)
 
 
 @st.cache_data(show_spinner=False, max_entries=16)
@@ -156,6 +157,7 @@ def offer_file_download(path: Path, slug: str, label: str,
     bytes cached so repeated reruns cost nothing. Only genuinely large files
     are gated behind a confirm step, because reading a multi-GB ZIP into memory
     is worth an extra click and a few kilobytes is not."""
+    label = t(label)
     path = Path(path)
     if not path.is_file():
         return
@@ -178,7 +180,7 @@ def offer_file_download(path: Path, slug: str, label: str,
             st.rerun()
         return
     st.download_button(
-        label, data=path.read_bytes(),
+        t(label), data=path.read_bytes(),
         file_name=file_name or path.name, mime=mime,
         key=f"dlbig_{slug}",
     )
@@ -190,6 +192,7 @@ def offer_zip_download(zip_path: Path, slug: str, label: str = "⬇️ Download 
     st.download_button buffers the whole file in memory per click, which is too
     risky for multi-GB batches — above the threshold the ZIP is published under
     ./static and streamed from disk by Tornado instead."""
+    label = t(label)
     zip_path = Path(zip_path)
     if not zip_path.is_file():
         return
@@ -201,13 +204,13 @@ def offer_zip_download(zip_path: Path, slug: str, label: str = "⬇️ Download 
         # it is actually wanted — see offer_file_download.
         state_key = f"want_zip_{slug}"
         if not st.session_state.get(state_key):
-            if st.button(f"{label} ({size_mb:.1f} MB)", key=f"askzip_{slug}",
+            if st.button(t("{0} ({1:.1f} MB)", t(label), size_mb), key=f"askzip_{slug}",
                          type="primary"):
                 st.session_state[state_key] = True
                 st.rerun()
             return
         st.download_button(
-            label,
+            t(label),
             data=zip_path.read_bytes(),
             file_name=zip_path.name,
             mime="application/zip",
@@ -221,10 +224,9 @@ def offer_zip_download(zip_path: Path, slug: str, label: str = "⬇️ Download 
         if zip_path != dest:
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(zip_path), dest)
-        st.caption(f"ZIP size: {size_mb:.1f} MB")
-        st.markdown(f"### [{label}](/app/static/downloads/{slug}/{dest.name})")
+        st.caption(t("ZIP size: {0:.1f} MB", size_mb))
+        st.markdown(t("### [{0}](/app/static/downloads/{1}/{2})", t(label), slug, dest.name))
     else:
         st.info(
-            "The ZIP is too large to stream through the browser reliably. "
-            f"Grab it directly from disk:\n\n`{zip_path}`"
+            t("The ZIP is too large to stream through the browser reliably. Grab it directly from disk:\n\n`{0}`", zip_path)
         )
