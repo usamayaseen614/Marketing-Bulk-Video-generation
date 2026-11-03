@@ -94,12 +94,20 @@ def render_progress(job: dict) -> None:
         # upload phase, so an hour of uploading looked like nothing happening.
         if (counts["uploaded"] or counts["upload_failed"]
                 or stage.startswith("uploading")):
-            st.progress(
-                min(1.0, counts["uploaded"] / total),
-                text=f"Uploaded {counts['uploaded']}/{total} to Drive"
-                      + (f" · {counts['upload_failed']} failed"
-                         if counts["upload_failed"] else ""),
-            )
+            text = (f"Uploaded {counts['uploaded']}/{total} to Drive"
+                    + (f" · {counts['upload_failed']} failed"
+                       if counts["upload_failed"] else ""))
+            remaining = total - counts["uploaded"]
+            # Speed only while it means something: during the upload, with
+            # videos still to go. A finished or stalled upload has no rate.
+            rate = (store.upload_rate(job["id"], stage=stage_for(job))
+                    if remaining and stage.startswith("uploading") else None)
+            if rate:
+                per_min = rate * 60
+                text += (f" · {per_min:.0f} videos/min" if per_min >= 10
+                         else f" · {per_min:.1f} videos/min")
+                text += f" · about {ui_common.human_duration(remaining / rate)} left"
+            st.progress(min(1.0, counts["uploaded"] / total), text=text)
     match = _STAGE_COUNT.search(stage)
     if match and not _STAGE_DRAWN.match(stage):
         done, of = int(match.group(1)), int(match.group(2))

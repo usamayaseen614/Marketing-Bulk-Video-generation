@@ -463,7 +463,8 @@ flight together: how many are done, how many MB of the total, speed and time lef
 an upload is running the browser asks before leaving the page, because Streamlit cannot
 resume an interrupted upload. Copying files into a job (or into a preview) has its own
 progress bar, and the **📋 Jobs** page shows Drive uploads, Drive downloads and caption
-generation as progress bars of their own.
+generation as progress bars of their own. The Drive upload bar also shows the upload
+speed in videos per minute, measured over the last five minutes, and the time left.
 
 ### Where the CTA clips come from
 

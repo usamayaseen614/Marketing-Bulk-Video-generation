@@ -123,11 +123,11 @@ class ByteProgress:
         if self.done and elapsed > 2 and self.done < self.total:
             rate = self.done / elapsed
             label += (f" · {human_bytes(rate)}/s · about "
-                      f"{_human_duration((self.total - self.done) / rate)} left")
+                      f"{human_duration((self.total - self.done) / rate)} left")
         return label
 
 
-def _human_duration(seconds: float) -> str:
+def human_duration(seconds: float) -> str:
     seconds = max(0, int(seconds))
     if seconds < 60:
         return f"{seconds}s"

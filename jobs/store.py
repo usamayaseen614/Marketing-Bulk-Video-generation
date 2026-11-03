@@ -585,6 +585,27 @@ def item_counts(job_id: str, stage: str = STAGE_RENDER) -> dict[str, int]:
     return {key: int(row[key] or 0) for key in row.keys()}
 
 
+def upload_rate(job_id: str, stage: str = STAGE_RENDER,
+                window: float = 300.0) -> Optional[float]:
+    """Videos per second reaching Drive, measured over the last `window`
+    seconds — recent rather than since the start, so a throttled or recovered
+    connection shows up within minutes. None until two uploads in that window
+    are far enough apart to measure between.
+
+    Counted in videos, not bytes: an item records WHEN it landed (every write
+    stamps updated_at) but not how big it was."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n, MIN(updated_at) AS first, MAX(updated_at) AS last"
+            " FROM job_items WHERE job_id=? AND stage=? AND upload_status='done'"
+            " AND updated_at>=?", (job_id, stage, time.time() - window)).fetchone()
+    n, first, last = int(row["n"] or 0), row["first"], row["last"]
+    if n < 2 or first is None or last - first < 1.0:
+        return None
+    # n completions bound n-1 intervals between first and last.
+    return (n - 1) / (last - first)
+
+
 # --------------------------------------------------------------------------- scrape dedup
 
 def known_clip_ids(account: str) -> set[str]:
