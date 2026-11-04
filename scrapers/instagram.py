@@ -176,6 +176,40 @@ def _find_clips(html: str) -> dict:
     return {}
 
 
+class LoginRequired(ScrapeError):
+    """HTTP 401 `require_login`: a wall, not a throttle — retrying never helps."""
+
+
+def _edge_clips(edges, user: str) -> list[ClipInfo]:
+    """Reels from listing edges. The clips query nests each one under
+    node.media; the reels page embeds it as the node itself."""
+    clips = []
+    for edge in edges or []:
+        node = edge.get("node") or {}
+        node = node.get("media") or node
+        pk = node.get("pk") or node.get("id")
+        if not pk:
+            continue
+        hidden = bool(node.get("like_and_view_counts_disabled"))
+        code = node.get("code") or pk_to_code(pk)
+        clips.append(ClipInfo(
+            video_id=str(pk),
+            url=f"https://www.instagram.com/reel/{code}/",
+            view_count=None if hidden else _int(node.get("play_count")),
+            like_count=None if hidden else _int(node.get("like_count")),
+            comment_count=None if hidden else _int(node.get("comment_count")),
+            timestamp=_posted_ts(pk),
+            uploader=user,
+        ))
+    return clips
+
+
+def _page_clips(html: str, user: str) -> list[ClipInfo]:
+    """The newest reels the reels page itself carries (12), logged out."""
+    conn = _find_clips(html).get("polaris_clips_connection") or {}
+    return _edge_clips(conn.get("edges"), user)
+
+
 def _gated(size: int, proxied: bool) -> ScrapeError:
     if proxied:
         return ScrapeError(
@@ -274,9 +308,15 @@ class InstagramSource:
                     page, cursor, more = self._clips_page(user, str(owner), cursor)
                     break
                 except Exception as exc:  # noqa: BLE001 — timeouts, proxy drops, 429/5xx
-                    if attempt < 2:
+                    if attempt < 2 and not isinstance(exc, LoginRequired):
                         time.sleep(5 * (attempt + 1))
                         continue
+                    if not found:
+                        # Since 2026-10-17 the clips query wants a login, from
+                        # any IP; the reels page still carries its newest 12.
+                        # ponytail: 12 reels per account logged out — more
+                        # needs a logged-in Instagram session cookie.
+                        found = {c.video_id: c for c in _page_clips(html, user)}
                     if not found:
                         raise
                     logger.warning("@%s: listing stopped at %d reels: %s",
@@ -304,23 +344,7 @@ class InstagramSource:
         if conn is None:
             raise ScrapeError("Instagram's reels list came back without its data "
                               "— the query may have changed.")
-        clips = []
-        for edge in conn.get("edges") or []:
-            node = (edge.get("node") or {}).get("media") or {}
-            pk = node.get("pk") or node.get("id")
-            if not pk:
-                continue
-            hidden = bool(node.get("like_and_view_counts_disabled"))
-            code = node.get("code") or pk_to_code(pk)
-            clips.append(ClipInfo(
-                video_id=str(pk),
-                url=f"https://www.instagram.com/reel/{code}/",
-                view_count=None if hidden else _int(node.get("play_count")),
-                like_count=None if hidden else _int(node.get("like_count")),
-                comment_count=None if hidden else _int(node.get("comment_count")),
-                timestamp=_posted_ts(pk),
-                uploader=user,
-            ))
+        clips = _edge_clips(conn.get("edges"), user)
         info = conn.get("page_info") or {}
         return clips, info.get("end_cursor"), bool(info.get("has_next_page"))
 
@@ -343,6 +367,9 @@ class InstagramSource:
             "Content-Type": "application/x-www-form-urlencoded",
             **(extra_headers or {}),
         })
+        if response.status_code == 401:
+            raise LoginRequired(f"Instagram now requires a login for "
+                                f"{form['fb_api_req_friendly_name']} (HTTP 401).")
         if response.status_code != 200:
             raise ScrapeError(f"Instagram answered HTTP {response.status_code} "
                               f"to {form['fb_api_req_friendly_name']}.")

@@ -455,6 +455,25 @@ finally:
     ig.time.sleep = real_sleep
 print("ok: the reels walk retries a page, and keeps what it has when it cannot go on")
 
+
+# Since 2026-10-17 the clips query answers 401 require_login to everyone logged
+# out. The reels page still embeds its newest reels (as the node itself, not
+# under node.media) — those are the result, and the 401 is never retried.
+class Walled(FakeIG):
+    def post(self, endpoint, data=None, headers=None):
+        self.posts_sent.append((endpoint, data, headers))
+        return Resp(401, body={"require_login": True, "status": "fail"})
+
+
+embedded = [{"node": dict(reel(P1 - i, 10 + i)["node"]["media"])} for i in range(3)]
+walled = Walled(TOKENS + SJS % json.dumps(
+    {"x": {"pk": "777", "polaris_clips_connection": {"edges": embedded}}}), [])
+got = source_for(walled).enumerate_clips("bob", 2)
+assert [c.video_id for c in got] == [str(P1), str(P1 - 1)], got
+assert got[1].view_count == 11 and got[0].url.endswith(f"/reel/{ig.pk_to_code(P1)}/")
+assert len(walled.posts_sent) == 1, "a login wall was retried"
+print("ok: behind Instagram's login wall the walk returns the page's own reels")
+
 # A stream on air lists with no duration; it must not be downloaded forever.
 src = yt.YouTubeSource(proxy="")
 src._ydl = FakeYdl({"entries": [{"id": "lllllllllll", "live_status": "is_live"},
