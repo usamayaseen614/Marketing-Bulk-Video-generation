@@ -711,6 +711,53 @@ with st.sidebar:
              "video — so it never freezes on a last frame. Off = play once, then "
              "hold the last frame. Split-screen mode turns this on automatically.",
     )
+    cta_after_promo = st.checkbox(
+        "Play CTA clips after the promo",
+        value=False, key=keep("cta_after_promo"), disabled=is_split,
+        help="The promo plays first with the CTA box empty. When it ends, the "
+             "clips above play once each, in order, in the CTA box, and the "
+             "video runs until the last one finishes — each with its own sound. "
+             "The fade-in and 'Keep clips playing' settings are ignored. Not "
+             "available in split-screen.",
+    )
+    # An expander rather than `if cta_after_promo:` so the caption upload is
+    # not thrown away when the box is unticked (see Promo Alternate below).
+    with st.expander("CTA clips after the promo — captions",
+                     expanded=bool(cta_after_promo) and not is_split):
+        cta_after_show_texts = st.checkbox(
+            "Show Headline / Subheading / Footer during the CTA clips",
+            value=True, key=keep("cta_after_show_texts"),
+            help="Off: only the CTA caption is on screen once the promo ends.",
+        )
+        cta_caption_file = st.file_uploader(
+            "Caption pool (.xlsx / .csv / .txt)", type=["xlsx", "csv", "txt"],
+            key=presets_ui.uploader_key("cta_captions"),
+            help="Excel/CSV: captions in the first column, under a header row. "
+                 "Text: one caption per line. Each CTA clip shows one caption "
+                 "picked at random from this pool (repeats allowed). Put a `|` "
+                 "in a caption to break the line there.",
+        )
+        cta_caption_file = presets_ui.with_saved("cta_captions", cta_caption_file,
+                                                 multiple=False)
+        cta_captions: list[str] = []
+        if cta_caption_file is not None:
+            from speech.pool import parse_scripts as _parse_captions
+            cta_captions = _parse_captions(cta_caption_file.getvalue(),
+                                           cta_caption_file.name)
+            if cta_captions:
+                st.caption(f"**{len(cta_captions)}** caption(s) — first one: "
+                           f"“{cta_captions[0][:60]}”")
+            else:
+                st.warning(f"No captions found in `{cta_caption_file.name}`.")
+        st.caption(
+            "Caption position — 0 = centred on the CTA box, near its top. Drag "
+            "it in the preview to set one row; `CTA_Caption_X`/`CTA_Caption_Y` "
+            "(and `_Size`, `_Color`, `_Font`, `_Style`, …) override per row."
+        )
+        cta_caption_x = st.number_input("Caption X (centre)", 0, CANVAS_W, 0,
+                                        key=keep("cta_caption_x"))
+        cta_caption_y = st.number_input("Caption Y (centre)", 0, CANVAS_H, 0,
+                                        key=keep("cta_caption_y"))
 
     # ---- Promo Alternate
     # The switch itself lives beside the promo uploader in the main area (that
@@ -1066,6 +1113,10 @@ config = RenderConfig(
     cta_video_fade_duration=float(cta_video_fade_duration),
     cta_video_speeds=[float(s) for s in cta_video_speeds],
     cta_video_fill=bool(cta_video_fill),
+    cta_after_promo=bool(cta_after_promo) and not is_split,
+    cta_after_show_texts=bool(cta_after_show_texts),
+    cta_captions=list(cta_captions),
+    cta_caption_x=int(cta_caption_x), cta_caption_y=int(cta_caption_y),
     gif_x=int(gif_x), gif_y=int(gif_y),
     gif_w=int(gif_w), gif_h=int(gif_h),
     gif_min_seconds=float(gif_min_seconds),
@@ -2497,6 +2548,7 @@ if generate_clicked and ready:
             **{grid_keys[role]: [upload] for role, upload in grid_uploads.items()},
             "scripts": [script_file],
             "hashtags": [hashtag_file],
+            "cta_captions": [cta_caption_file],
         }
         # One bar for both steps. Saving is usually quick or free: a file that
         # came from a saved job is already stored, and an identical re-upload

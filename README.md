@@ -140,6 +140,7 @@ rows alone determines how many videos are generated:
 | `GIF_Fade_Start` / `GIF_Fade_Duration` | Fade-in timing for the gif layer, in **seconds**. Applies to the first gif only. **Blank/absent = the sidebar default (0/0 = visible immediately)** | `0.5` / `0.5` |
 | `BG_Video_X` / `BG_Video_Y` | **Top-left corner** of the translucent background-video box, per row. **Blank/absent = the sidebar default (0/0)** | `0` / `0` |
 | `BG_Video_Width` / `BG_Video_Height` | Size of the background-video box (every clip in the row's sequence is cover-filled to it — scaled and center-cropped, never stretched). **Blank/absent = the sidebar default (the full 1080 × 1920 canvas)** | `1080` / `1920` |
+| `CTA_Caption_X` / `_Y` / `_Size` / `_Color` / `_Opacity` / `_Font` / `_BgColor` / `_BgOpacity` / `_Style` / `_Width` / `_Height` | Styling and placement of the caption shown over each CTA clip in *Play CTA clips after the promo* mode. The words come from the uploaded caption pool, so there is no `CTA_Caption` text column. **Blank/absent = centred on the CTA box near its top, other values randomized like a headline's** | `540` / `1250` |
 | `Headline` | Headline text (empty = skipped) | `Summer Mega Sale` |
 | `Headline_Width` / `Headline_Height` | Optional **fit box**, in canvas pixels, **centred on `Headline_X`/`Headline_Y`**. Set both and the box drives the type: the text re-wraps to the width and the font size is chosen so the painted block (glyphs *plus* any outline/shadow/glow) fills the box. `Headline_Size` is then ignored — the box computes it. **Blank/absent, or either one alone = the sidebar default, else the classic behaviour** (`Headline_Size`, wrapped to the canvas). Same columns exist for Subheading and Footer | `800` / `300` |
 | `Headline_Size` | Font size in px. **Blank/absent = random** within a sensible range per element (headline 56–88, subheading 34–52, footer 24–36) | `72` |
@@ -350,6 +351,7 @@ So the video made from **row 2** on **video 3.mp4** reads `sakfjn`.
 | CTA image X/Y/W/H | Default position (top-left corner) and size of the CTA image. A row's `CTA_X`/`CTA_Y`/`CTA_Width`/`CTA_Height` cells override these per video |
 | CTA fade-in start / duration | When the CTA image fades in and for how long (seconds). Overridable per row via `CTA_Fade_Start` / `CTA_Fade_Duration` |
 | CTA videos + box + fade + per-clip speed | Optional clips layered with the CTA image; they play back-to-back in a shuffled order in one shared box (`CTA_Video_*`), with a shared fade-in and a separate speed per clip slot (overridable per row via `CTA_Video_Speed_<n>`, or `CTA_Video_Speed` for the whole row). Leave the upload empty to skip the whole element |
+| Play CTA clips after the promo | Promo first, then the CTA clips once each, in order, in the CTA box, with their own sound and a random caption from the uploaded pool. See *CTA clips after the promo* |
 | GIF clips (MP4) | The gif pool. **Flat, not slots** — a random selection plays in each output video, dealt from a shuffled deck so every gif is used once before any repeats. Leave empty to skip the layer entirely |
 | Minimum seconds per gif | The dwell floor (default 5). A gif shorter than this repeats **itself** a whole number of times until it clears the floor — a 3s gif plays twice (6s). A gif already longer plays once, in full. Sidebar-only: it is batch-wide pacing, so there is no per-row column |
 | GIF box X/Y/W/H | The box gifs are fitted into. It is an **invisible fit guide**, not a visible panel — nothing is drawn for it. Overridable per row via `GIF_X`/`GIF_Y`/`GIF_Width`/`GIF_Height` |
@@ -465,6 +467,38 @@ resume an interrupted upload. Copying files into a job (or into a preview) has i
 progress bar, and the **📋 Jobs** page shows Drive uploads, Drive downloads and caption
 generation as progress bars of their own. The Drive upload bar also shows the upload
 speed in videos per minute, measured over the last five minutes, and the time left.
+
+### CTA clips after the promo
+
+By default the CTA clips play **alongside** the promo and the video ends when the promo
+ends, so a CTA set to start after the promo never shows. Tick **Play CTA clips after the
+promo** (sidebar, under *CTA video*) to play them **in sequence** instead:
+
+1. The promo plays first. The CTA box stays empty.
+2. When the promo ends (or the narration, on a narrated row), the promo box empties and the
+   slot clips play **once each, in order** (one clip picked from each slot, as usual) in
+   the CTA box. Each clip plays at its slot's speed and **with its own sound**. A clip with
+   no audio track is silent, and the music bed keeps playing underneath.
+3. The video ends when the last clip ends: promo length + the clips' lengths.
+
+**Captions.** Open *CTA clips after the promo — captions* and upload a caption pool:
+an Excel/CSV file with captions in the first column (under a header row), or a text
+file with one caption per line. Each clip shows one caption **picked at random** from the
+pool. Repeats are allowed, and the pick is seeded per row, so the preview matches the
+render. Captions wrap to the CTA box's width, and `|` forces a line break.
+
+- **Position.** By default the caption is centred on the CTA box, near its top. Set
+  *Caption X / Y* in the sidebar for every row, or drag it in the preview editor and
+  **💾 Save to Excel** for one row. It is styled like any other text: `CTA_Caption_X`,
+  `_Y`, `_Size`, `_Color`, `_Opacity`, `_Font`, `_BgColor`, `_BgOpacity`, `_Style`, and
+  the fit box `_Width` / `_Height`. Blank cells are randomized like a headline's.
+- **Other texts.** *Show Headline / Subheading / Footer during the CTA clips* (on by
+  default). Untick it to show only the caption once the promo ends.
+- The preview is a still: it shows the first clip's frame with the row's **longest**
+  caption, so you can check that the widest one fits. **🎬 Render Row** shows the real
+  timing.
+- CTA video fade-in and *Keep clips playing to fill the whole video* are ignored in this
+  mode. It is not available in split-screen, where the CTA box is the side panel.
 
 ### Where the CTA clips come from
 

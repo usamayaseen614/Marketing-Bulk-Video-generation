@@ -303,7 +303,7 @@ class _Gen:
     from video_generator import VideoGenerator as _V
     attach_voice = _V.attach_voice
     _promo_alt = False
-    _render_duration = staticmethod(lambda spec: 10.0)
+    _render_duration = _main_duration = staticmethod(lambda spec: 10.0)
     _probe_duration = staticmethod(lambda path=None: 10.0)
     video_path = None
 

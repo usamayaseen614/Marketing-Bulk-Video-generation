@@ -67,6 +67,7 @@ _SLOT_LABELS = {
     "promo_alt_pool": ("Promo Alternate clip", "Promo Alternate clips"),
     "scripts": ("script pool", "script pools"),
     "hashtags": ("hashtag sheet", "hashtag sheets"),
+    "cta_captions": ("CTA caption pool", "CTA caption pools"),
 }
 
 

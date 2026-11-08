@@ -248,6 +248,11 @@ TEXT_ROLES = ["Headline", "Subheading", "Footer"]
 # (text_grids.ROLES) and the sidebar's per-role fit-box controls, and the
 # caption's text comes from the spoken script rather than from either.
 SCREEN_TEXT_ROLE = "Screen_Text"
+# The caption shown over each CTA clip when the clips play AFTER the promo
+# (RenderConfig.cta_after_promo). Same TextSpec machinery as every other text;
+# its words come from the uploaded caption pool, one random pick per clip, so
+# there is no `CTA_Caption` text column — only the styling/placement ones.
+CTA_CAPTION_ROLE = "CTA_Caption"
 TEXT_BOX_COLUMNS = [f"{role}_{dim}"
                     for role in TEXT_ROLES for dim in ("Width", "Height")]
 # Bounds of the fit search. The floor is the readability guard: below it the
@@ -300,6 +305,11 @@ OPTIONAL_COLUMNS = [
     "Screen_Text_X", "Screen_Text_Y", "Screen_Text_Font",
     "Screen_Text_BgColor", "Screen_Text_BgOpacity", "Screen_Text_Style",
     "Screen_Text_Width", "Screen_Text_Height",
+    # Styling/placement of the caption over each after-promo CTA clip. No text
+    # column: the words come from the uploaded caption pool.
+    *(f"{CTA_CAPTION_ROLE}_{s}" for s in (
+        "Size", "Color", "Opacity", "X", "Y", "Font", "BgColor", "BgOpacity",
+        "Style", "Width", "Height")),
 ]
 ALL_COLUMNS = REQUIRED_COLUMNS + OPTIONAL_COLUMNS
 
@@ -377,6 +387,8 @@ RANDOM_SIZE_RANGES = {
     # the headline and the subheading and vary little — a caption band that
     # changed size every row would read as a rendering fault, not a style.
     SCREEN_TEXT_ROLE: (52, 60),
+    # Sits over a CTA box that defaults to 360 px wide.
+    CTA_CAPTION_ROLE: (40, 52),
 }
 RANDOM_TEXT_COLORS = [
     "#FFFFFF", "#FFD700", "#FFE066", "#FF6B6B", "#FF9F43", "#4ECDC4",
@@ -478,6 +490,22 @@ def _has_audio_stream(ffmpeg: str, path: Path) -> bool:
     with _AUDIO_STREAM_LOCK:
         _AUDIO_STREAM_CACHE[key] = ok
     return ok
+
+
+def _atempo_chain(speed: float) -> str:
+    """`,atempo=...` filters that change audio speed by `speed` (empty at 1x).
+    Chained because a single atempo only accepts 0.5-2.0 on older FFmpeg
+    builds, and CTA clip speeds run 0.25-4."""
+    out = []
+    while speed > 2.0:
+        out.append(2.0)
+        speed /= 2.0
+    while speed < 0.5:
+        out.append(0.5)
+        speed /= 0.5
+    if abs(speed - 1.0) > 1e-6:
+        out.append(speed)
+    return "".join(f",atempo={s:.5f}" for s in out)
 
 
 def split_audio_tempos(n: int, spread: float, rng: random.Random) -> list[float]:
@@ -897,6 +925,22 @@ class RenderConfig:
     # video, so the side panel is never frozen on a last frame. Off preserves
     # the classic play-once/last-frame-hold behavior. Split layout turns this on.
     cta_video_fill: bool = False
+    # ---- CTA clips AFTER the promo. On, the CTA box stays empty while the promo
+    # (or the narration) plays; then the slot clips play once each, in order, in
+    # the CTA box, and the video runs until the last one ends. The promo box
+    # empties when the promo ends. Fade and fill settings do not apply. Ignored
+    # in split-screen, where the CTA box is the side panel.
+    cta_after_promo: bool = False
+    # Keep the Headline / Subheading / Footer on screen while the clips play.
+    cta_after_show_texts: bool = True
+    # The caption pool: one random pick per clip (repeats allowed). Empty = no
+    # captions. Carried in the config so it reaches the worker, the preview and
+    # Render Row with no separate file staging.
+    cta_captions: list = field(default_factory=list)
+    # Default caption anchor (its CENTRE, like every text). 0 = auto: centred
+    # on the CTA box, near its top. A row's CTA_Caption_X/Y cells win.
+    cta_caption_x: int = 0
+    cta_caption_y: int = 0
     # Optional GIF layer: a flat pool of short looping clips shown one after
     # another in their own box. Independent of the CTA video in every respect —
     # own pool, own box, own fade, own z-index — because the two answer
@@ -1119,6 +1163,15 @@ class RowSpec:
     # is why the size is pinned once up front — see _caption_beat_images.
     screen_text: TextSpec = field(default_factory=lambda: TextSpec(
         text="", role=SCREEN_TEXT_ROLE, size=None, color=None, x=None, y=None))
+    # The caption over each after-promo CTA clip. `.text` holds the LONGEST of
+    # the row's picks so it is sized and placed for the worst case (the same
+    # trick the caption band uses); the per-clip words are in cta_caption_texts.
+    cta_caption: TextSpec = field(default_factory=lambda: TextSpec(
+        text="", role=CTA_CAPTION_ROLE, size=None, color=None, x=None, y=None))
+    cta_caption_texts: Optional[list] = None
+    # After-promo mode: seconds each chosen CTA clip holds the box (its video
+    # length / its speed), index-aligned with cta_video_clips. None = mode off.
+    cta_after_durations: Optional[list] = None
     warnings: list[str] = field(default_factory=list)
     # Per-row video box, in canvas pixels; X/Y are the box's TOP-LEFT corner.
     # Filled from the row's Video_X/Video_Y/Video_Width/Video_Height cells when
@@ -1247,6 +1300,8 @@ class RowSpec:
             subheading=text_spec("Subheading"),
             footer=text_spec("Footer"),
             screen_text=text_spec(SCREEN_TEXT_ROLE),
+            # Text blanked: it comes from the caption pool, not the sheet.
+            cta_caption=replace(text_spec(CTA_CAPTION_ROLE), text=""),
             voiceover=_clean_str(row.get("Voiceover")),
             voice_name=_clean_str(row.get("Voiceover_Voice")) or None,
             voice_speed=_parse_opt_float(row.get("Voiceover_Speed"), warnings,
@@ -1430,6 +1485,14 @@ class VideoGenerator:
             checked_slots.append(good)
         self.cta_video_slots = checked_slots
         self._has_cta_video = any(self.cta_video_slots)
+        # In split-screen the CTA box IS the side panel, so "after" has no
+        # meaning there; the clips keep filling it alongside the promo.
+        self._cta_after = bool(config.cta_after_promo and self._has_cta_video
+                               and config.layout_mode != "split")
+        if config.cta_after_promo and config.layout_mode == "split":
+            self.input_warnings.append(
+                "Play CTA clips after the promo is ignored in split-screen mode — "
+                "the CTA clips fill the side panel for the whole video there.")
         good_gifs = []
         for p in self.gif_paths:
             if _has_video_stream(self.ffmpeg, p):
@@ -1746,8 +1809,9 @@ class VideoGenerator:
         with Image.open(bg_path) as img:
             return ImageOps.fit(img.convert("RGB"), (CANVAS_W, CANVAS_H), Image.LANCZOS)
 
-    def _wrap_text(self, element: TextSpec) -> None:
-        """Re-flow an element's text so its rendered block fits on the canvas.
+    def _wrap_text(self, element: TextSpec, max_w: Optional[int] = None) -> None:
+        """Re-flow an element's text so its rendered block fits on the canvas
+        (or within `max_w` pixels — the CTA caption wraps to its clip's box).
 
         Manual line breaks come first: a real line break inside the cell
         (Alt+Enter in Excel) or a '|' marker forces a break exactly there, for
@@ -1769,7 +1833,7 @@ class VideoGenerator:
         words = [w for seg in segments for w in seg.split()]
         if not words:
             return
-        max_w = CANVAS_W - 2 * PLACEMENT_MARGIN
+        max_w = min(max_w or CANVAS_W, CANVAS_W) - 2 * PLACEMENT_MARGIN
 
         font = self._font_for(element)
         while element.size > 18 and max(font.getlength(w) for w in words) > max_w:
@@ -2049,7 +2113,9 @@ class VideoGenerator:
                     spec.warnings.append(
                         f"CTA_Clip_{j + 1}: only {len(self.cta_video_slots)} slot(s) "
                         f"are active, so this cell is ignored")
-            if cfg.cta_video_fill or cfg.layout_mode == "split":
+            if self._cta_after:
+                self._resolve_cta_after(spec, chosen, chosen_speeds)
+            elif cfg.cta_video_fill or cfg.layout_mode == "split":
                 self._fill_cta_sequence(spec, chosen, chosen_speeds, clip_rng)
             spec.cta_video_clips = chosen
             spec.cta_video_clip_speeds = chosen_speeds
@@ -2112,9 +2178,8 @@ class VideoGenerator:
             self._resolve_music_sequence(spec)
 
         color_deck = list(RANDOM_TEXT_COLORS)
-        for element in spec.text_elements:
-            if not element.text:
-                continue
+
+        def style_text(element: TextSpec, rng: random.Random, color_deck: list) -> None:
             # Resolve font + artistic style defaults before sizing/wrapping,
             # since the font affects text width and the style affects padding.
             if element.font is None:
@@ -2157,7 +2222,32 @@ class VideoGenerator:
             if boxed:
                 self._fit_text_box(element, spec.warnings)
             else:
-                self._wrap_text(element)
+                self._wrap_text(element, self._wrap_width(spec, element))
+
+        for element in spec.text_elements:
+            if element.text:
+                style_text(element, rng, color_deck)
+
+        # The after-promo CTA caption. Its own RNG and colour deck, so switching
+        # the mode on never changes the sizes, colours or auto-placement every
+        # other text already drew. Anchored on the CTA box (centred, near the
+        # top) unless the sidebar or a CTA_Caption_X/Y cell says otherwise. Kept
+        # out of text_elements: it is only on screen during the clips, so it is
+        # never baked into the always-on overlay, and auto-placed texts need not
+        # avoid it — they already avoid the CTA box it sits on.
+        cap = spec.cta_caption
+        if cap.text:
+            style_text(cap, random.Random(spec.placement_seed() ^ 0xCA8),
+                       list(RANDOM_TEXT_COLORS))
+            if cap.x is None:
+                cap.x = int(cfg.cta_caption_x
+                            or spec.cta_video_x + spec.cta_video_w // 2)
+            if cap.y is None:
+                _w, h = self._measure_text(cap)
+                if cap.box_w and cap.box_h:
+                    h = float(cap.box_h)
+                cap.y = int(cfg.cta_caption_y
+                            or spec.cta_video_y + h / 2 + PLACEMENT_GAP)
 
         # The caption band gets a fixed anchor rather than a random one. Every
         # other text is auto-placed per row when its X/Y cells are blank, which
@@ -2387,6 +2477,75 @@ class VideoGenerator:
         spec.cta_video_fade_start = 0.0
         spec.cta_video_fade_duration = 0.0
 
+    @staticmethod
+    def _wrap_width(spec: RowSpec, element: TextSpec) -> Optional[int]:
+        """The CTA caption wraps to its clip's box; every other text to the
+        canvas (None)."""
+        return spec.cta_video_w if element.role == CTA_CAPTION_ROLE else None
+
+    def _cta_caption_layers(self, spec: RowSpec, static: Image.Image) -> list:
+        """After-promo mode: one full-canvas text frame per CTA clip, timed to
+        that clip — its caption over the static texts, or over nothing when the
+        texts are hidden during the clips. Same (start, end, image) shape as
+        _caption_layers, so both feed the one concat-demuxer text timeline.
+
+        A clip with no caption and the texts still showing needs no entry: the
+        timeline's gap frame IS the static texts."""
+        durations = spec.cta_after_durations or []
+        start = self._main_duration(spec)
+        if not (self._cta_after and durations and start):
+            return []
+        self._resolve_positions(spec)
+        show = self.config.cta_after_show_texts
+        base = static if show else Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
+        texts = spec.cta_caption_texts or []
+        out = []
+        for k, dur in enumerate(durations):
+            text = texts[k] if k < len(texts) else ""
+            if text:
+                # Re-laid out per clip, exactly like a caption-band beat: a
+                # boxed caption re-fits, an unboxed one keeps the size pinned
+                # against the row's longest pick.
+                cap = replace(spec.cta_caption, text=text)
+                if cap.box_w and cap.box_h:
+                    self._fit_text_box(cap, [])
+                else:
+                    self._wrap_text(cap, self._wrap_width(spec, cap))
+                layer = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
+                self._paint_text(layer, cap.x, cap.y, cap, "full")
+                out.append((start, start + dur, Image.alpha_composite(base, layer)))
+            elif not show:
+                out.append((start, start + dur, base))
+            start += dur
+        return out
+
+    def _resolve_cta_after(self, spec: RowSpec, chosen: list,
+                           chosen_speeds: list) -> None:
+        """After-promo mode: how long each clip holds the box, and its caption.
+
+        Measured from the VIDEO stream (the unit concat joins in), divided by
+        the clip's speed. A clip that cannot be measured is dropped rather than
+        guessed at: the captions and the video length are both derived from
+        these numbers. Mutates `chosen` / `chosen_speeds` in place."""
+        keep = []
+        for path, speed in zip(chosen, chosen_speeds):
+            dur = _probe_video_duration(self.ffmpeg, path)
+            if dur is None:
+                spec.warnings.append(
+                    f"CTA clip '{path.name}': couldn't measure its length, so it "
+                    "is skipped.")
+                continue
+            keep.append((path, speed, dur / speed))
+        chosen[:] = [k[0] for k in keep]
+        chosen_speeds[:] = [k[1] for k in keep]
+        spec.cta_after_durations = [k[2] for k in keep]
+        pool = [c for c in (self.config.cta_captions or []) if str(c).strip()]
+        # Own salt, so turning captions on never reshuffles the clip picks.
+        rng = random.Random(spec.placement_seed() ^ 0xCA7)
+        spec.cta_caption_texts = [str(rng.choice(pool)).strip() if pool else ""
+                                  for _ in keep]
+        spec.cta_caption.text = max(spec.cta_caption_texts, key=len, default="")
+
     def _fill_cta_sequence(self, spec: RowSpec, chosen: list, chosen_speeds: list,
                            clip_rng: random.Random) -> None:
         """Pad the already-picked side sequence so it covers the full main-video
@@ -2453,7 +2612,7 @@ class VideoGenerator:
 
     def _deal_dwell_sequence(self, spec: RowSpec, pool: list, salt: int,
                              floor: float, cap: int, label: str,
-                             item: str) -> tuple[list, list]:
+                             item: str, main_only: bool = False) -> tuple[list, list]:
         """Draw clips from a flat pool until they cover the promo, each held for
         at least `floor` seconds. Returns (clips, repeats), index-aligned.
 
@@ -2471,7 +2630,10 @@ class VideoGenerator:
         sharing one would lock two layers to the same picks in every row.
         """
         rng = random.Random(spec.placement_seed() ^ salt)
-        target = self._render_duration(spec)
+        # main_only: a layer that ends with the main part (the Promo Alternate
+        # sequence stands in for the promo, which empties when CTA clips play
+        # after it) is dealt against that, not the whole output.
+        target = (self._main_duration if main_only else self._render_duration)(spec)
         if target is None:
             spec.warnings.append(
                 f"{label}: couldn't measure the promo video's duration, so the "
@@ -2573,7 +2735,7 @@ class VideoGenerator:
             return
         spec.promo_alt_clips, spec.promo_alt_clip_repeats = self._deal_dwell_sequence(
             spec, self.promo_alt_paths, 0x4E7, PROMO_ALT_MIN_SECONDS,
-            PROMO_ALT_MAX_TOTAL_CLIPS, "Promo Alternate", "clip")
+            PROMO_ALT_MAX_TOTAL_CLIPS, "Promo Alternate", "clip", main_only=True)
 
     def _resolve_music_sequence(self, spec: RowSpec) -> None:
         """Fill spec.music_clips / spec.music_clip_repeats for this row.
@@ -2760,6 +2922,9 @@ class VideoGenerator:
                 frame = self._cover_frame(spec.cta_video_w, spec.cta_video_h,
                                           self._lead_cta_path(spec))
                 canvas.paste(frame.convert("RGBA"), (spec.cta_video_x, spec.cta_video_y))
+                if spec.cta_caption.text:
+                    self._paint_text(canvas, spec.cta_caption.x, spec.cta_caption.y,
+                                     spec.cta_caption, "full")
             if self._has_cta:
                 cta = self._get_cta(spec.cta_w, spec.cta_h)
                 canvas.paste(cta, (spec.cta_x, spec.cta_y), cta)
@@ -3163,7 +3328,7 @@ class VideoGenerator:
             # exact length this row will be rendered at. Outside the mode it
             # returns the promo, which is what this always read.
             spec.beats = group_text(shown or spoken,
-                                    self._render_duration(spec) or 0.0,
+                                    self._main_duration(spec) or 0.0,
                                     **kw)
             # A row with a script but no synthesized wav is an old, deliberate
             # silence — a cache miss renders the row silent and always has. What
@@ -3175,7 +3340,7 @@ class VideoGenerator:
             if self._promo_alt and spoken:
                 spec.warnings.append(
                     f"No narration was synthesized for this row, so it is "
-                    f"rendered at the {self._render_duration(spec):.1f}s "
+                    f"rendered at the {self._main_duration(spec):.1f}s "
                     "fallback length rather than the length of its script. "
                     "Check the voiceover stage — the captions are paced across "
                     "the fallback, not across the speech.")
@@ -3766,12 +3931,18 @@ class VideoGenerator:
                 f"in at {pulled:.1f}s instead.")
             return pulled
 
+        # After-promo mode: the main part (promo or narration) runs main_len,
+        # then the CTA clips play in their box until still_dur. Equal lengths
+        # (and `after` False) whenever the mode is off.
+        main_len = self._main_duration(spec)
+        after = bool(self._cta_after and has_ctav and spec.cta_after_durations
+                     and main_len)
         promo_dur = None if has_alt else self._probe_duration(self.video_path)
         promo_args: list = []
-        if still_dur and promo_dur and still_dur > promo_dur + 0.05:
-            laps = max(1, math.ceil((still_dur + 1.0) / promo_dur))
+        if main_len and promo_dur and main_len > promo_dur + 0.05:
+            laps = max(1, math.ceil((main_len + 1.0) / promo_dur))
             promo_args = ["-stream_loop", str(laps - 1),
-                          "-t", f"{still_dur + 1.0:.3f}"]
+                          "-t", f"{main_len + 1.0:.3f}"]
 
         base_i = add_still(base_png)
         # In Promo Alternate mode the promo slot is taken by the alternate
@@ -3829,6 +4000,12 @@ class VideoGenerator:
         # probed — the same failure that silently strips still_args' -t. Only
         # the -stream_loop COUNT grows with it, never the raw file.
         loop_secs = (still_dur or 3600.0) + 1.0
+        sub_args = still_args
+        if after and not cfg.cta_after_show_texts:
+            # Texts hidden while the CTA clips play: end the subliminal clips
+            # with the main part, and eof_action=pass below makes them vanish.
+            loop_secs = main_len + 1.0
+            sub_args = ["-t", f"{main_len:.3f}"]
 
         def add_sub(sl: dict) -> int:
             frames = max(1, math.ceil(loop_secs * fps))
@@ -3837,7 +4014,7 @@ class VideoGenerator:
                 "-f", "rawvideo", "-pixel_format", "rgba",
                 "-video_size", f"{sl['w']}x{sl['h']}",
                 "-framerate", str(fps), "-stream_loop", str(loops),
-                *still_args, "-i", str(sl["raw"]))
+                *sub_args, "-i", str(sl["raw"]))
 
         sub_ix = [add_sub(sl) for sl in sub_layers]
         # Music is claimed before the background beds, and for the same reason
@@ -3978,6 +4155,20 @@ class VideoGenerator:
             # clips under-fill — the one failure this layer is allowed to have,
             # and the one the last frame holding is supposed to absorb.
             parts.append(f"[{base_i}:v]null[anchored];")
+            if after:
+                parts.append(f"[vidB]trim=duration={main_len:.3f}[vidT];")
+        elif after:
+            # After-promo mode: the promo is NOT the length (the clips run on
+            # past it), so it must not anchor the base with shortest=1 — the
+            # base still and the output already carry their own -t, exactly as
+            # in Promo Alternate above. Trimmed to the main part so the box
+            # empties (eof_action=pass on its overlay) when the clips start.
+            parts = [
+                f"[{promo_i}:v]scale={spec.video_w}:{spec.video_h}"
+                f":force_original_aspect_ratio=decrease:force_divisible_by=2,"
+                f"trim=duration={main_len:.3f}[vidT];",
+                f"[{base_i}:v]null[anchored];",
+            ]
         else:
             parts = [
                 f"[{promo_i}:v]scale={spec.video_w}:{spec.video_h}"
@@ -4010,7 +4201,13 @@ class VideoGenerator:
             # A zero-length fade means "visible from the first frame" (always the
             # case in split-screen, where the panel is layout, not an accent) —
             # emit a passthrough instead of a degenerate fade=d=0.
-            if (spec.cta_video_fade_duration or 0) > 0:
+            if after:
+                # Shifted to start when the main part ends. overlay passes the
+                # canvas through untouched until this stream's first frame, so
+                # the box is simply empty during the promo. No fade: a hard cut
+                # from the promo to the clips is the point of the mode.
+                parts.append(f"{seq}setpts=PTS+{main_len:.3f}/TB[ctav];")
+            elif (spec.cta_video_fade_duration or 0) > 0:
                 parts.append(
                     f"{seq}fade=t=in:st="
                     f"{fade_start(spec.cta_video_fade_start, spec.cta_video_fade_duration, 'The CTA video')}"
@@ -4115,7 +4312,10 @@ class VideoGenerator:
         # the second tuple field so the order stays deterministic. Each tuple:
         # (z-index, tie-break priority, overlay input, overlay position).
         layers = [
-            (cfg.video_z, 0, "[vidB]", video_pos),
+            # After-promo: the trimmed promo, which must VANISH when it ends
+            # rather than freeze on its last frame (overlay's default).
+            ((cfg.video_z, 0, "[vidT]", f"{video_pos}:eof_action=pass") if after
+             else (cfg.video_z, 0, "[vidB]", video_pos)),
             (cfg.text_z, 4, f"[{text_i}:v]", "0:0"),
         ]
         if has_cta:
@@ -4187,9 +4387,15 @@ class VideoGenerator:
         # than riding the `-map <promo>:a?` fallback below: there is no single
         # input holding this row's sound, so the only way to hear the clips at
         # all is to concatenate them in the graph.
-        if cfg.include_audio and (has_music or tempos or has_voice
+        # After-promo mode always enters the graph: the clips' own sound has to
+        # follow the promo's, and even with none the track must reach the end
+        # or `-shortest` would cut the picture where the promo's audio stops.
+        if cfg.include_audio and (has_music or tempos or has_voice or after
                                   or (has_alt and self._promo_has_audio)):
             main_dur = self._render_duration(spec)
+            # The promo's own leg covers the main part only; the CTA clips'
+            # sound follows it. Same value as main_dur when the mode is off.
+            promo_len = main_len if after else main_dur
             legs: list[str] = []
             # Complementary split: music at v leaves the original at 1-v.
             vol = max(0.0, min(float(cfg.music_volume or 0.0), 1.0))
@@ -4217,7 +4423,7 @@ class VideoGenerator:
                 # leg is worse than a short picture leg because `-shortest`
                 # would trim the PICTURE to match it. Bounded by whole_dur, so
                 # it cannot run away, and apad never trims.
-                tail = f",apad=whole_dur={main_dur:.3f}" if main_dur else ""
+                tail = f",apad=whole_dur={promo_len:.3f}" if promo_len else ""
                 if len(alt_ix) > 1:
                     aparts.append(
                         "".join(f"[pa{k}a]" for k in range(len(alt_ix)))
@@ -4231,7 +4437,7 @@ class VideoGenerator:
             if self._promo_has_audio and not mute_promo:
                 if tempos:
                     n = len(tempos)
-                    step = main_dur / n
+                    step = promo_len / n
                     # asegment, not asplit+atrim: one decode feeding N cuts
                     # rather than N branches each discarding what it is not for,
                     # and about half the graph text per chunk — which matters,
@@ -4255,14 +4461,45 @@ class VideoGenerator:
                     # (verified with -t removed entirely).
                     aparts.append("".join(f"[aw{i}]" for i in range(n))
                                  + f"concat=n={n}:v=0:a=1,"
-                                 f"apad=whole_dur={main_dur:.3f}[apromo];")
+                                 f"apad=whole_dur={promo_len:.3f}[apromo];")
                 else:
                     aparts.append(f"{promo_a}anull[apromo];")
+                promo_leg = "[apromo]"
+            else:
+                promo_leg = ""
+            if after:
+                # The CTA clips' own sound takes the promo leg's place once the
+                # main part ends, so music balances against it the same way.
+                # The head (promo audio, or silence) is cut/padded to exactly
+                # the main part, and each clip's sound to exactly the time its
+                # picture holds the box, so sound and picture stay in step
+                # across the joins. Every segment is aformat'ed: concat refuses
+                # inputs whose rate or layout disagree. A clip with no audio
+                # track gets silence — `[N:a]` on it would fail the graph.
+                silence = f"anullsrc=r=48000:cl=stereo,{MUSIC_FORMAT}"
+                head = (f"{promo_leg}{MUSIC_FORMAT}" if promo_leg else silence)
+                aparts.append(f"{head},atrim=duration={main_len:.3f},"
+                              f"apad=whole_dur={main_len:.3f}[ahead];")
+                speeds_a = spec.cta_video_clip_speeds or []
+                for k, (idx, d) in enumerate(zip(clip_ix, spec.cta_after_durations)):
+                    sp = speeds_a[k] if k < len(speeds_a) else 1.0
+                    if _has_audio_stream(self.ffmpeg, Path(clips[k])):
+                        src = (f"[{idx}:a]{MUSIC_FORMAT},asetpts=PTS-STARTPTS"
+                               f"{_atempo_chain(sp)}")
+                    else:
+                        src = silence
+                    aparts.append(f"{src},atrim=duration={d:.3f},"
+                                  f"apad=whole_dur={d:.3f}[ca{k}];")
+                n_ca = len(spec.cta_after_durations)
+                aparts.append("[ahead]" + "".join(f"[ca{k}]" for k in range(n_ca))
+                              + f"concat=n={n_ca + 1}:v=0:a=1[aafter];")
+                promo_leg = "[aafter]"
+            if promo_leg:
                 if has_music:
-                    aparts.append(f"[apromo]volume={1.0 - vol:.4f}[apromov];")
+                    aparts.append(f"{promo_leg}volume={1.0 - vol:.4f}[apromov];")
                     legs.append("[apromov]")
                 else:
-                    legs.append("[apromo]")
+                    legs.append(promo_leg)
             if has_music:
                 # With no original audio to balance against, the bed IS the mix:
                 # honouring "10%" literally would produce a near-silent video
@@ -4437,7 +4674,8 @@ class VideoGenerator:
             self.build_base_image(spec).save(base_png)
             # resolves positions; the CTA ships as its own input so FFmpeg
             # can fade it in (see build_ffmpeg_command)
-            self.build_overlay_image(spec, include_cta=False).save(overlay_png)
+            overlay = self.build_overlay_image(spec, include_cta=False)
+            overlay.save(overlay_png)
             if cta_png is not None:
                 self._get_cta(spec.cta_w, spec.cta_h).save(cta_png)
 
@@ -4479,6 +4717,14 @@ class VideoGenerator:
             # concat demuxer does not normalise its inputs, and a list whose
             # frames disagree renders the layer as nothing at all, with exit 0.
             layers, _static = self._caption_layers(spec)
+            # After-promo CTA captions join the same timeline, after the main
+            # part. Narration beats are clipped to the main part first, so a
+            # long script cut short can never push the CTA captions late.
+            cta_layers = self._cta_caption_layers(spec, overlay)
+            if cta_layers:
+                main = self._main_duration(spec)
+                layers = [(s, min(e, main), im) for s, e, im in layers
+                          if s < main] + cta_layers
             if layers:
                 render_dur = self._render_duration(spec) or 0.0
                 for e, (_start, _end, image) in enumerate(layers):
@@ -4535,7 +4781,18 @@ class VideoGenerator:
     # ------------------------------------------------------------- duration probe
 
     def _render_duration(self, spec: "RowSpec") -> Optional[float]:
-        """How long this row's OUTPUT is — which is no longer always the promo.
+        """The whole output: the main part plus, in after-promo mode, the CTA
+        clips that play once it ends (filled in by _resolve_positions). Every
+        layer that runs for the whole video — gifs, beds, music, the stills'
+        bounds, the output -t — is sized against this."""
+        main = self._main_duration(spec)
+        if main is None or not spec.cta_after_durations:
+            return main
+        return main + sum(spec.cta_after_durations)
+
+    def _main_duration(self, spec: "RowSpec") -> Optional[float]:
+        """How long the main part runs — which is no longer always the promo.
+        Equal to the whole output unless the CTA clips play after it.
 
         The promo defined the render length outright until voiceover arrived.
         With `voice_loop_promo` on, a narrated row is as long as its NARRATION:
@@ -4727,7 +4984,10 @@ class VideoGenerator:
 
         texts = []
         measure = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
-        for element in spec.text_elements:
+        # The after-promo CTA caption rides along as one more draggable text
+        # (the row's longest pick, the size it is laid out for); the editor
+        # writes CTA_Caption_X/Y/Size/... back exactly as for any other role.
+        for element in [*spec.text_elements, spec.cta_caption]:
             if not element.text:
                 continue
             font = self._font_for(element)
