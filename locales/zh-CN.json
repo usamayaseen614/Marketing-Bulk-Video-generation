@@ -853,5 +853,19 @@
   "a promo video (upload files or read a Google Drive folder)": "原视频（上传文件或读取 Google Drive 文件夹）",
   "Downloading selected promo video from Drive…": "正在从 Google Drive 下载选中的原视频…",
   "downloading promo videos from Drive": "正在从 Google Drive 下载原视频",
-  "downloading promo videos": "正在下载原视频"
+  "downloading promo videos": "正在下载原视频",
+  "Play CTA clips after the promo": "宣传视频播完后播放引导片段",
+  "The promo plays first with the CTA box empty. When it ends, the clips above play once each, in order, in the CTA box, and the video runs until the last one finishes — each with its own sound. The fade-in and 'Keep clips playing' settings are ignored. Not available in split-screen.": "先播放宣传视频，此时引导视频区域为空。宣传视频结束后，上方各片段在引导视频区域内按顺序各播放一次，并保留各自的声音，视频在最后一个片段结束时结束。淡入和“持续播放片段”设置将被忽略。左右分屏模式不可用。",
+  "CTA clips after the promo — captions": "宣传视频后的引导片段：字幕",
+  "Show Headline / Subheading / Footer during the CTA clips": "播放引导片段时显示标题 / 副标题 / 页脚",
+  "Off: only the CTA caption is on screen once the promo ends.": "关闭后，宣传视频结束后屏幕上只显示引导片段字幕。",
+  "Caption pool (.xlsx / .csv / .txt)": "字幕池（.xlsx / .csv / .txt）",
+  "Excel/CSV: captions in the first column, under a header row. Text: one caption per line. Each CTA clip shows one caption picked at random from this pool (repeats allowed). Put a `|` in a caption to break the line there.": "Excel/CSV：字幕放在第一列，位于表头行下方。文本文件：每行一条字幕。每个引导片段从此池中随机选取一条字幕（允许重复）。在字幕中加入 `|` 可在该处换行。",
+  "**{0}** caption(s) — first one: “{1}”": "共 **{0}** 条字幕，第一条：“{1}”",
+  "No captions found in `{0}`.": "在 `{0}` 中未找到字幕。",
+  "Caption position — 0 = centred on the CTA box, near its top. Drag it in the preview to set one row; `CTA_Caption_X`/`CTA_Caption_Y` (and `_Size`, `_Color`, `_Font`, `_Style`, …) override per row.": "字幕位置：0 表示在引导视频区域内水平居中并靠近顶部。在预览中拖动可设置单行；`CTA_Caption_X`/`CTA_Caption_Y`（以及 `_Size`、`_Color`、`_Font`、`_Style` 等）可逐行覆盖。",
+  "Caption X (centre)": "字幕 X 坐标（中心）",
+  "Caption Y (centre)": "字幕 Y 坐标（中心）",
+  "CTA caption pool": "引导片段字幕池",
+  "CTA caption pools": "引导片段字幕池"
 }

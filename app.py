@@ -712,30 +712,30 @@ with st.sidebar:
              "hold the last frame. Split-screen mode turns this on automatically."),
     )
     cta_after_promo = st.checkbox(
-        "Play CTA clips after the promo",
+        t("Play CTA clips after the promo"),
         value=False, key=keep("cta_after_promo"), disabled=is_split,
-        help="The promo plays first with the CTA box empty. When it ends, the "
-             "clips above play once each, in order, in the CTA box, and the "
-             "video runs until the last one finishes — each with its own sound. "
-             "The fade-in and 'Keep clips playing' settings are ignored. Not "
-             "available in split-screen.",
+        help=t("The promo plays first with the CTA box empty. When it ends, the "
+               "clips above play once each, in order, in the CTA box, and the "
+               "video runs until the last one finishes — each with its own sound. "
+               "The fade-in and 'Keep clips playing' settings are ignored. Not "
+               "available in split-screen."),
     )
     # An expander rather than `if cta_after_promo:` so the caption upload is
     # not thrown away when the box is unticked (see Promo Alternate below).
-    with st.expander("CTA clips after the promo — captions",
+    with st.expander(t("CTA clips after the promo — captions"),
                      expanded=bool(cta_after_promo) and not is_split):
         cta_after_show_texts = st.checkbox(
-            "Show Headline / Subheading / Footer during the CTA clips",
+            t("Show Headline / Subheading / Footer during the CTA clips"),
             value=True, key=keep("cta_after_show_texts"),
-            help="Off: only the CTA caption is on screen once the promo ends.",
+            help=t("Off: only the CTA caption is on screen once the promo ends."),
         )
         cta_caption_file = st.file_uploader(
-            "Caption pool (.xlsx / .csv / .txt)", type=["xlsx", "csv", "txt"],
+            t("Caption pool (.xlsx / .csv / .txt)"), type=["xlsx", "csv", "txt"],
             key=presets_ui.uploader_key("cta_captions"),
-            help="Excel/CSV: captions in the first column, under a header row. "
-                 "Text: one caption per line. Each CTA clip shows one caption "
-                 "picked at random from this pool (repeats allowed). Put a `|` "
-                 "in a caption to break the line there.",
+            help=t("Excel/CSV: captions in the first column, under a header row. "
+                   "Text: one caption per line. Each CTA clip shows one caption "
+                   "picked at random from this pool (repeats allowed). Put a `|` "
+                   "in a caption to break the line there."),
         )
         cta_caption_file = presets_ui.with_saved("cta_captions", cta_caption_file,
                                                  multiple=False)
@@ -745,18 +745,18 @@ with st.sidebar:
             cta_captions = _parse_captions(cta_caption_file.getvalue(),
                                            cta_caption_file.name)
             if cta_captions:
-                st.caption(f"**{len(cta_captions)}** caption(s) — first one: "
-                           f"“{cta_captions[0][:60]}”")
+                st.caption(t("**{0}** caption(s) — first one: “{1}”",
+                             len(cta_captions), cta_captions[0][:60]))
             else:
-                st.warning(f"No captions found in `{cta_caption_file.name}`.")
-        st.caption(
+                st.warning(t("No captions found in `{0}`.", cta_caption_file.name))
+        st.caption(t(
             "Caption position — 0 = centred on the CTA box, near its top. Drag "
             "it in the preview to set one row; `CTA_Caption_X`/`CTA_Caption_Y` "
             "(and `_Size`, `_Color`, `_Font`, `_Style`, …) override per row."
-        )
-        cta_caption_x = st.number_input("Caption X (centre)", 0, CANVAS_W, 0,
+        ))
+        cta_caption_x = st.number_input(t("Caption X (centre)"), 0, CANVAS_W, 0,
                                         key=keep("cta_caption_x"))
-        cta_caption_y = st.number_input("Caption Y (centre)", 0, CANVAS_H, 0,
+        cta_caption_y = st.number_input(t("Caption Y (centre)"), 0, CANVAS_H, 0,
                                         key=keep("cta_caption_y"))
 
     # ---- Promo Alternate
