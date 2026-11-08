@@ -14,6 +14,8 @@ import os, sys, tempfile, zipfile
 from pathlib import Path
 
 os.environ["BVG_IGNORE_DOTENV"] = "1"
+# Both platforms: the app default is now yt only, and these tests cover the pair.
+os.environ["BVG_UPLOAD_PLATFORMS"] = "yt,tk"
 os.environ["BVG_JOBS_ROOT"] = tempfile.mkdtemp(prefix="uprend_")
 os.environ["BVG_DRIVE_SHARED_DRIVE_ID"] = "0AFakeSharedDrive"
 

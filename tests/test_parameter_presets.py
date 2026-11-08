@@ -43,7 +43,7 @@ assert config.MAIL_TO == ["founder@quislab.com"]
 assert config.DRIVE_ROOT_FOLDER_ID == defaults.DRIVE_FOLDER
 for source in ("gif_source", "bg_image_source", "bg_video_source", "music_source"):
     assert values[source] == "drive_folder"
-text = (ROOT / "docs/common_parameter_settings.txt").read_text()
+text = (ROOT / "docs/common_parameter_settings.txt").read_text(encoding="utf-8")
 assert defaults.DRIVE_FOLDER in text
 assert all(url in text for url in defaults.MATERIAL_FOLDERS.values())
 print("global defaults match the operator's settings")
@@ -61,7 +61,7 @@ assert p.default_values()['upload_platforms'] == 'yt,tk'
 # Catch missing controls when the generation page gains new parameters.
 excluded = {"batch_label", "drive_folder", "notify_email", "scrape_account",
             "cta_clips_drive_pooled", "promos_drive_folder", *defaults.MATERIAL_FOLDERS}
-for node in ast.walk(ast.parse((ROOT / "app.py").read_text())):
+for node in ast.walk(ast.parse((ROOT / "app.py").read_text(encoding="utf-8"))):
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "keep":
         if isinstance(node.args[0], ast.Constant):
             assert node.args[0].value in values.keys() | excluded, node.args[0].value

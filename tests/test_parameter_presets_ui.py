@@ -21,7 +21,7 @@ _app_dir = tempfile.TemporaryDirectory(prefix="parameterui_app_")
 _app_path = Path(_app_dir.name) / "app.py"
 (_app_path.parent / "pages").symlink_to(ROOT / "pages", target_is_directory=True)
 _app_path.write_text(
-    (ROOT / "app.py").read_text()
+    (ROOT / "app.py").read_text(encoding="utf-8")
     + '\nst.session_state["_test_render_config"] = asdict(config)\n'
     + 'st.session_state["_test_caption_params"] = caption_params\n'
     + 'st.session_state["_test_cta_slots"] = [[f.name for f in slot] for slot in cta_video_slot_files]\n',
@@ -137,7 +137,8 @@ assert at.session_state["row_edits"] == {1: {"Headline_X": 300}}
 control("button", "Load").click()
 run()
 assert control("slider", "Background video opacity (%)").value == 25
-assert at.session_state.get("row_edits", {}) == {}
+# AppTest's session_state has no .get().
+assert "row_edits" not in at.session_state or at.session_state["row_edits"] == {}
 
 # An old/partial preset fills missing values; apply never queues a new job.
 partial = pp.save("Partial", {"bg_video_opacity": 17})

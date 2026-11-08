@@ -129,7 +129,9 @@ BASE = dict(bg_color="#101010", preset="ultrafast", crf=32,
             # These cases measure the promo's own 440 Hz carrier in the mix —
             # ducked, padded, split against the bed — so it has to be IN the
             # mix. Muting it is the default and gets its own case below.
-            voice_mute_promo=False)
+            voice_mute_promo=False,
+            # Now on by default; it re-times the promo audio these cases measure.
+            split_audio=False)
 # The caption band sits low; the headline sits high. Two disjoint bands means a
 # single frame can prove the caption changed AND the static text did not.
 CAPTION_BOX = (0, 1250, 1080, 1600)

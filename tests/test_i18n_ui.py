@@ -28,6 +28,12 @@ def run():
     assert not at.exception, [(e.message, e.stack_trace) for e in at.exception]
 
 
+def lang_param():
+    # Newer AppTest versions return each query param as a list of values.
+    value = at.query_params["lang"]
+    return value[-1] if isinstance(value, list) else value
+
+
 at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=30).run()
 assert not at.exception
 assert at.title[0].value == "🎬 Bulk Marketing Video Generator"
@@ -53,7 +59,7 @@ at.session_state["row_edits"] = {1: {"Headline_X": 321}}
 at.button(key="switch_language").click()
 run()
 assert at.session_state["ui_language"] == "zh-CN"
-assert at.query_params["lang"] == "zh-CN"
+assert lang_param() == "zh-CN"
 assert at.title[0].value == "🎬 批量营销视频生成器"
 assert control("slider", "背景视频不透明度（%）").value == 17
 assert control("radio", "布局模式").value == "split"
@@ -95,7 +101,7 @@ for page, title in (
     run()
     assert at.title[0].value == title
     assert at.button(key="switch_language").label == "English"
-    assert at.query_params["lang"] == "zh-CN"
+    assert lang_param() == "zh-CN"
     if page == "pages/1_Jobs.py":
         assert any("Campaign 原文" in item.label for item in at.expander)
         assert at.get("progress")[0].proto.text == "正在下载背景图片 1/3"
