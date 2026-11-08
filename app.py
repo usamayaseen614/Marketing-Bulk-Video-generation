@@ -1112,9 +1112,54 @@ with col1:
              "voiceover and its captions decide how long each video runs. The "
              "CTA clips keep cycling in their own box alongside."),
     )
+    promo_source = st.radio(
+        t("Promo video source"), options=["upload", "drive_folder"],
+        format_func=option_labels(["upload", "drive_folder"], lambda source: {
+            "upload": t("Upload files"),
+            "drive_folder": t("Google Drive folder"),
+        }[source]),
+        horizontal=True, disabled=promo_alt, key=keep("promo_source"),
+    )
+    if promo_alt:
+        promo_source = "upload"
+    promo_drive_files = []
+    promos_drive_folder = ""
+    if promo_source == "drive_folder":
+        from integrations import drive
+
+        promos_drive_folder = st.text_input(
+            t("Promo videos Google Drive folder link"),
+            key=keep("promos_drive_folder"),
+            help=t("Share this folder with the service account (Viewer access). "
+                   "An ordinary My Drive folder also works."),
+        ).strip()
+        if st.button(t("Read promo video list"), disabled=not promos_drive_folder,
+                     key="read_drive_promos"):
+            try:
+                with st.spinner(t("Reading promo videos from Drive…")):
+                    entries = drive.list_videos(
+                        drive.extract_id(promos_drive_folder),
+                        max_files=MAX_PROMO_VIDEOS)
+                st.session_state["_drive_promos"] = {
+                    "link": promos_drive_folder, "files": entries}
+                if not entries:
+                    st.warning(t("This Drive folder has no video files."))
+            except Exception as exc:  # noqa: BLE001 — Drive API and transport errors
+                st.session_state.pop("_drive_promos", None)
+                st.error(t("Could not read promo videos: {0}", exc))
+        listed = st.session_state.get("_drive_promos") or {}
+        if listed.get("link") == promos_drive_folder:
+            promo_drive_files = listed["files"]
+        st.caption(t("Read the list first. Videos download directly to the server "
+                     "after you submit the job; a preview downloads only the "
+                     "selected video."))
+        if promo_drive_files:
+            st.caption(t("{0} promo video(s), {1:,.1f} GB",
+                         len(promo_drive_files),
+                         sum(f["size"] for f in promo_drive_files) / 1024 ** 3))
     promo_files = st.file_uploader(
         t("Promo video(s) (MP4) — up to {0}", MAX_PROMO_VIDEOS), type=["mp4"],
-        accept_multiple_files=True, disabled=promo_alt,
+        accept_multiple_files=True, disabled=promo_alt or promo_source != "upload",
         on_change=presets_ui.upload_changed, args=("promos",),
         key=presets_ui.uploader_key("promos"),
         help=t("Upload one to use it in every video. Upload several and a "
@@ -1122,6 +1167,8 @@ with col1:
              "if there are fewer promos than batches."),
     )
     promo_files = presets_ui.with_saved("promos", promo_files, multiple=True)
+    if promo_source != "upload":
+        promo_files = []
     # Disabling an uploader does NOT clear what it already holds — the files
     # stay in session_state and would still be staged at submit. Drop them here
     # so everything downstream (the batch default, the grids, the pairing table,
@@ -1222,7 +1269,15 @@ if excel_file is not None:
 # Uploading one makes that role's text come from the grid instead of the sheet;
 # everything else about the row — size, font, colour, position, background box
 # — is untouched, which is the whole point. See text_grids.py.
-promo_names = [f.name for f in (promo_files or [])]
+promo_names = ([f["name"] for f in promo_drive_files] if promo_source == "drive_folder"
+               else [f.name for f in (promo_files or [])])
+promo_key = (promo_source, [(f["id"], f["name"], f["size"]) for f in promo_drive_files],
+             [(f.name, f.size) for f in (promo_files or [])])
+if st.session_state.get("_promo_key", promo_key) != promo_key:
+    for stale in ("preview_payload", "preview_nonce", "preview_baseline_edits",
+                  "row_render"):
+        st.session_state.pop(stale, None)
+st.session_state["_promo_key"] = promo_key
 sheet_rows = len(df) if df is not None else 0
 grid_keys = {role: f"text_grid_{role}" for role in TEXT_ROLES}
 grid_uploads: dict[str, object] = {}
@@ -1348,11 +1403,12 @@ st.session_state["text_grid_key"] = grid_key
 # In Promo Alternate mode the alternate pool stands in for the promo — it is
 # what fills the promo's box, so it is what "have we got a picture yet" means.
 ready = df is not None and (bool(promo_alt_files) if promo_alt
-                            else video_file is not None)
+                            else bool(promo_names))
 if not ready:
     st.info(
         t("Upload the Excel sheet and ")
-        + (t("Promo Alternate clips (sidebar)") if promo_alt else t("a promo video"))
+        + (t("Promo Alternate clips (sidebar)") if promo_alt else
+           t("a promo video (upload files or read a Google Drive folder)"))
         + t(" to enable preview and generation. The background ZIP and CTA image "
           "are optional — without backgrounds, videos render on the sidebar's "
           "background color.")
@@ -1365,19 +1421,20 @@ st.subheader(t("2. Preview a row"))
 # one — so there was no way to see how a particular row looks against a
 # particular promo. In the real batch every row is paired automatically and
 # spread across all of them; this is for checking one pairing by eye.
-if promo_files and len(promo_files) > 1:
+if len(promo_names) > 1:
     col_row, col_promo, col_preview, col_render = st.columns(
         [1, 1.6, 1.4, 1.4], vertical_alignment="bottom")
     promo_choice = col_promo.selectbox(
-        t("Promo video"), options=list(range(len(promo_files))),
-        format_func=option_labels(list(range(len(promo_files))), lambda i: f"{i + 1}. {promo_files[i].name}"),
+        t("Promo video"), options=list(range(len(promo_names))),
+        format_func=option_labels(list(range(len(promo_names))), lambda i: f"{i + 1}. {promo_names[i]}"),
         disabled=not ready,
         help=t("Which promo to pair with this row for the preview and the test "
              "render. The full batch pairs every row automatically, spread "
              "evenly across all of them."),
      key='_ui_app_promo_video')
     # Preview and Render Row below build their workspace from this one.
-    video_file = promo_files[promo_choice]
+    if promo_source == "upload":
+        video_file = promo_files[promo_choice]
 else:
     promo_choice = 0
     col_row, col_preview, col_render = st.columns(
@@ -1958,7 +2015,7 @@ col_c = None if promo_alt else cols[2]
 # Default to one pass per promo, which is the pairing people expect: every row
 # rendered once with every promo. With no promos there is no such pairing, so
 # one pass — more is a deliberate ask for more variants.
-_n_promos = max(1, len(promo_files or []))
+_n_promos = max(1, len(promo_names))
 _batches_default = 1 if promo_alt else _n_promos
 # Keyed so a saved job can set it, which means it no longer re-defaults by
 # itself when the promo count changes — follow_default puts that back.
@@ -2008,7 +2065,7 @@ if max_per_folder and df is not None and len(df):
     n_folders_eff = next(
         (f for f in range(int(n_folders), MAX_PASSES + 1)
          if batching.max_copies_per_promo(
-             int(n_batches), len(df), f, max(1, len(promo_files or [])))
+             int(n_batches), len(df), f, max(1, len(promo_names)))
          <= max_per_folder),
         # Unsatisfiable at any folder count: too few promos for a folder this
         # size. Keep what was typed; the warning below says how many are needed.
@@ -2032,7 +2089,7 @@ upload_platforms = st.selectbox(
 
 if ready and df is not None:
     total_videos = len(df) * int(n_batches)
-    promo_count = len(promo_files or [])
+    promo_count = len(promo_names)
     _n_names = len(upload_platforms.split(","))
     note = (t("**{0:,} rows x {1} passes = {2:,} videos**, mixed across {3} folders, ", len(df), int(n_batches), total_videos, n_folders_eff)
             + ((t("each published twice under the SAME name — the fixed "
@@ -2192,7 +2249,14 @@ def _preview_workspace(tmp: Path) -> Workspace:
             bg_video_files, music_files, promo_alt_files)
     bar = ui_common.ByteProgress(staged_bytes(*args), "Copying files for the preview")
     try:
-        return build_workspace(tmp, *args, progress=bar)
+        if promo_source == "drive_folder":
+            from integrations import drive
+
+            entry = promo_drive_files[promo_choice]
+            with st.spinner(t("Downloading selected promo video from Drive…")):
+                drive.download_file(entry["id"], tmp / "input.mp4", entry["size"])
+        return build_workspace(tmp, *args, progress=bar,
+                               defer_promos=promo_source == "drive_folder")
     finally:
         bar.clear()
 
@@ -2220,7 +2284,7 @@ if preview_clicked and ready:
                 st.session_state["preview_nonce"] = uuid.uuid4().hex
                 st.session_state["preview_row"] = int(preview_row)
                 st.session_state["preview_promo"] = (
-                    video_file.name if promo_files and len(promo_files) > 1 else "")
+                    promo_names[promo_choice] if len(promo_names) > 1 else "")
                 # The payload was built WITH this row's saved edits applied,
                 # so a later save reports changes relative to them — keep the
                 # snapshot to merge against (and to detect reverts).
@@ -2261,8 +2325,8 @@ if render_row_clicked and ready:
                     # Read the bytes before the TemporaryDirectory vanishes.
                     st.session_state["row_render"] = {
                         "row": int(preview_row),
-                        "promo": (video_file.name if promo_files
-                                  and len(promo_files) > 1 else ""),
+                        "promo": (promo_names[promo_choice]
+                                  if len(promo_names) > 1 else ""),
                         "name": res.filename,
                         "bytes": (Path(tmp) / "out" / res.filename).read_bytes(),
                         "warnings": list(res.warnings),
@@ -2491,7 +2555,8 @@ if generate_clicked and ready:
         store.make_job_dirs(job_id)
         assets = store.assets_dir(job_id)
 
-        stage_uploads(assets, *_staged, progress=_progress)
+        stage_uploads(assets, *_staged, progress=_progress,
+                      defer_promos=promo_source == "drive_folder")
 
         if hashtag_file is not None:
             (assets / "hashtags.xlsx").write_bytes(hashtag_file.getvalue())
@@ -2511,7 +2576,8 @@ if generate_clicked and ready:
         # Anything that has to be fetched or generated before rendering makes
         # this a pipeline job rather than a plain render — including a gif pool
         # that still has to come down from Drive.
-        chained = (clip_source != "upload" or gif_source != "upload"
+        chained = (promo_source != "upload"
+                   or clip_source != "upload" or gif_source != "upload"
                    or bg_image_source != "upload"
                    or bg_video_source != "upload"
                    or music_source != "upload"
@@ -2533,6 +2599,9 @@ if generate_clicked and ready:
                 # staged as input.mp4 / input_N.mp4, so this list is the only
                 # way to read a job's per-promo text back against real names.
                 "promo_names": promo_names,
+                "promo_source": promo_source,
+                "promos_drive_folder": promos_drive_folder,
+                "promos_drive_files": promo_drive_files,
                 "text_grids": sorted(grid_overrides),
                 "clip_source": clip_source,
                 "gif_source": gif_source,

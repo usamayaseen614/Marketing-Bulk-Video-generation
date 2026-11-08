@@ -60,7 +60,7 @@ assert p.default_values()['upload_platforms'] == 'yt,tk'
 
 # Catch missing controls when the generation page gains new parameters.
 excluded = {"batch_label", "drive_folder", "notify_email", "scrape_account",
-            "cta_clips_drive_pooled", *defaults.MATERIAL_FOLDERS}
+            "cta_clips_drive_pooled", "promos_drive_folder", *defaults.MATERIAL_FOLDERS}
 for node in ast.walk(ast.parse((ROOT / "app.py").read_text())):
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "keep":
         if isinstance(node.args[0], ast.Constant):

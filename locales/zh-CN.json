@@ -839,5 +839,19 @@
   "Likes": "点赞数",
   "Comments": "评论数",
   "Length": "时长",
-  "{0}m {1:02d}s": "{0} 分 {1:02d} 秒"
+  "{0}m {1:02d}s": "{0} 分 {1:02d} 秒",
+  "Promo video source": "原视频来源",
+  "Upload files": "上传文件",
+  "Google Drive folder": "Google Drive 文件夹",
+  "Promo videos Google Drive folder link": "原视频 Google Drive 文件夹链接",
+  "Share this folder with the service account (Viewer access). An ordinary My Drive folder also works.": "请将此文件夹共享给服务账号，并授予查看权限。普通的“我的云端硬盘”文件夹也可使用。",
+  "Read promo video list": "读取原视频列表",
+  "Reading promo videos from Drive…": "正在读取 Google Drive 原视频列表…",
+  "This Drive folder has no video files.": "此 Google Drive 文件夹中没有视频文件。",
+  "Could not read promo videos: {0}": "无法读取原视频：{0}",
+  "Read the list first. Videos download directly to the server after you submit the job; a preview downloads only the selected video.": "请先读取列表。提交任务后，服务器会直接下载视频；预览时只下载选中的视频。",
+  "a promo video (upload files or read a Google Drive folder)": "原视频（上传文件或读取 Google Drive 文件夹）",
+  "Downloading selected promo video from Drive…": "正在从 Google Drive 下载选中的原视频…",
+  "downloading promo videos from Drive": "正在从 Google Drive 下载原视频",
+  "downloading promo videos": "正在下载原视频"
 }

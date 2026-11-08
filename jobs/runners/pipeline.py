@@ -298,6 +298,26 @@ def _drive_clips_stage(job: dict, params: dict) -> dict:
     }
 
 
+def _drive_promos_stage(job: dict, params: dict) -> dict:
+    """Keep the submitted promo order aligned with batches and text grids."""
+    from integrations import drive
+
+    job_id = job["id"]
+    files = [{**entry, "name": "input.mp4" if i == 1 else f"input_{i}.mp4"}
+             for i, entry in enumerate(params["promos_drive_files"], start=1)]
+    store.set_stage(job_id, "downloading promo videos from Drive")
+    report = drive.download_files(
+        files, store.assets_dir(job_id),
+        on_progress=lambda done, total: store.heartbeat(
+            job_id, stage=f"downloading promo videos {done}/{total}"))
+    # Missing a promo would shift every later batch and its per-promo text.
+    if report["failed"]:
+        raise RuntimeError(
+            f"{report['failed']} promo video(s) could not be downloaded. "
+            f"Nothing was rendered. First error: {report['errors'][0]}")
+    return {"source": "drive_folder", **report}
+
+
 def _drive_pool_stage(job: dict, params: dict, param_key: str,
                       subdir: str, label: str, kind: str = "video") -> dict:
     """A FLAT clip pool from a Google Drive folder (the gifs, the background
@@ -365,6 +385,9 @@ def run(job: dict) -> dict:
     params = job.get("params") or {}
     started = time.time()
     result: dict = {"pipeline": True}
+
+    if params.get("promo_source") == "drive_folder":
+        result["promos"] = _drive_promos_stage(job, params)
 
     # ---- 1. clips
     if params.get("clip_source") == "scrape_now":
