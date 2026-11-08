@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 PROJ = Path(__file__).resolve().parent.parent
@@ -170,6 +171,23 @@ cmd = " ".join(off.build_ffmpeg_command(s2, TMP / "b.png", TMP / "o.png", None,
                                         TMP / "x.mp4"))
 assert "shortest=1" in cmd and "setpts=PTS+" not in cmd and "anullsrc" not in cmd
 assert s2.cta_after_durations is None and abs(off._render_duration(s2) - 2.0) < 0.1
+
+# ---------- 7. clips from Drive: none on this machine at preview time --------
+# The preview must still show the caption on the CTA box, so it can be placed;
+# the render must not draw it, since there are no clips to put it on.
+drv = VideoGenerator(replace(cfg, cta_captions=["BUY", "GO"]), bg_dir, promo,
+                     None, TMP / "work3", TMP / "out3")
+s7 = drv._spec_for(row, 1)
+drv._resolve_positions(s7)
+assert len(s7.cta_caption_texts) == 3, s7.cta_caption_texts       # one per slot
+assert s7.cta_caption.text == max(s7.cta_caption_texts, key=len)
+assert (s7.cta_caption.x, s7.cta_caption.y) == (cap.x, cap.y), "not on the CTA box"
+assert CTA_CAPTION_ROLE in [t["role"] for t in drv.build_editor_payload(row, 1)["texts"]]
+still = drv.build_overlay_image(drv._spec_for(row, 1)).convert("RGB")
+assert count(still, cap_box, yellow) > 100, "caption missing from the preview"
+s7b = drv._spec_for(row, 1)
+assert drv._cta_caption_layers(s7b, drv.build_overlay_image(s7b, include_cta=False)) == []
+assert abs(drv._render_duration(s7b) - 2.0) < 0.1
 
 print(f"OK: {total:.2f}s, captions {spec.cta_caption_texts}, "
       f"warnings {res.warnings}")

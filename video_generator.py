@@ -2118,6 +2118,12 @@ class VideoGenerator:
                 self._fill_cta_sequence(spec, chosen, chosen_speeds, clip_rng)
             spec.cta_video_clips = chosen
             spec.cta_video_clip_speeds = chosen_speeds
+        elif cfg.cta_after_promo and cfg.layout_mode != "split":
+            # No clips on this machine: they come from Drive or a scrape when the
+            # job runs. Pick what the render would (same seed, one per slot) so
+            # the preview can still show and place the caption. The render
+            # never draws it without clips.
+            self._pick_cta_captions(spec, max(1, len(cfg.cta_video_speeds)))
 
         # Gif box (resolved unconditionally, same reasoning as the CTA video box
         # above: the editor needs concrete numbers whether or not a pool exists).
@@ -2538,11 +2544,15 @@ class VideoGenerator:
         chosen[:] = [k[0] for k in keep]
         chosen_speeds[:] = [k[1] for k in keep]
         spec.cta_after_durations = [k[2] for k in keep]
+        self._pick_cta_captions(spec, len(keep))
+
+    def _pick_cta_captions(self, spec: RowSpec, n: int) -> None:
+        """One random caption per clip; the longest is the one laid out."""
         pool = [c for c in (self.config.cta_captions or []) if str(c).strip()]
         # Own salt, so turning captions on never reshuffles the clip picks.
         rng = random.Random(spec.placement_seed() ^ 0xCA7)
         spec.cta_caption_texts = [str(rng.choice(pool)).strip() if pool else ""
-                                  for _ in keep]
+                                  for _ in range(n)]
         spec.cta_caption.text = max(spec.cta_caption_texts, key=len, default="")
 
     def _fill_cta_sequence(self, spec: RowSpec, chosen: list, chosen_speeds: list,
@@ -2921,9 +2931,9 @@ class VideoGenerator:
                 frame = self._cover_frame(spec.cta_video_w, spec.cta_video_h,
                                           self._lead_cta_path(spec))
                 canvas.paste(frame.convert("RGBA"), (spec.cta_video_x, spec.cta_video_y))
-                if spec.cta_caption.text:
-                    self._paint_text(canvas, spec.cta_caption.x, spec.cta_caption.y,
-                                     spec.cta_caption, "full")
+            if spec.cta_caption.text:
+                self._paint_text(canvas, spec.cta_caption.x, spec.cta_caption.y,
+                                 spec.cta_caption, "full")
             if self._has_cta:
                 cta = self._get_cta(spec.cta_w, spec.cta_h)
                 canvas.paste(cta, (spec.cta_x, spec.cta_y), cta)

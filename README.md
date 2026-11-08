@@ -558,7 +558,8 @@ render. Captions wrap to the CTA box's width, and `|` forces a line break.
   default). Untick it to show only the caption once the promo ends.
 - The preview is a still: it shows the first clip's frame with the row's **longest**
   caption, so you can check that the widest one fits. **🎬 Render Row** shows the real
-  timing.
+  timing. When the clips come from a Drive folder or a scrape, the preview has no clips
+  to show, but it still shows the caption where the CTA box will be, so you can place it.
 - CTA video fade-in and *Keep clips playing to fill the whole video* are ignored in this
   mode. It is not available in split-screen, where the CTA box is the side panel.
 
