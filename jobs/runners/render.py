@@ -62,6 +62,7 @@ import pandas as pd
 
 import batching
 import config
+import generation_defaults as defaults
 import results
 import text_grids
 from batching import Slot
@@ -107,7 +108,7 @@ def _hashtag_override(job_id: str, params: dict) -> Optional[list[str]]:
     if params.get("fixed_tail"):
         # A fixed CTA line replaces hashtags outright — see naming.FIXED_TAILS.
         return []
-    source = params.get("hashtag_source", "pool")
+    source = params.get("hashtag_source", defaults.HASHTAG_SOURCE)
     if source == "none":
         return []
     if source != "excel":
@@ -163,10 +164,14 @@ def _assign_names(job_id: str, slots: list[Slot], n_rows: int,
     actually render rather than the main sheet's. Both would work — names are
     de-duplicated either way — but a file called `001_main_two.mp4` whose video
     says something else is a trap for whoever posts it.
+
+    With caption_mode=none, only Headline supplies filenames; publishing
+    caption and hashtag metadata stay blank and the pool is untouched.
     """
     from captions import naming
     from video_generator import _clean_str
 
+    captions_disabled = (params or {}).get("caption_mode") == "none"
     overrides = overrides or {}
     promo_for = promo_for or {}
     existing = {i["idx"]: i for i in store.list_items(job_id)}
@@ -190,10 +195,11 @@ def _assign_names(job_id: str, slots: list[Slot], n_rows: int,
 
     # Only rows without a hand-written caption consume pool combinations —
     # drawing for all of them would burn the pool on captions never used.
-    from_sheet = {s: _cell(s.row, "Caption") for s in needed}
+    from_sheet = {s: "" if captions_disabled else _cell(s.row, "Caption")
+                  for s in needed}
     need_pool = [s for s in needed if not from_sheet[s]]
 
-    pool = store.active_pool()
+    pool = None if captions_disabled else store.active_pool()
     drawn: dict = {}
     if pool and need_pool:
         try:
@@ -211,8 +217,8 @@ def _assign_names(job_id: str, slots: list[Slot], n_rows: int,
 
     # Hashtags may come from somewhere other than the pool entirely — or be
     # replaced wholesale by a fixed CTA line drawn per video.
-    override = _hashtag_override(job_id, params or {})
-    fixed_tail = bool((params or {}).get("fixed_tail"))
+    override = [] if captions_disabled else _hashtag_override(job_id, params or {})
+    fixed_tail = not captions_disabled and bool((params or {}).get("fixed_tail"))
 
     rows = []
     used_sheet = used_pool = used_headline = 0
@@ -249,7 +255,7 @@ def _assign_names(job_id: str, slots: list[Slot], n_rows: int,
         meta = dict((existing.get(idx) or {}).get("meta") or {})
         meta.update({
             "batch": slot.batch, "row": slot.row,
-            "caption": caption, "hashtags": hashtags,
+            "caption": "" if captions_disabled else caption, "hashtags": hashtags,
             "short_name": short, "long_name": long_name,
         })
         store.update_item(job_id, idx, name=short, meta=meta)
@@ -261,10 +267,12 @@ def _assign_names(job_id: str, slots: list[Slot], n_rows: int,
         "from_headline": used_headline,
         "pool_id": pool["id"] if pool else None,
         "theme": pool.get("theme") if pool else None,
-        "hashtag_source": "fixed_tail" if fixed_tail else
-                          (params or {}).get("hashtag_source", "pool"),
-        "reason": None if pool else
-                  "No caption pool — names fall back to the sheet's Headline.",
+        "hashtag_source": ("none" if captions_disabled else
+                           "fixed_tail" if fixed_tail else
+                           (params or {}).get("hashtag_source", defaults.HASHTAG_SOURCE)),
+        "reason": ("Captions disabled — names use Headline." if captions_disabled else
+                   None if pool else
+                   "No caption pool — names fall back to the sheet's Headline."),
     }
 
 
@@ -1161,7 +1169,7 @@ def run(job: dict) -> dict:
     n_rows = len(df)
     n_batches = max(1, int(params.get("batches") or 1))
     n_folders = max(1, int(params.get("folders") or n_batches))
-    workers = max(1, int(params.get("workers") or 2))
+    workers = max(1, int(params.get("workers") or defaults.max_workers()))
 
     ws = workspace_from_dir(assets, work)
     slots = batching.plan_render(n_batches, n_rows)

@@ -35,9 +35,9 @@ Each output video is composed of:
    space the aspect ratio leaves over
 7. An optional **background-video layer** — a **flat pool** of videos (uploaded or from a
    Drive folder) that play **one after another** for the length of each video, exactly like
-   the GIF layer: each holds the frame for at least a **dwell time** (10s by default),
+   the GIF layer: each holds the frame for at least a **dwell time** (20s by default),
    repeating itself if it is shorter, and clips are dealt from a shuffled deck so every one
-   is used before any repeats. Drawn **translucent** (opacity slider, 8% by default) in a
+   is used before any repeats. Drawn **translucent** (opacity slider, 10% by default) in a
    box that defaults to the **full canvas** and is overridable per row via the `BG_Video_*`
    columns. It always sits **directly beneath the texts** and over every other layer at or
    below the texts' z-number — there is no z knob for it
@@ -65,6 +65,8 @@ python fetch_fonts.py
 # 4. Run the app
 streamlit run app.py
 ```
+
+Use **简体中文** / **English** in the top-right corner to switch the interface language across all pages. The choice is retained when navigating and refreshing; form settings and uploaded assets stay in place. A bookmarked `?lang=zh-CN` link opens directly in Simplified Chinese.
 
 The app opens in your browser at `http://localhost:8501`.
 
@@ -339,7 +341,7 @@ So the video made from **row 2** on **video 3.mp4** reads `sakfjn`.
 | No background — output only the panels | Split-screen only: crop the output to exactly the two panels (1080 × panel height). No background at all; texts/CTA overlay the videos |
 | Number of clip slots | How many CTA-video clip positions play in fixed order (1–10). Each is a pool; one sample is picked per output video |
 | Keep clips playing to fill the whole video | After the fixed slots, keep drawing fresh random clips until the side covers the full promo length (never freezes). Split-screen turns this on automatically |
-| Subliminal text (experimental) | *Apply to* picks **up to two** texts (Headline / Subheading / Footer, default off) that get split across frames so no single frame shows all of them — never all three at once; override per text via `<Role>_Subliminal`. *Effect style* = **Hide a slice** (bright, recommended) or **Show only a slice** (~1/K brightness, faint). For Hide: *Hidden characters* = **Random each cycle** (balanced, non-repeating; default) or **Fixed pattern**, and *Hidden per frame (%)* sets how much is hidden (≈33% stays bright and hides each character exactly once per cycle; higher is fainter). Tunable K (frames/cycle), word/char granularity, and *Preserve frame-by-frame* (all-intra, larger files). Certain known texts carry a **hand-authored schedule** (see `CUSTOM_SUBLIMINAL_SCHEDULES` in `video_generator.py`) that replaces all of these settings and the last-4 rule. See the caveats above |
+| Subliminal text (experimental) | *Apply to* picks **up to two** texts (Headline / Subheading / Footer, default Subheading) that get split across frames so no single frame shows all of them — never all three at once; override per text via `<Role>_Subliminal`. *Effect style* = **Hide a slice** (bright, recommended) or **Show only a slice** (~1/K brightness, faint). For Hide: *Hidden characters* = **Random each cycle** (balanced, non-repeating; default) or **Fixed pattern**, and *Hidden per frame (%)* sets how much is hidden (≈33% stays bright and hides each character exactly once per cycle; higher is fainter). Tunable K (frames/cycle), word/char granularity, and *Preserve frame-by-frame* (all-intra, larger files). Certain known texts carry a **hand-authored schedule** (see `CUSTOM_SUBLIMINAL_SCHEDULES` in `video_generator.py`) that replaces all of these settings and the last-4 rule. See the caveats above |
 | Speech engine | Which model reads the scripts: **Kokoro** or **Pocket TTS (Kyutai)**. An engine that is not installed on this machine is labelled rather than hidden. The two share no voice names, so the *Voices* list below re-offers itself when this changes — and Pocket TTS has no speaking-speed control, so that slider greys out. See *Voiceover and timed captions* |
 | Frame rate (fps) | 30 or 60. 60 doubles the frames to encode but halves the subliminal cycle (K/fps s), so the effect blends more smoothly. Both upload fine to every major platform |
 | Randomize position per video | Each video gets its own random spot per row (avoids the CTA and explicitly positioned texts; auto-placed texts then avoid the video). Seeded per row, so previews and re-runs are reproducible. Ignored in split-screen mode |
@@ -357,14 +359,14 @@ So the video made from **row 2** on **video 3.mp4** reads `sakfjn`.
 | GIF box X/Y/W/H | The box gifs are fitted into. It is an **invisible fit guide**, not a visible panel — nothing is drawn for it. Overridable per row via `GIF_X`/`GIF_Y`/`GIF_Width`/`GIF_Height` |
 | GIF fade-in start / duration | When the gif layer fades in and for how long. Defaults to 0/0 (visible from the first frame), which is also exactly what the static preview shows. Applies to the first gif only — the rest of the sequence cuts straight in. Overridable per row via `GIF_Fade_Start` / `GIF_Fade_Duration` |
 | Background videos (MP4) | The translucent overlay pool. **Flat, like the gifs** — clips play back-to-back for the length of each video, dealt from a shuffled deck (seeded per row, so previews and re-runs match). Leave empty to skip the layer. Can come from a Drive folder instead — see *Where the background videos come from* |
-| Minimum seconds per background video | The dwell floor (default 10, longer than the GIF floor). A clip shorter than this repeats **itself** a whole number of times to clear it; one already longer plays once, in full. Sidebar-only, like the GIF floor — it is batch-wide pacing |
-| Background video opacity | How visible the pool's clips are (1–50%, default 8). Keep it low so texts stay legible; 0 would disable the layer, so the slider floors at 1 |
+| Minimum seconds per background video | The dwell floor (default 20, longer than the GIF floor). A clip shorter than this repeats **itself** a whole number of times to clear it; one already longer plays once, in full. Sidebar-only, like the GIF floor — it is batch-wide pacing |
+| Background video opacity | How visible the pool's clips are (1–50%, default 10). Keep it low so texts stay legible; 0 would disable the layer, so the slider floors at 1 |
 | Background video box | The box the row's clip is **cover-filled** into (scaled + center-cropped). Defaults to the **full canvas**; overridable per row via `BG_Video_X`/`BG_Video_Y`/`BG_Video_Width`/`BG_Video_Height` |
 | Music tracks | The music bed's pool (MP3/WAV/M4A/AAC/OGG/OPUS/FLAC). **Flat, like the gifs and background videos** — tracks play back-to-back for the length of each video, dealt from a shuffled deck (seeded per row). Leave empty to skip the layer. Can come from a Drive folder instead — see *Where the music comes from* |
-| Music volume | The music's share of the mix (0–100%, default 0 = off). The promo video's own audio takes the rest: 10% music leaves the original at 90%. Linear gain, so 10% is about −20 dB. A promo with **no** audio track of its own plays the music at full volume instead, and says so in the row's warnings — there is nothing to mix it against |
-| Minimum seconds per track | The music dwell floor (default 30, longest of the three). A track shorter than this repeats **itself** a whole number of times to clear it; one already longer plays once. Sidebar-only, like the other two floors |
-| Split the audio track (random speed) | Cuts the promo video's **own** audio into equal chunks and replays each at its own random speed — fast in places, slow in others, and still ending exactly with the picture. Sound and vision drift apart mid-video by design. Pitch is preserved (`atempo`), so voices do not go chipmunk. Seeded per row, so every output in the batch warps differently and re-running a sheet reproduces it exactly. Off by default, and off means the audio path is exactly what it was before this setting existed |
-| Chunks / Speed variation | Split-audio only. **Chunks** (2–24, default 8) is how many pieces the audio is cut into — more chunks means the speed changes more often, and the change is audible at each seam. **Speed variation** (5–60%, default 35) is how far each chunk strays from normal: 35% keeps every chunk between 0.74× and 1.54×, 60% between 0.63× and 2.5×. The band is a guarantee rather than an average — see below. Past about 50% the slow parts smear and the fast parts gabble |
+| Music volume | The music's share of the mix (0–100%, default 10; 0 turns music off). The promo video's own audio takes the rest: 10% music leaves the original at 90%. Linear gain, so 10% is about −20 dB. A promo with **no** audio track of its own plays the music at full volume instead, and says so in the row's warnings — there is nothing to mix it against |
+| Minimum seconds per track | The music dwell floor (default 20). A track shorter than this repeats **itself** a whole number of times to clear it; one already longer plays once. Sidebar-only, like the other two floors |
+| Split the audio track (random speed) | Cuts the promo video's **own** audio into equal chunks and replays each at its own random speed — fast in places, slow in others, and still ending exactly with the picture. Sound and vision drift apart mid-video by design. Pitch is preserved (`atempo`), so voices do not go chipmunk. Seeded per row, so every output in the batch warps differently and re-running a sheet reproduces it exactly. On by default; turning it off preserves the promo audio timing |
+| Chunks / Speed variation | Split-audio only. **Chunks** (2–24, default 4) is how many pieces the audio is cut into — more chunks means the speed changes more often, and the change is audible at each seam. **Speed variation** (5–60%, default 10) is how far each chunk strays from normal: 35% keeps every chunk between 0.74× and 1.54×, 60% between 0.63× and 2.5×. The band is a guarantee rather than an average — see below. Past about 50% the slow parts smear and the fast parts gabble |
 | Layer order (z-index) | Which layer sits on top: promo video (1), **GIFs (2)**, CTA video (3), CTA image (4), texts (5). Higher = nearer the front; the background is always at the back. Raise the gif number above the promo video's to float a gif over the video instead of behind it. The **background videos have no number**: they always sit directly beneath the texts, over any layer numbered at or below the texts — a layer raised *above* the texts also rises above the veil |
 | Default font | The font used when a text's `*_Font` cell is blank — a bundled family, the system font, or your uploaded font |
 | Default artistic style | The style used when a text's `*_Style` cell is blank — `classic`, `outline`, `shadow`, or `neon` |
@@ -436,6 +438,51 @@ Uploaded assets are deleted as soon as a job finishes; finished job folders are 
 after a configurable retention period (7 days by default). The copy kept for **Reuse a
 previous job** (below) is separate and survives both.
 
+### Global defaults and parameter presets
+
+New generation sessions use the operator settings in
+`docs/common_parameter_settings.txt`: background video opacity 10%, background and music
+minimum duration 20 seconds, music volume 10%, audio splitting enabled with 4
+chunks and 10% speed variation. Subliminal text targets Subheading, with K=7,
+55% hidden per frame, word splitting and independent-frame encoding off. Encoding
+uses `veryfast`; parallel renders start at the panel maximum for the current machine.
+The four material sources start in Drive mode with the supplied folder links.
+Hashtags are off and publishing defaults to YouTube only. The default notification
+recipient is `founder@quislab.com`, and the output folder is the one in the settings
+document. Explicit deployment environment settings still override the email,
+output folder and publish-platform defaults.
+
+Use **Parameter presets** at the top of the sidebar to save settings before uploading
+files or queuing a job:
+
+- Enter a name and choose **Save new preset**. Names are unique; **Overwrite selected**
+  updates the selected preset under its existing name.
+- **Apply preset** restores all its settings. Parameters missing from an older preset
+  use current defaults. Settings hidden by a mode or toggle are retained, including
+  per-engine voices and inactive CTA slot speeds.
+- **Download preset Excel** exports the selected saved preset. In the `Parameters`
+  sheet, edit the blue `value` column. Numbers use the panel's units (10 means 10%,
+  not 0.10); booleans use TRUE/FALSE and multiple choices use commas. Prompts may
+  contain multiple lines. Keep the keys, headers and format version intact.
+- Upload the edited workbook under **Import parameter preset**, then choose
+  **Apply imported parameters**. Save it separately to keep it on the server.
+  Missing rows use defaults; blank text/list cells clear those values. Blank numbers,
+  formulas, duplicate/unknown keys and invalid values are rejected before any setting
+  changes. Parallel renders must fit the importing machine's panel limit.
+- **Delete parameter preset** requires confirmation.
+
+Parameter presets include generation settings and source modes. They exclude uploads,
+material URLs, account links, previous scrape selections, batch names, output addresses,
+notification emails and preview selections. Applying one preserves current files,
+including files reused from a previous job, and saved row edits. Row-level Excel values
+continue to override panel settings. Old preview results are cleared; applying a preset
+does not queue work.
+
+These shared presets live under `BVG_PRESETS_ROOT/parameter_presets/` as JSON records.
+They survive restarts and remain until explicitly deleted. The historical-job count
+limit and file cleanup do not remove them. Changing a setting in a session does not
+change the global defaults.
+
 ### Reuse a previous job
 
 Every batch you queue is saved — every setting on the page and every file it used — under
@@ -459,6 +506,21 @@ The per-row preview choices (row number, which promo to preview) and the "Which 
 pick are not saved — the scrapes on the server change over time.
 
 ### Upload progress
+
+Promo videos can also come from a **Google Drive folder**. Upload the originals
+to Drive before starting the VM, share the folder with the app's service account
+(Viewer access is enough), then choose **Google Drive folder** under **Promo video
+source**, paste its link, and click **Read promo video list**. This reads filenames
+and sizes without downloading the videos. Submit the job to download them directly
+to the server in the background; the browser can be closed once the job is queued.
+Preview and Render Row download only the selected promo.
+
+The list includes videos in subfolders, up to 600 originals. Batch defaults and
+per-promo text sheets use this list just as they use uploaded filenames. The job
+keeps the submitted file IDs and order, and a restarted worker skips complete
+downloads. A failed promo download stops the job before rendering, keeping batch
+and text assignments intact. After loading a saved job, read the folder list again
+before submitting.
 
 While the browser is uploading, a panel in the bottom-right corner shows every file in
 flight together: how many are done, how many MB of the total, speed and time left. While
@@ -847,6 +909,15 @@ Your evening routine deserves better than this #skincareroutine #asmrsounds #for
 
 The exception is a caption too long to fit even beside a single hashtag: it is being
 truncated either way, so the full set is kept rather than losing tags for nothing.
+
+### No publishing captions
+
+Choose **Captions → None** to skip caption generation and ignore the active
+pool and the sheet's `Caption` / `Hashtags` columns. Hashtags and the fixed
+call-to-action are switched off. Files use each video's `Headline`, including
+per-promo text overrides, with the usual length limit and duplicate numbering.
+The output manifests leave `Caption` and `Hashtags` blank. Voiceover and
+on-screen text keep their own settings.
 
 ### A fixed call-to-action instead of hashtags
 

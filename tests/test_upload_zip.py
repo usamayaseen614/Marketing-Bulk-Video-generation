@@ -14,6 +14,7 @@ import os, sys, tempfile, zipfile
 from pathlib import Path
 
 os.environ["BVG_IGNORE_DOTENV"] = "1"
+os.environ["BVG_UPLOAD_PLATFORMS"] = "yt,tk"
 os.environ["BVG_JOBS_ROOT"] = tempfile.mkdtemp(prefix="upzip_")
 os.environ["BVG_DRIVE_SHARED_DRIVE_ID"] = "0AFakeSharedDrive"
 

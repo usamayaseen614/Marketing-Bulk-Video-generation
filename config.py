@@ -17,6 +17,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import generation_defaults as defaults
+
 # A .env file is a convenience, not a requirement.
 #
 # BVG_IGNORE_DOTENV exists for the test suite. Without it, a developer's real
@@ -279,7 +281,7 @@ SMTP_PASSWORD = _str("BVG_SMTP_PASSWORD").replace(" ", "")
 SMTP_STARTTLS = _bool("BVG_SMTP_STARTTLS", True)
 
 MAIL_FROM = _str("BVG_MAIL_FROM") or SMTP_USER
-MAIL_TO = _list("BVG_MAIL_TO")
+MAIL_TO = _list("BVG_MAIL_TO", defaults.MAIL_TO)
 
 # Attach the updated Excel when it is under this size; link to Drive otherwise.
 MAIL_MAX_ATTACHMENT_BYTES = _int("BVG_MAIL_MAX_ATTACHMENT_BYTES", 15 * 1024 * 1024)
@@ -302,9 +304,8 @@ def mail_configured() -> bool:
 # folder shared with it fails outright.
 DRIVE_SHARED_DRIVE_ID = _str("BVG_DRIVE_SHARED_DRIVE_ID")
 
-# Optional folder inside that Shared Drive to act as the root for everything the
-# app writes. Blank = the Shared Drive root.
-DRIVE_ROOT_FOLDER_ID = _str("BVG_DRIVE_ROOT_FOLDER_ID")
+# Default output folder. An explicit environment value overrides the operator default.
+DRIVE_ROOT_FOLDER_ID = _str("BVG_DRIVE_ROOT_FOLDER_ID", defaults.DRIVE_FOLDER)
 
 # Path to a service-account JSON key. Leave blank on the GCP VM: Application
 # Default Credentials pick up the VM's attached service account, so there is no
@@ -356,7 +357,7 @@ UPLOAD_MODE = _str("BVG_UPLOAD_MODE", "zip").lower()
 # platform halves that to something that fits, and the other can go the next
 # day — the videos are kept on the VM until every selected platform has been
 # published, and a requeued job skips what already landed.
-UPLOAD_PLATFORMS = _list("BVG_UPLOAD_PLATFORMS", "yt,tk")
+UPLOAD_PLATFORMS = _list("BVG_UPLOAD_PLATFORMS", defaults.UPLOAD_PLATFORMS)
 
 # In `zip` mode, delete an output folder's MP4s once BOTH of its archives are
 # verified in Drive. Rendering 16,000 videos needs ~500 GB of disk; this keeps

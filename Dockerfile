@@ -78,6 +78,7 @@ COPY captions/ captions/
 COPY speech/ speech/
 COPY scrapers/ scrapers/
 COPY pages/ pages/
+COPY locales/ locales/
 COPY fonts/ fonts/
 # Operator scripts, run with `docker exec` — tools/zip_drive_tk.py repacks
 # folders that are already in Drive, which is work done ON the VM (its link to

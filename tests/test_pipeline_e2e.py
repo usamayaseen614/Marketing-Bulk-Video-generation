@@ -77,6 +77,7 @@ df.to_excel(assets / "input.xlsx", index=False, engine="openpyxl")
 store.create_job(
     kind=store.KIND_PIPELINE,
     params={
+        "hashtag_source": "pool",
         "render_config": asdict(RenderConfig(crf=30, preset="veryfast")),
         "workers": 4, "batches": N_BATCHES, "folders": N_BATCHES, "make_zip": False,
         "clip_source": "scrape_job", "clips_from_job": scrape_id,
@@ -154,7 +155,7 @@ stage_uploads(a2, [Fake(SA / "promo.mp4")], Fake(SA / "backgrounds.zip"), None, 
 df.to_excel(a2 / "input.xlsx", index=False, engine="openpyxl")
 store.create_job(
     kind=store.KIND_PIPELINE,
-    params={"render_config": asdict(RenderConfig(crf=30, preset="veryfast")),
+    params={"hashtag_source": "pool", "render_config": asdict(RenderConfig(crf=30, preset="veryfast")),
             "workers": 2, "batches": 1, "folders": 1, "make_zip": False,
             "clip_source": "scrape_job", "clips_from_job": "does-not-exist",
             "slots": 5, "clips_per_slot": 10},

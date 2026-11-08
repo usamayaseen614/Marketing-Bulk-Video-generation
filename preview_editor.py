@@ -31,6 +31,9 @@ from pathlib import Path
 
 import streamlit.components.v1 as components
 
+from i18n import t
+from video_generator import FONT_CHOICES, TEXT_STYLES
+
 # On-screen width of the 1080px-wide canvas (scale ~= 0.39, height ~= 747px).
 STAGE_W = 420
 EDITOR_HEIGHT = 790  # iframe height (the component sets it via setFrameHeight)
@@ -93,7 +96,31 @@ def preview_editor(payload: dict, nonce: str, key: str = "preview_editor"):
     Excel column names to the edited values. The nonce identifies which
     preview the save belongs to (stale values echo back on reruns); the token
     is unique per click so the app can tell a new save from an echo."""
-    return _component(payload=payload, nonce=nonce, key=key, default=None)
+    return _component(payload=payload, nonce=nonce, key=key, default=None,
+                      translations={text: t(text) for text in (*_EDITOR_TEXT, *FONT_CHOICES, *TEXT_STYLES)})
+
+
+_EDITOR_TEXT = (
+    'Excel values',
+    'Drag elements to move them, drag the corner handle to resize (texts resize their font size — but a text with a dashed fit box resizes the box instead, and re-fits its type when you preview again), recolor texts with the swatches, and give any text a background box with the bg swatch (“none” removes it). The opacity sliders make a text — or just its box — translucent, so the video shows through. Font and artistic style come from the sidebar / Excel and are shown for reference. A dotted line appears when an element is centered on the canvas. Changed values are highlighted — click “Save to Excel” to apply them to your sheet in one go.',
+    'Column',
+    'Was',
+    'Now',
+    '💾 Save to Excel',
+    'Copy changed values',
+    'Reset',
+    'No changes yet — drag something!',
+    'Clip 1 of {0} in this video',
+    'GIF 1 of {0} in this video',
+    'Background video 1 of {0} in this video',
+    '⚡ subliminal · {0} frames',
+    '{0} fit box — drag the corner to resize; the text re-fits when you preview again',
+    'none',
+    'Saved ✓',
+    'Headline',
+    'Subheading',
+    'Footer',
+)
 
 
 _TEMPLATE = r"""
@@ -172,19 +199,10 @@ _TEMPLATE = r"""
 <div id="wrap">
   <div id="stage"></div>
   <div id="panel">
-    <h3>Excel values</h3>
-    <div class="hint">Drag elements to move them, drag the corner handle to resize
-      (texts resize their font size — but a text with a dashed <em>fit box</em> resizes
-      the box instead, and re-fits its type when you preview again), recolor texts
-      with the swatches, and give any
-      text a background box with the bg swatch (“none” removes it). The opacity
-      sliders make a text — or just its box — translucent, so the video shows
-      through. Font and artistic
-      style come from the sidebar / Excel and are shown for reference. A dotted line
-      appears when an element is centered on the canvas. Changed values are
-      highlighted — click “Save to Excel” to apply them to your sheet in one go.</div>
+    <h3 id="valuesTitle">Excel values</h3>
+    <div class="hint" id="editorHint">Drag elements to move them, drag the corner handle to resize (texts resize their font size — but a text with a dashed fit box resizes the box instead, and re-fits its type when you preview again), recolor texts with the swatches, and give any text a background box with the bg swatch (“none” removes it). The opacity sliders make a text — or just its box — translucent, so the video shows through. Font and artistic style come from the sidebar / Excel and are shown for reference. A dotted line appears when an element is centered on the canvas. Changed values are highlighted — click “Save to Excel” to apply them to your sheet in one go.</div>
     <table class="vals">
-      <thead><tr><th>Column</th><th>Was</th><th>Now</th></tr></thead>
+      <thead><tr><th id="columnTitle">Column</th><th id="wasTitle">Was</th><th id="nowTitle">Now</th></tr></thead>
       <tbody id="rows"></tbody>
     </table>
     <div id="btnRow">
@@ -206,6 +224,33 @@ _TEMPLATE = r"""
   const saveBtn = document.getElementById('saveBtn');
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   let saveSeq = 0;
+  let messages = {};
+  const localized = new Map();
+  function text(message, ...values) {
+    return (messages[message] || message).replace(/\{(\d+)\}/g,
+      (_, index) => String(messages[values[Number(index)]] || values[Number(index)]));
+  }
+  function label(element, property, message, ...values) {
+    localized.set(element, {property, message, values});
+    element[property] = text(message, ...values);
+  }
+  function setLanguage(translations) {
+    messages = translations || {};
+    localized.forEach((entry, element) => {
+      if (!element.isConnected) { localized.delete(element); return; }
+      element[entry.property] = text(entry.message, ...entry.values);
+    });
+  }
+  label(document.getElementById("valuesTitle"), "textContent", "Excel values");
+  label(document.getElementById("editorHint"), "textContent", "Drag elements to move them, drag the corner handle to resize (texts resize their font size — but a text with a dashed fit box resizes the box instead, and re-fits its type when you preview again), recolor texts with the swatches, and give any text a background box with the bg swatch (“none” removes it). The opacity sliders make a text — or just its box — translucent, so the video shows through. Font and artistic style come from the sidebar / Excel and are shown for reference. A dotted line appears when an element is centered on the canvas. Changed values are highlighted — click “Save to Excel” to apply them to your sheet in one go.");
+  label(document.getElementById("columnTitle"), "textContent", "Column");
+  label(document.getElementById("wasTitle"), "textContent", "Was");
+  label(document.getElementById("nowTitle"), "textContent", "Now");
+  label(document.getElementById("saveBtn"), "textContent", "💾 Save to Excel");
+  label(document.getElementById("copyBtn"), "textContent", "Copy changed values");
+  label(document.getElementById("resetBtn"), "textContent", "Reset");
+  label(copyBox, "placeholder", "No changes yet — drag something!");
+
 
   function post(type, extra) {
     window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, extra), '*');
@@ -369,7 +414,7 @@ _TEMPLATE = r"""
     // Promo Alternate: this box plays a sequence of clips rather than one promo,
     // so a still can only ever show the first of them. Same admission the gif
     // and background-video boxes make below. Absent outside that mode.
-    if (v.count > 1) videoEl.title = 'Clip 1 of ' + v.count + ' in this video';
+    if (v.count > 1) label(videoEl, 'title', 'Clip 1 of {0} in this video', v.count);
     stage.appendChild(videoEl);
     const videoItem = {
       x: v.x, y: v.y, w: v.w, h: v.h,
@@ -541,7 +586,7 @@ _TEMPLATE = r"""
       gEl.style.zIndex = (Z.gif === undefined ? 2 : Z.gif);
       // A still can show one gif of the sequence and no motion at all, so say
       // so on the box rather than implying this frame is the whole layer.
-      if (g.count > 1) gEl.title = 'GIF 1 of ' + g.count + ' in this video';
+      if (g.count > 1) label(gEl, 'title', 'GIF 1 of {0} in this video', g.count);
       // DOM order breaks z-index ties; the gif is the lowest overlay after the
       // promo video, so put it under whatever already exists.
       if (cvEl) stage.insertBefore(gEl, cvEl);
@@ -610,7 +655,7 @@ _TEMPLATE = r"""
       bvFrame.style.opacity = (bv.opacity == null ? 1 : bv.opacity);
       bvEl.appendChild(bvFrame);
       bvEl.style.zIndex = Z.text;
-      if (bv.count > 1) bvEl.title = 'Background video 1 of ' + bv.count + ' in this video';
+      if (bv.count > 1) label(bvEl, 'title', 'Background video 1 of {0} in this video', bv.count);
       stage.appendChild(bvEl);
       const bvItem = {
         x: bv.x, y: bv.y, w: bv.w, h: bv.h,
@@ -698,7 +743,7 @@ _TEMPLATE = r"""
       // whole-in-motion look. (See build_subliminal_layers.)
       if (t.subliminal) {
         const badge = document.createElement('div');
-        badge.textContent = '⚡ subliminal · ' + (t.subliminal_k || '?') + ' frames';
+        label(badge, 'textContent', '⚡ subliminal · {0} frames', t.subliminal_k || '?');
         badge.style.cssText = 'position:absolute;left:0;top:-16px;font-size:9px;'
           + 'line-height:14px;padding:0 4px;white-space:nowrap;border-radius:3px;'
           + 'background:rgba(120,0,180,.85);color:#fff;pointer-events:none;z-index:99;';
@@ -718,8 +763,7 @@ _TEMPLATE = r"""
         boxEl = document.createElement('div');
         boxEl.className = 'fitbox';
         boxEl.style.zIndex = Z.text;
-        boxEl.title = t.role + ' fit box — drag the corner to resize; the text '
-          + 're-fits when you preview again';
+        label(boxEl, 'title', '{0} fit box — drag the corner to resize; the text re-fits when you preview again', t.role);
         stage.appendChild(boxEl);
       }
       const item = {
@@ -854,6 +898,9 @@ _TEMPLATE = r"""
         const tdNow = document.createElement('td');
         tdName.textContent = col[0];
         tdWas.textContent = col[1];
+        if (col[0].endsWith('_Font') || col[0].endsWith('_Style')) {
+          label(tdWas, 'textContent', String(col[1]));
+        }
         const nowSpan = document.createElement('span');
         tdNow.appendChild(nowSpan);
         if (col[0].endsWith('_BgColor')) {
@@ -866,7 +913,7 @@ _TEMPLATE = r"""
           const off = document.createElement('button');
           off.type = 'button';
           off.className = 'miniBtn';
-          off.textContent = 'none';
+          label(off, 'textContent', 'none');
           off.addEventListener('click', () => { item.setBg(null); refresh(); });
           tdNow.append(picker, off);
         } else if (col[0].endsWith('_BgOpacity') || col[0].endsWith('_Opacity')) {
@@ -905,7 +952,11 @@ _TEMPLATE = r"""
       const changed = [];
       rowDefs.forEach(def => {
         const col = def.item.cols()[def.idx];
-        def.nowSpan.textContent = col[2];
+        if (col[0].endsWith('_Font') || col[0].endsWith('_Style')) {
+          label(def.nowSpan, 'textContent', String(col[2]));
+        } else {
+          def.nowSpan.textContent = col[2];
+        }
         const isChanged = String(col[1]) !== String(col[2]);
         def.tr.classList.toggle('changed', isChanged);
         if (isChanged) changed.push(col[0] + ' = ' + col[2]);
@@ -942,9 +993,8 @@ _TEMPLATE = r"""
         dataType: 'json',
         value: { nonce: nonce, token: Date.now() + '-' + (++saveSeq), values: values },
       });
-      const label = saveBtn.textContent;
-      saveBtn.textContent = 'Saved ✓';
-      setTimeout(() => { saveBtn.textContent = label; }, 1500);
+      saveBtn.textContent = text('Saved ✓');
+      setTimeout(() => { saveBtn.textContent = text('💾 Save to Excel'); }, 1500);
     };
   }
 
@@ -958,6 +1008,7 @@ _TEMPLATE = r"""
       if (!m || m.type !== 'streamlit:render' || !m.args || !m.args.payload) return;
       // Streamlit re-renders on every rerun; only rebuild when the previewed
       // row actually changed, so in-progress edits survive app reruns.
+      setLanguage(m.args.translations);
       if (m.args.nonce === lastNonce) return;
       lastNonce = m.args.nonce;
       init(m.args.payload, m.args.nonce);

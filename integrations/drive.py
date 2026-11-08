@@ -1298,17 +1298,27 @@ def download_folder(
     actually missing. One bad file is reported rather than raised, exactly as
     upload_many() does — a single unreadable clip should not throw away a
     download that otherwise succeeded."""
+    info = folder_info(folder_id)
+    files = list_videos(info["id"], kind=kind)
+    return {"folder": info["name"], "folder_id": info["id"],
+            **download_files(files, dest_dir, concurrency, on_progress)}
+
+
+def download_files(
+    files: list[dict],
+    dest_dir: Path,
+    concurrency: Optional[int] = None,
+    on_progress: Optional[Callable[[int, int], None]] = None,
+) -> dict:
+    """Download a saved file list without re-listing or changing its order."""
     from concurrent.futures import as_completed
 
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
-    info = folder_info(folder_id)
-    files = list_videos(info["id"], kind=kind)
     names = local_names(files)
     total = len(files)
 
-    report = {"folder": info["name"], "folder_id": info["id"], "files": total,
-              "downloaded": 0, "skipped": 0, "failed": 0, "bytes": 0,
+    report = {"files": total, "downloaded": 0, "skipped": 0, "failed": 0, "bytes": 0,
               "errors": []}
     if not total:
         return report

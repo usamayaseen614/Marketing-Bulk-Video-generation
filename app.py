@@ -6,7 +6,6 @@ Run with:  streamlit run app.py
 
 import io
 import logging
-import os
 import tempfile
 import uuid
 from dataclasses import asdict
@@ -14,6 +13,8 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+
+from i18n import t, localize_format, language_header, option_labels, stage_label
 from openpyxl import load_workbook
 
 import batching
@@ -25,6 +26,8 @@ from speech import synth as speech_synth
 from captions import naming as caption_naming
 import presets
 import presets_ui
+import parameter_presets_ui
+import generation_defaults as defaults
 import upload_progress
 from jobs import store
 from preview_editor import preview_editor
@@ -94,7 +97,7 @@ def make_generator(ws: Workspace, config: RenderConfig, output_dir: Path) -> Vid
     # Bad uploads caught at construction (e.g. an audio-only "video" clip that
     # would crash FFmpeg mid-render) — show them wherever a generator is built.
     for message in generator.input_warnings:
-        st.warning(message)
+        st.warning(t(message))
     return generator
 
 
@@ -109,11 +112,10 @@ def sample_script(prompt: str) -> str:
         return cached["script"]
     from captions.pool import generate_scripts
     try:
-        with st.spinner("Writing a sample script with Gemini…"):
+        with st.spinner(t("Writing a sample script with Gemini…")):
             script = (generate_scripts(prompt, 1) or [""])[0]
     except Exception as exc:  # noqa: BLE001
-        st.warning(f"Couldn't write a sample script ({exc}) — this row has no "
-                   "narration here.")
+        st.warning(t("Couldn't write a sample script ({0}) — this row has no narration here.", exc))
         return ""
     st.session_state["sample_script"] = {"prompt": prompt, "script": script}
     return script
@@ -233,11 +235,13 @@ def updated_excel_bytes(excel_bytes: bytes, edits: dict[int, dict]) -> bytes:
 ui_common.ensure_static_dir()
 store.init_db()
 
-st.set_page_config(page_title="Bulk Video Generator", page_icon="🎬", layout="wide")
-st.title("🎬 Bulk Marketing Video Generator")
+st.set_page_config(page_title=t("Bulk Video Generator"), page_icon="🎬", layout="wide")
+language_header()
+
+st.title(t("🎬 Bulk Marketing Video Generator"))
 st.caption(
-    "Upload an Excel sheet, a promo video, background images, and an optional CTA "
-    "image — get one 1080x1920 (9:16) MP4 per row, ready for Reels, TikTok, and Shorts."
+    t("Upload an Excel sheet, a promo video, background images, and an optional CTA "
+    "image — get one 1080x1920 (9:16) MP4 per row, ready for Reels, TikTok, and Shorts.")
 )
 # Before any widget: keep() registers this run's fields into a fresh list, and
 # the panel's Load/Clear callbacks have already rewritten session state.
@@ -247,60 +251,61 @@ presets_ui.panel()
 
 # ---- sidebar: layout & output configuration
 with st.sidebar:
-    st.header("⚙️ Settings")
+    st.header(t("⚙️ Settings"))
+    parameter_presets_ui.panel()
 
-    st.subheader("Layout")
+    st.subheader(t("Layout"))
     layout_mode = st.radio(
-        "Layout mode",
+        t("Layout mode"),
         options=["free", "split"],
-        format_func=lambda m: {"free": "Free (place each box)",
-                               "split": "Split-screen (side-by-side)"}[m],
-        help="Free = every box is positioned by its own coordinates. "
+        format_func=option_labels(["free", "split"], lambda m: {"free": t("Free (place each box)"),
+                               "split": t("Split-screen (side-by-side)")}[m]),
+        help=t("Free = every box is positioned by its own coordinates. "
              "Split-screen = the main video fills one half and the side clips "
-             "fill the other, ending when the main video ends.",
+             "fill the other, ending when the main video ends."),
         key=keep("layout_mode"),
     )
     is_split = layout_mode == "split"
     if is_split:
         swap_sides = st.checkbox(
-            "Swap left / right",
+            t("Swap left / right"),
             value=False, key=keep("swap_sides"),
-            help="Off = main video left, side clips right. On = flip them.",
+            help=t("Off = main video left, side clips right. On = flip them."),
         )
         split_panel_h = st.number_input(
-            "Panel height (px)", 100, CANVAS_H, 960, 20, key=keep("split_panel_h"),
-            help="Height of the two side-by-side panels, centered vertically. "
-                 f"Full height is {CANVAS_H}; a shorter band leaves space above "
-                 "and below for text.",
+            t("Panel height (px)"), 100, CANVAS_H, 960, 20, key=keep("split_panel_h"),
+            help=t("Height of the two side-by-side panels, centered vertically. Full height is "
+                   "{0}; a shorter band leaves space above and below for text.", CANVAS_H),
         )
         crop_to_panels = st.checkbox(
-            "No background — output only the panels",
+            t("No background — output only the panels"),
             value=False, key=keep("crop_to_panels"),
-            help="The finished video is exactly the two panels (1080 × panel "
+            help=t("The finished video is exactly the two panels (1080 × panel "
                  "height) with no background at all. Texts and the CTA are drawn "
                  "ON TOP of the videos; auto-placed texts stay inside the band. "
-                 "Off = the full 1080×1920 canvas with a background.",
+                 "Off = the full 1080×1920 canvas with a background."),
         )
         st.caption(
-            "Split-screen needs side clips uploaded below (otherwise the other "
+            t("Split-screen needs side clips uploaded below (otherwise the other "
             "half is just background). The side keeps drawing fresh random clips "
             "until the main video ends. Note: the main video is fitted inside its "
-            "panel (letterboxed); side clips are cropped to fill theirs."
+            "panel (letterboxed); side clips are cropped to fill theirs.")
         )
     else:
         swap_sides = False
         split_panel_h = 960
         crop_to_panels = False
     bg_color = st.color_picker(
-        "Background color", "#1E1B4B", key=keep("bg_color"),
-        help="Used wherever a row has no background image — e.g. when no "
-             "background ZIP is uploaded (the ZIP is optional).",
+        t("Background color"), "#1E1B4B", key=keep("bg_color"),
+        help=t("Used wherever a row has no background image — e.g. when no "
+             "background ZIP is uploaded (the ZIP is optional)."),
     )
     bg_video_files = st.file_uploader(
-        "Background videos (MP4, optional)", type=["mp4"],
+        t("Background videos (MP4, optional)"), type=["mp4"],
+        on_change=presets_ui.upload_changed, args=("bg_video_pool",),
         key=presets_ui.uploader_key("bg_video_pool"),
         accept_multiple_files=True,
-        help="A pool of translucent overlay videos. They play one after "
+        help=t("A pool of translucent overlay videos. They play one after "
              "another for the length of each video — the same treatment as the "
              "GIFs, with its own dwell floor below — dealt from a shuffled "
              "deck so every clip is used before any repeats. Drawn directly "
@@ -308,109 +313,106 @@ with st.sidebar:
              "z-number, full-canvas unless the box below says otherwise. Can "
              "also come from a Drive folder — see 'Background video source' in "
              "the main panel. Note: it is composited on every frame, so expect "
-             "roughly 1.5–2.5× the render time per video.",
+             "roughly 1.5–2.5× the render time per video."),
     )
     bg_video_files = presets_ui.with_saved("bg_video_pool", bg_video_files,
                                            multiple=True)
     # Not gated on the uploader: the pool may arrive from Drive instead.
     bg_video_opacity = st.slider(
-        "Background video opacity (%)", 1, 50, 8, key=keep("bg_video_opacity"),
-        help="How visible the background videos are. Keep it low (≈8–15) so "
-             "texts stay legible.",
+        t("Background video opacity (%)"), 1, 50, defaults.BG_VIDEO_OPACITY, key=keep("bg_video_opacity"),
+        help=t("How visible the background videos are. Keep it low (≈8–15) so "
+             "texts stay legible."),
     )
     bg_video_min_seconds = st.number_input(
-        "Minimum seconds per background video", 1.0, 120.0, 10.0, 0.5,
+        t("Minimum seconds per background video"), 1.0, 120.0, defaults.BG_VIDEO_MIN_SECONDS, 0.5,
         key=keep("bg_video_min_seconds"),
-        help="The dwell floor. Clips play one after another for the length of "
+        help=t("The dwell floor. Clips play one after another for the length of "
              "the video; one shorter than this repeats itself until it clears "
              "the floor, one already longer plays once, in full. Longer than "
              "the GIF floor by default — this layer is ambience, and a bed "
-             "that changes every few seconds reads as flicker.",
+             "that changes every few seconds reads as flicker."),
     )
     st.caption(
-        f"At ~{bg_video_min_seconds:g}s each, a 20-second video shows about "
-        f"{max(1, int(20 // bg_video_min_seconds))} and a 60-second video about "
-        f"{max(1, int(60 // bg_video_min_seconds))} of them, dealt from a "
-        "shuffled deck so every clip is used once before any repeats."
+        t("At ~{0:g}s each, a 20-second video shows about {1} and a 60-second video about {2} of"
+          " them, dealt from a shuffled deck so every clip is used once before any repeats.", bg_video_min_seconds, max(1, int(20 // bg_video_min_seconds)), max(1, int(60 // bg_video_min_seconds)))
     )
-    with st.expander("Background video box (default: full canvas)"):
+    with st.expander(t("Background video box (default: full canvas)")):
         bgv_c1, bgv_c2 = st.columns(2)
-        bg_video_x = bgv_c1.number_input("BG video X", 0, CANVAS_W, 0, key=keep("bgv_x"))
-        bg_video_y = bgv_c2.number_input("BG video Y", 0, CANVAS_H, 0, key=keep("bgv_y"))
-        bg_video_w = bgv_c1.number_input("BG video width", 50, CANVAS_W,
+        bg_video_x = bgv_c1.number_input(t("BG video X"), 0, CANVAS_W, 0, key=keep("bgv_x"))
+        bg_video_y = bgv_c2.number_input(t("BG video Y"), 0, CANVAS_H, 0, key=keep("bgv_y"))
+        bg_video_w = bgv_c1.number_input(t("BG video width"), 50, CANVAS_W,
                                          CANVAS_W, key=keep("bgv_w"))
-        bg_video_h = bgv_c2.number_input("BG video height", 50, CANVAS_H,
+        bg_video_h = bgv_c2.number_input(t("BG video height"), 50, CANVAS_H,
                                          CANVAS_H, key=keep("bgv_h"))
 
-    st.subheader("Audio")
+    st.subheader(t("Audio"))
     music_files = st.file_uploader(
-        "Music tracks (optional)",
+        t("Music tracks (optional)"),
         type=["mp3", "wav", "m4a", "aac", "ogg", "opus", "flac"],
+        on_change=presets_ui.upload_changed, args=("music_pool",),
         key=presets_ui.uploader_key("music_pool"), accept_multiple_files=True,
-        help="A pool of music laid under the promo video's own sound. Tracks "
+        help=t("A pool of music laid under the promo video's own sound. Tracks "
              "play one after another for the length of each video — the same "
              "treatment as the background videos, with its own dwell floor "
              "below — dealt from a shuffled deck so every track is used before "
              "any repeats. Can also come from a Drive folder: see 'Music "
-             "source' in the main panel.",
+             "source' in the main panel."),
     )
     music_files = presets_ui.with_saved("music_pool", music_files, multiple=True)
     # Not gated on the uploader: the pool may arrive from Drive instead.
     music_volume = st.slider(
-        "Music volume (%)", 0, 100, 0, key=keep("music_volume"),
-        help="The music's share of the mix. The promo video's original audio "
+        t("Music volume (%)"), 0, 100, defaults.MUSIC_VOLUME, key=keep("music_volume"),
+        help=t("The music's share of the mix. The promo video's original audio "
              "takes the rest — 10% music leaves the original at 90%. 0 turns "
              "the layer off completely, and the audio comes out exactly as it "
-             "did before this setting existed.",
+             "did before this setting existed."),
     )
     if music_volume:
         st.caption(
-            f"Music at **{music_volume}%**, the promo's own audio at "
-            f"**{100 - music_volume}%**. A promo with no audio track of its own "
-            "plays the music at full volume instead — there is nothing to mix "
-            "it against.")
+            t("Music at **{0}%**, the promo's own audio at **{1}%**. A promo with no audio track"
+              " of its own plays the music at full volume instead — there is nothing to mix it "
+              "against.", music_volume, 100 - music_volume))
     music_min_seconds = st.number_input(
-        "Minimum seconds per track", 1.0, 600.0, float(MUSIC_MIN_SECONDS), 5.0,
+        t("Minimum seconds per track"), 1.0, 600.0, float(MUSIC_MIN_SECONDS), 5.0,
         key=keep("music_min_seconds"),
-        help="The dwell floor. Tracks play one after another for the length of "
+        help=t("The dwell floor. Tracks play one after another for the length of "
              "the video; one shorter than this repeats itself until it clears "
              "the floor, one already longer plays once. Long by default — a bed "
-             "that swaps every few seconds reads as a fault rather than a mix.",
+             "that swaps every few seconds reads as a fault rather than a mix."),
     )
     split_audio = st.checkbox(
-        "Split the audio track (random speed)", value=False,
+        t("Split the audio track (random speed)"), value=defaults.SPLIT_AUDIO,
         key=keep("split_audio"),
-        help="Cuts the promo video's OWN audio into equal chunks and replays "
+        help=t("Cuts the promo video's OWN audio into equal chunks and replays "
              "each at its own random speed, so it runs fast in places and slow "
              "in others — and still ends exactly with the picture. Sound and "
              "vision drift apart in the middle by design. Pitch is preserved, "
              "so voices do not go chipmunk. Every output video in the batch "
-             "warps differently.",
+             "warps differently."),
     )
     if split_audio:
         split_audio_chunks = st.slider(
-            "Chunks", 2, SPLIT_AUDIO_MAX_CHUNKS, int(SPLIT_AUDIO_CHUNKS),
+            t("Chunks"), 2, SPLIT_AUDIO_MAX_CHUNKS, int(SPLIT_AUDIO_CHUNKS),
             key=keep("split_audio_chunks"),
-            help="How many pieces the audio is cut into. More chunks = the "
-                 "speed changes more often; the change is audible at each seam.",
+            help=t("How many pieces the audio is cut into. More chunks = the "
+                 "speed changes more often; the change is audible at each seam."),
         )
         split_audio_spread = st.slider(
-            "Speed variation (%)", 5, int(SPLIT_AUDIO_MAX_SPREAD * 100),
+            t("Speed variation (%)"), 5, int(SPLIT_AUDIO_MAX_SPREAD * 100),
             int(SPLIT_AUDIO_SPREAD * 100), key=keep("split_audio_spread"),
-            help="How far each chunk strays from normal speed. 35% keeps "
+            help=t("How far each chunk strays from normal speed. 35% keeps "
                  "every chunk between 0.74x and 1.54x — the band is a "
                  "guarantee, not an average. Past about 50% the slow parts "
-                 "smear and the fast parts gabble.",
+                 "smear and the fast parts gabble."),
         ) / 100.0
         st.caption(
-            f"~{20 / max(1, split_audio_chunks):.1f}s per chunk on a 20-second "
-            "video. The chunks always add back up to the full length, so the "
-            "audio never runs short or long.")
+            t("~{0:.1f}s per chunk on a 20-second video. The chunks always add back up to the "
+              "full length, so the audio never runs short or long.", 20 / max(1, split_audio_chunks)))
     else:
         split_audio_chunks = SPLIT_AUDIO_CHUNKS
         split_audio_spread = SPLIT_AUDIO_SPREAD
 
-    st.subheader("Voiceover & captions")
+    st.subheader(t("Voiceover & captions"))
     # Asked for every engine, not just the selected one, so the dropdown can say
     # which are actually installed here instead of only reporting on the one
     # already chosen. available() caches per engine, so this costs one import
@@ -420,15 +422,15 @@ with st.sidebar:
     _engine_keys = list(speech_synth.ENGINES)
     _default_engine = speech_synth.normalize_engine(settings.VOICE_ENGINE)
     voice_engine = st.selectbox(
-        "Speech engine", _engine_keys,
+        t("Speech engine"), _engine_keys,
         index=_engine_keys.index(_default_engine), key=keep("voice_engine"),
-        format_func=lambda key: speech_synth.ENGINES[key] + (
-            "" if _engine_status[key][0] else " — not installed here"),
-        help="Which model reads the scripts. Kokoro takes a speaking speed and "
+        format_func=option_labels(_engine_keys, lambda key: t(speech_synth.ENGINES[key]) + (
+            "" if _engine_status[key][0] else t(" — not installed here"))),
+        help=t("Which model reads the scripts. Kokoro takes a speaking speed and "
              "an English accent; Pocket TTS (Kyutai) is smaller, installs on "
              "newer Pythons, and has no speed control. The two share no voice "
              "names, so the list below changes with this — and so does the "
-             "meaning of a row's `Voiceover_Voice` cell.",
+             "meaning of a row's `Voiceover_Voice` cell."),
     )
     _voice_ok, _voice_why = _engine_status[voice_engine]
     # Every one of these has to exist whether or not the feature is usable —
@@ -447,14 +449,14 @@ with st.sidebar:
 
     if _voice_ok:
         voice_enabled = st.checkbox(
-            "Speak the script and caption it on screen", value=False,
+            t("Speak the script and caption it on screen"), value=False,
             key=keep("voice_enabled"),
-            help="Reads each row's `Voiceover` text aloud and puts the words on "
+            help=t("Reads each row's `Voiceover` text aloud and puts the words on "
                  "screen as they are spoken, a few at a time. The timing comes "
                  "from the speech itself, so nothing has to be lined up by "
                  "hand. Leave a row's `Voiceover` cell blank to pull from the "
                  "script pool below; use `Screen_Text` to show different words "
-                 "than the ones being said.",
+                 "than the ones being said."),
         )
     else:
         # This engine is not here, but the CAPTION half needs no engine at all —
@@ -462,16 +464,16 @@ with st.sidebar:
         # timed-caption layer be built and previewed on a machine that cannot
         # run the model (Kokoro needs Python < 3.13), instead of the whole
         # feature looking broken.
-        st.caption(f"Not available on this machine — {_voice_why}")
+        st.caption(t("Not available on this machine — {0}", t(_voice_why)))
         if any(ok for ok, _ in _engine_status.values()):
-            st.caption("Another engine in the dropdown above IS installed here.")
+            st.caption(t("Another engine in the dropdown above IS installed here."))
         voice_enabled = st.checkbox(
-            "Show timed captions (no narration here)", value=False,
+            t("Show timed captions (no narration here)"), value=False,
             key=keep("voice_enabled"),
-            help="Puts each row's `Voiceover` (or `Screen_Text`) on screen a few "
+            help=t("Puts each row's `Voiceover` (or `Screen_Text`) on screen a few "
                  "words at a time, paced across the video. Identical to the full "
                  "feature minus the voice — install the engine, or deploy, and "
-                 "the same sheet starts speaking and syncs the captions to it.",
+                 "the same sheet starts speaking and syncs the captions to it."),
         )
     if voice_enabled and _voice_ok:
         _engine_voices = speech_synth.voices(voice_engine)
@@ -481,235 +483,233 @@ with st.sidebar:
         # whatever still fits and fall back to this engine's own default.
         _kept = [v for v in settings.VOICE_SET if v in _engine_voices]
         voice_set = st.multiselect(
-            "Voices", _engine_voices,
+            t("Voices"), _engine_voices,
             default=_kept or [speech_synth.default_voice(voice_engine)],
             # Per engine: the two share no voice names, and a key shared
             # between them would carry one engine's picks into the other's list.
             key=keep(f"voice_set_{voice_engine}"),
-            help="Rows rotate through these, so one posting folder is not all "
-                 "the same narrator. A row's `Voiceover_Voice` cell wins."
-                 + (" af_/am_ are American, bf_/bm_ British; *f_ female, "
-                    "*m_ male." if voice_engine == speech_synth.KOKORO else ""),
-        ) or [speech_synth.default_voice(voice_engine)]
+            help=t("Rows rotate through these, so one posting folder is not all "
+                 "the same narrator. A row's `Voiceover_Voice` cell wins.")
+                 + (t(" af_/am_ are American, bf_/bm_ British; *f_ female, "
+                    "*m_ male.") if voice_engine == speech_synth.KOKORO else ""),
+         format_func=option_labels(_engine_voices, localize_format(str))) or [speech_synth.default_voice(voice_engine)]
         _can_speed = speech_synth.supports_speed(voice_engine)
         voice_speed = st.slider(
             # Shown at 1.0 when the engine has no rate control, because that is
             # what the batch will actually use — a disabled slider still reading
             # the saved 1.15 while RenderConfig carries 1.0 is the quiet kind of
             # wrong. Switching back to Kokoro restores the saved value.
-            "Speaking speed", 0.7, 1.4,
+            t("Speaking speed"), 0.7, 1.4,
             float(settings.VOICE_SPEED) if _can_speed else 1.0, 0.05,
             disabled=not _can_speed,
             # Its own unsaved key while disabled, so switching back to an
             # engine with speed control brings the chosen speed back with it.
             key=keep("voice_speed") if _can_speed else "voice_speed_fixed",
-            help="1.0 is the model's natural pace. A row's `Voiceover_Speed` "
-                 "cell overrides it." if _can_speed else
-                 "This engine has no speaking-speed control, so neither this "
+            help=t("1.0 is the model's natural pace. A row's `Voiceover_Speed` "
+                 "cell overrides it.") if _can_speed else
+                 t("This engine has no speaking-speed control, so neither this "
                  "nor a row's `Voiceover_Speed` cell changes the pace. Rows "
-                 "that set one say so in their warnings.",
+                 "that set one say so in their warnings."),
         )
         if not _can_speed:
             voice_speed = 1.0
             st.caption(
-                f"{speech_synth.ENGINES[voice_engine]} has no speed control — "
-                "narration plays at the model's own pace.")
+                t("{0} has no speed control — narration plays at the model's own pace.", speech_synth.ENGINES[voice_engine]))
         beat_max_words = st.slider(
-            "Words per caption", 1, 8, int(settings.BEAT_MAX_WORDS),
+            t("Words per caption"), 1, 8, int(settings.BEAT_MAX_WORDS),
             key=keep("beat_max_words"),
-            help="How many words sit on screen at once. Three or four is the "
-                 "usual short-form look; higher reads more like a subtitle.",
+            help=t("How many words sit on screen at once. Three or four is the "
+                 "usual short-form look; higher reads more like a subtitle."),
         )
         screen_text_y = st.slider(
-            "Caption height (px from top)", 200, CANVAS_H - 200,
+            t("Caption height (px from top)"), 200, CANVAS_H - 200,
             int(settings.SCREEN_TEXT_Y), 10, key=keep("screen_text_y"),
-            help="Where the caption band sits. Fixed rather than randomised "
+            help=t("Where the caption band sits. Fixed rather than randomised "
                  "per row — a caption that moved between videos in a folder "
                  "would read as a fault. `Screen_Text_X`/`Screen_Text_Y` cells "
-                 "override it.",
+                 "override it."),
         )
         voice_lead_in = st.number_input(
-            "Silence before the first word (s)", 0.0, 5.0,
+            t("Silence before the first word (s)"), 0.0, 5.0,
             float(settings.VOICE_LEAD_IN), 0.1, key=keep("voice_lead_in"),
-            help="A moment of promo before the narration starts. Reads far "
-                 "better than a voice that begins on frame one.",
+            help=t("A moment of promo before the narration starts. Reads far "
+                 "better than a voice that begins on frame one."),
         )
         voice_duck = st.checkbox(
-            "Duck the other audio under the voice", value=bool(settings.VOICE_DUCK),
+            t("Duck the other audio under the voice"), value=bool(settings.VOICE_DUCK),
             key=keep("voice_duck"),
-            help="Drops the promo's own sound and the music bed while the voice "
+            help=t("Drops the promo's own sound and the music bed while the voice "
                  "is talking, and lets them back up between phrases. Off mixes "
-                 "everything at fixed levels instead.",
+                 "everything at fixed levels instead."),
         )
         if voice_duck:
             voice_duck_ratio = st.slider(
-                "Ducking strength", 2.0, 20.0,
+                t("Ducking strength"), 2.0, 20.0,
                 float(settings.VOICE_DUCK_RATIO), 0.5, key=keep("voice_duck_ratio"),
-                help="How hard the bed is pushed down under the voice. 8 is a "
+                help=t("How hard the bed is pushed down under the voice. 8 is a "
                      "normal voiceover duck; higher makes the narration the "
-                     "only thing you hear.",
+                     "only thing you hear."),
             )
         voice_gain = st.slider(
-            "Voice level", 0.3, 1.0, float(settings.VOICE_GAIN), 0.05,
+            t("Voice level"), 0.3, 1.0, float(settings.VOICE_GAIN), 0.05,
             key=keep("voice_gain"),
-            help="Kept below 1.0 on purpose: the promo and music already fill "
+            help=t("Kept below 1.0 on purpose: the promo and music already fill "
                  "the mix between them, so a voice at full scale would clip on "
-                 "loud material.",
+                 "loud material."),
         )
         voice_mute_promo = st.checkbox(
-            "Mute the promo's own audio while narrating",
+            t("Mute the promo's own audio while narrating"),
             value=bool(settings.VOICE_MUTE_PROMO), key=keep("voice_mute_promo"),
-            help="The script is the message once there is one, so the promo's "
+            help=t("The script is the message once there is one, so the promo's "
                  "own soundtrack is dropped on any row that narrates. Music "
                  "then becomes the whole background and plays at full volume "
                  "(the Music volume slider is a promo/music split, and there "
                  "is nothing left to split against) — ducking still pulls it "
                  "down under the voice. A row with no narration keeps the "
-                 "promo's audio either way.",
+                 "promo's audio either way."),
         )
         voice_loop_promo = st.checkbox(
-            "The script sets the video length", value=bool(settings.VOICE_LOOP_PROMO),
+            t("The script sets the video length"), value=bool(settings.VOICE_LOOP_PROMO),
             key=keep("voice_loop_promo"),
-            help="A narrated row lasts exactly as long as its script: a longer "
+            help=t("A narrated row lasts exactly as long as its script: a longer "
                  "script loops the promo and the CTA clips until it finishes, "
                  "a shorter one ends the video on its last word. Off instead "
                  "makes the promo the length — a long script is cut where the "
                  "promo ends, and the row is warned. A row with no narration "
-                 "is the promo's length either way.",
+                 "is the promo's length either way."),
         )
         if bool(presets_ui.value("promo_alt")):
-            st.caption("Promo Alternate clips have no length of their own, so "
-                       "the script always sets it in that mode.")
+            st.caption(t("Promo Alternate clips have no length of their own, so "
+                       "the script always sets it in that mode."))
     elif voice_enabled:
         # Captions without a voice: only the controls that still mean something.
         beat_max_words = st.slider(
-            "Words per caption", 1, 8, int(settings.BEAT_MAX_WORDS),
+            t("Words per caption"), 1, 8, int(settings.BEAT_MAX_WORDS),
             key=keep("beat_max_words"),
-            help="How many words sit on screen at once. Three or four is the "
-                 "usual short-form look; higher reads more like a subtitle.",
+            help=t("How many words sit on screen at once. Three or four is the "
+                 "usual short-form look; higher reads more like a subtitle."),
         )
         screen_text_y = st.slider(
-            "Caption height (px from top)", 200, CANVAS_H - 200,
+            t("Caption height (px from top)"), 200, CANVAS_H - 200,
             int(settings.SCREEN_TEXT_Y), 10, key=keep("screen_text_y"),
-            help="Where the caption band sits. Fixed rather than randomised per "
-                 "row. `Screen_Text_X`/`Screen_Text_Y` cells override it.",
+            help=t("Where the caption band sits. Fixed rather than randomised per "
+                 "row. `Screen_Text_X`/`Screen_Text_Y` cells override it."),
         )
 
-    st.subheader("Video placement")
+    st.subheader(t("Video placement"))
     if is_split:
-        st.caption("Ignored in split-screen mode — the main video fills its panel.")
+        st.caption(t("Ignored in split-screen mode — the main video fills its panel."))
     else:
         st.caption(
-            "Defaults for every row — the Excel columns `Video_X`, `Video_Y`, "
-            "`Video_Width`, `Video_Height` override them per video."
+            t("Defaults for every row — the Excel columns `Video_X`, `Video_Y`, "
+            "`Video_Width`, `Video_Height` override them per video.")
         )
     randomize_video = st.checkbox(
-        "Randomize position per video",
+        t("Randomize position per video"),
         value=False, key=keep("randomize_video"),
         disabled=is_split,
-        help="Each video gets its own random spot (avoiding the CTA and any "
+        help=t("Each video gets its own random spot (avoiding the CTA and any "
              "explicitly positioned texts). Reproducible per row, so the "
-             "preview matches the final render.",
+             "preview matches the final render."),
     )
     if randomize_video or is_split:
         video_x, video_y = 0, 0  # ignored; positions are computed / from the panel
     else:
-        video_x = st.number_input("Video X", 0, CANVAS_W, 90, key=keep("video_x"))
-        video_y = st.number_input("Video Y", 0, CANVAS_H, 300, key=keep("video_y"))
-    video_w = st.number_input("Video width", 50, CANVAS_W, 900, disabled=is_split,
+        video_x = st.number_input(t("Video X"), 0, CANVAS_W, 90, key=keep("video_x"))
+        video_y = st.number_input(t("Video Y"), 0, CANVAS_H, 300, key=keep("video_y"))
+    video_w = st.number_input(t("Video width"), 50, CANVAS_W, 900, disabled=is_split,
                               key=keep("video_w"))
-    video_h = st.number_input("Video height", 50, CANVAS_H, 900, disabled=is_split,
+    video_h = st.number_input(t("Video height"), 50, CANVAS_H, 900, disabled=is_split,
                               key=keep("video_h"))
 
-    st.subheader("CTA image placement")
+    st.subheader(t("CTA image placement"))
     st.caption(
-        "Defaults for every row — the Excel columns `CTA_X`, `CTA_Y`, "
-        "`CTA_Width`, `CTA_Height` override them per video."
+        t("Defaults for every row — the Excel columns `CTA_X`, `CTA_Y`, "
+        "`CTA_Width`, `CTA_Height` override them per video.")
     )
-    cta_x = st.number_input("CTA X", 0, CANVAS_W, 340, key=keep("cta_x"))
-    cta_y = st.number_input("CTA Y", 0, CANVAS_H, 1600, key=keep("cta_y"))
-    cta_w = st.number_input("CTA width", 10, CANVAS_W, 400, key=keep("cta_w"))
-    cta_h = st.number_input("CTA height", 10, CANVAS_H, 160, key=keep("cta_h"))
+    cta_x = st.number_input(t("CTA X"), 0, CANVAS_W, 340, key=keep("cta_x"))
+    cta_y = st.number_input(t("CTA Y"), 0, CANVAS_H, 1600, key=keep("cta_y"))
+    cta_w = st.number_input(t("CTA width"), 10, CANVAS_W, 400, key=keep("cta_w"))
+    cta_h = st.number_input(t("CTA height"), 10, CANVAS_H, 160, key=keep("cta_h"))
     cta_fade_start = st.number_input(
-        "CTA fade-in start (s)", 0.0, 30.0, 1.0, 0.1, key=keep("cta_fade_start"),
-        help="The CTA image is invisible until this time, then fades in. "
-             "Per-row override: `CTA_Fade_Start`.",
+        t("CTA fade-in start (s)"), 0.0, 30.0, 1.0, 0.1, key=keep("cta_fade_start"),
+        help=t("The CTA image is invisible until this time, then fades in. "
+             "Per-row override: `CTA_Fade_Start`."),
     )
     cta_fade_duration = st.number_input(
-        "CTA fade-in duration (s)", 0.0, 30.0, 0.5, 0.1,
+        t("CTA fade-in duration (s)"), 0.0, 30.0, 0.5, 0.1,
         key=keep("cta_fade_duration"),
-        help="How long the fade-in takes. Per-row override: `CTA_Fade_Duration`.",
+        help=t("How long the fade-in takes. Per-row override: `CTA_Fade_Duration`."),
     )
 
-    st.subheader("CTA video (optional)")
+    st.subheader(t("CTA video (optional)"))
     cta_slot_count = st.number_input(
-        "Number of clip slots", 1, MAX_CTA_VIDEO_SLOTS, DEFAULT_CTA_VIDEO_SLOTS, 1,
+        t("Number of clip slots"), 1, MAX_CTA_VIDEO_SLOTS, DEFAULT_CTA_VIDEO_SLOTS, 1,
         key=keep("cta_slot_count"),
-        help="How many clip positions play in fixed order. Each is a pool of "
+        help=t("How many clip positions play in fixed order. Each is a pool of "
              "sample videos; one is picked per output video. In split-screen "
              "mode the side keeps drawing fresh random clips after these to fill "
-             "the whole main video.",
+             "the whole main video."),
     )
     cta_slot_count = int(cta_slot_count)
     st.caption(
-        f"A sequence of {cta_slot_count} clip"
-        f"{'s' if cta_slot_count != 1 else ''} that always play in order in one "
-        "shared box. Each clip is a *pool* of sample videos (up to ~30): one is "
-        "chosen per output video — pinned by an Excel `CTA_Clip_<n>` cell, "
-        "otherwise picked at random. Leave all empty to skip."
+        t("A sequence of {0} clip{1} that always play in order in one shared box. Each clip is a"
+          " *pool* of sample videos (up to ~30): one is chosen per output video — pinned by an "
+          "Excel `CTA_Clip_<n>` cell, otherwise picked at random. Leave all empty to skip.", cta_slot_count, t('s' if cta_slot_count != 1 else ''))
     )
     cta_video_slot_files = [
         presets_ui.with_saved(f"cta_clip_{i}", st.file_uploader(
-            f"Clip {i} — sample videos (MP4)", type=["mp4"],
+            t("Clip {0} — sample videos (MP4)", i), type=["mp4"],
             accept_multiple_files=True,
+            on_change=presets_ui.upload_changed, args=(f"cta_clip_{i}",),
             key=presets_ui.uploader_key(f"cta_clip_{i}"),
-            help="One of these is chosen per output video for this position.",
+            help=t("One of these is chosen per output video for this position."),
         ), multiple=True)
         for i in range(1, cta_slot_count + 1)
     ]
     if is_split:
-        st.caption("Box position/size is set by the split-screen panel below.")
-    cta_video_x = st.number_input("CTA video X", 0, CANVAS_W, 360, disabled=is_split,
+        st.caption(t("Box position/size is set by the split-screen panel below."))
+    cta_video_x = st.number_input(t("CTA video X"), 0, CANVAS_W, 360, disabled=is_split,
                                   key=keep("cta_video_x"))
-    cta_video_y = st.number_input("CTA video Y", 0, CANVAS_H, 1200, disabled=is_split,
+    cta_video_y = st.number_input(t("CTA video Y"), 0, CANVAS_H, 1200, disabled=is_split,
                                   key=keep("cta_video_y"))
-    cta_video_w = st.number_input("CTA video width", 50, CANVAS_W, 360,
+    cta_video_w = st.number_input(t("CTA video width"), 50, CANVAS_W, 360,
                                   disabled=is_split, key=keep("cta_video_w"))
-    cta_video_h = st.number_input("CTA video height", 50, CANVAS_H, 360,
+    cta_video_h = st.number_input(t("CTA video height"), 50, CANVAS_H, 360,
                                   disabled=is_split, key=keep("cta_video_h"))
     if is_split:
         st.caption(
-            "No fade in split-screen — the panel is visible from the first frame "
-            "and stays to the end."
+            t("No fade in split-screen — the panel is visible from the first frame "
+            "and stays to the end.")
         )
     cta_video_fade_start = st.number_input(
-        "CTA video fade-in start (s)", 0.0, 30.0, 0.5, 0.1, disabled=is_split,
+        t("CTA video fade-in start (s)"), 0.0, 30.0, 0.5, 0.1, disabled=is_split,
         key=keep("cta_video_fade_start"),
-        help="Per-row override: `CTA_Video_Fade_Start`. Ignored in split-screen.",
+        help=t("Per-row override: `CTA_Video_Fade_Start`. Ignored in split-screen."),
     )
     cta_video_fade_duration = st.number_input(
-        "CTA video fade-in duration (s)", 0.0, 30.0, 0.5, 0.1, disabled=is_split,
+        t("CTA video fade-in duration (s)"), 0.0, 30.0, 0.5, 0.1, disabled=is_split,
         key=keep("cta_video_fade_duration"),
-        help="Per-row override: `CTA_Video_Fade_Duration`. Ignored in split-screen.",
+        help=t("Per-row override: `CTA_Video_Fade_Duration`. Ignored in split-screen."),
     )
     st.caption(
-        "Playback speed per clip position — 1 = normal, 2 = twice as fast, "
+        t("Playback speed per clip position — 1 = normal, 2 = twice as fast, "
         "0.5 = half. Per-row overrides: `CTA_Video_Speed_<n>` for one clip, or "
-        "`CTA_Video_Speed` for the whole row."
+        "`CTA_Video_Speed` for the whole row.")
     )
     cta_video_speeds = [
         st.number_input(
-            f"Clip {i} speed (×)", 0.25, 4.0, 1.0, 0.05, key=keep(f"cta_speed_{i}"),
+            t("Clip {0} speed (×)", i), 0.25, 4.0, 1.0, 0.05, key=keep(f"cta_speed_{i}"),
         )
         for i in range(1, cta_slot_count + 1)
     ]
     cta_video_fill = st.checkbox(
-        "Keep clips playing to fill the whole video",
+        t("Keep clips playing to fill the whole video"),
         value=False, key=keep("cta_video_fill"),
-        help="After the fixed clips above, keep drawing fresh random clips from "
+        help=t("After the fixed clips above, keep drawing fresh random clips from "
              "the same pools until the side covers the full length of the main "
              "video — so it never freezes on a last frame. Off = play once, then "
-             "hold the last frame. Split-screen mode turns this on automatically.",
+             "hold the last frame. Split-screen mode turns this on automatically."),
     )
     cta_after_promo = st.checkbox(
         "Play CTA clips after the promo",
@@ -775,302 +775,301 @@ with st.sidebar:
     # section that only exists while the box is ticked would throw away a
     # multi-gigabyte pool the first time someone unticked it to re-read the
     # promo uploader's help text. The expander just opens itself instead.
-    with st.expander("Promo Alternate", expanded=promo_alt):
+    with st.expander(t("Promo Alternate"), expanded=promo_alt):
         st.caption(
-            "The pool that REPLACES the promo video, used only while **Use "
+            t("The pool that REPLACES the promo video, used only while **Use "
             "Promo Alternate clips instead** is ticked beside the promo "
             "uploader. One flat pool, not slots: clips play back-to-back in the "
             "promo's own box, each one once and in full, until the video ends — "
             "and the **voiceover decides where that is**. The CTA clips above "
-            "are untouched and keep cycling in their own box, so both rotate."
+            "are untouched and keep cycling in their own box, so both rotate.")
         )
         promo_alt_files = st.file_uploader(
-            "Promo Alternate clips (MP4)", type=["mp4"],
+            t("Promo Alternate clips (MP4)"), type=["mp4"],
             accept_multiple_files=True,
+            on_change=presets_ui.upload_changed, args=("promo_alt_pool",),
             key=presets_ui.uploader_key("promo_alt_pool"),
-            help="A different selection plays in each output video, every clip "
-                 "used once before any repeats.",
+            help=t("A different selection plays in each output video, every clip "
+                 "used once before any repeats."),
         )
         promo_alt_files = presets_ui.with_saved("promo_alt_pool", promo_alt_files,
                                                 multiple=True)
         if promo_alt_files:
             _alt_gb = sum(getattr(f, "size", 0) for f in promo_alt_files) / 1024 ** 3
-            st.caption(f"{len(promo_alt_files)} clip(s), {_alt_gb:,.1f} GB")
+            st.caption(t("{0} clip(s), {1:,.1f} GB", len(promo_alt_files), _alt_gb))
         promo_alt_seconds = st.number_input(
-            "Length without a voiceover (s)", 1.0, 600.0,
+            t("Length without a voiceover (s)"), 1.0, 600.0,
             float(PROMO_ALT_SECONDS), 0.5, key=keep("promo_alt_seconds"),
-            help="With no promo there is nothing to measure, so a row whose "
+            help=t("With no promo there is nothing to measure, so a row whose "
                  "Voiceover cell is blank (or a batch with narration turned "
                  "off) is rendered for this long. Rows that DO have narration "
-                 "ignore this and last exactly as long as they speak.",
+                 "ignore this and last exactly as long as they speak."),
         )
         promo_alt_audio = not st.checkbox(
-            "Mute the clips' own audio", value=True, key=keep("promo_alt_mute"),
-            help="On, the video is carried by the voiceover and the music bed "
+            t("Mute the clips' own audio"), value=True, key=keep("promo_alt_mute"),
+            help=t("On, the video is carried by the voiceover and the music bed "
                  "alone. Off, the clips' own sound takes the place the promo's "
                  "audio held — mixed under the music and ducked under the "
                  "voice. Every clip in the pool must have an audio track for "
                  "that; if any is silent they are all played muted and the "
-                 "batch says so.",
+                 "batch says so."),
         )
     # The pool is only ever read in the mode it belongs to: leaving clips in the
     # uploader must not add a layer to an ordinary promo render.
     if not promo_alt:
         promo_alt_files = []
 
-    st.subheader("GIFs (optional)")
+    st.subheader(t("GIFs (optional)"))
     st.caption(
-        "Short looping clips (MP4) shown one after another in their own box — "
+        t("Short looping clips (MP4) shown one after another in their own box — "
         "separate from the CTA clips above, with their own pool, box and "
         "layer order. Each gif holds the box for at least the dwell time "
         "below, repeating **itself** a whole number of times to get there: a "
         "3-second gif plays twice (6s), it is never cut short. The sequence "
         "keeps drawing fresh gifs until the promo video ends, so it never "
-        "freezes on a stopped animation."
+        "freezes on a stopped animation.")
     )
     gif_files = st.file_uploader(
-        "GIF clips (MP4)", type=["mp4"], accept_multiple_files=True,
+        t("GIF clips (MP4)"), type=["mp4"], accept_multiple_files=True,
+        on_change=presets_ui.upload_changed, args=("gif_pool",),
         key=presets_ui.uploader_key("gif_pool"),
-        help="One flat pool, not slots — a random selection plays in each "
+        help=t("One flat pool, not slots — a random selection plays in each "
              "output video, every gif used once before any repeats. Ignored "
-             "when the GIFs come from Drive instead (set below the sheet).",
+             "when the GIFs come from Drive instead (set below the sheet)."),
     )
     gif_files = presets_ui.with_saved("gif_pool", gif_files, multiple=True)
     gif_min_seconds = st.number_input(
-        "Minimum seconds per gif", 1.0, 30.0, 5.0, 0.5, key=keep("gif_min_seconds"),
-        help="The dwell floor. A gif shorter than this repeats itself until it "
-             "clears the floor; a gif already longer plays once, in full.",
+        t("Minimum seconds per gif"), 1.0, 30.0, 5.0, 0.5, key=keep("gif_min_seconds"),
+        help=t("The dwell floor. A gif shorter than this repeats itself until it "
+             "clears the floor; a gif already longer plays once, in full."),
     )
     st.caption(
-        f"At ~{gif_min_seconds:g}s each, a 20-second promo shows about "
-        f"{max(1, int(20 // gif_min_seconds))} gifs and a 60-second promo about "
-        f"{max(1, int(60 // gif_min_seconds))} — however many you upload. The "
-        "pool is the variety across videos, not within one."
+        t("At ~{0:g}s each, a 20-second promo shows about {1} gifs and a 60-second promo about "
+          "{2} — however many you upload. The pool is the variety across videos, not within one.", gif_min_seconds, max(1, int(20 // gif_min_seconds)), max(1, int(60 // gif_min_seconds)))
     )
     st.caption(
-        "The box is an invisible fit guide, not a visible panel. Every gif is "
+        t("The box is an invisible fit guide, not a visible panel. Every gif is "
         "scaled to the largest size that still sits inside it — bigger gifs "
         "shrink, smaller ones are enlarged — never cropped and never stretched, "
         "so the box sets the size whatever the source resolution. Whatever is "
-        "behind shows through the space left over."
+        "behind shows through the space left over.")
     )
-    gif_x = st.number_input("GIF box X", 0, CANVAS_W, 60, key=keep("gif_x"))
-    gif_y = st.number_input("GIF box Y", 0, CANVAS_H, 560, key=keep("gif_y"))
-    gif_w = st.number_input("GIF box width", 50, CANVAS_W, 360, key=keep("gif_w"))
-    gif_h = st.number_input("GIF box height", 50, CANVAS_H, 360, key=keep("gif_h"))
+    gif_x = st.number_input(t("GIF box X"), 0, CANVAS_W, 60, key=keep("gif_x"))
+    gif_y = st.number_input(t("GIF box Y"), 0, CANVAS_H, 560, key=keep("gif_y"))
+    gif_w = st.number_input(t("GIF box width"), 50, CANVAS_W, 360, key=keep("gif_w"))
+    gif_h = st.number_input(t("GIF box height"), 50, CANVAS_H, 360, key=keep("gif_h"))
     gif_fade_start = st.number_input(
-        "GIF fade-in start (s)", 0.0, 30.0, 0.0, 0.1, key=keep("gif_fade_start"),
-        help="Per-row override: `GIF_Fade_Start`. 0 = visible from the first "
-             "frame, which is also what the static preview shows.",
+        t("GIF fade-in start (s)"), 0.0, 30.0, 0.0, 0.1, key=keep("gif_fade_start"),
+        help=t("Per-row override: `GIF_Fade_Start`. 0 = visible from the first "
+             "frame, which is also what the static preview shows."),
     )
     gif_fade_duration = st.number_input(
-        "GIF fade-in duration (s)", 0.0, 30.0, 0.0, 0.1,
+        t("GIF fade-in duration (s)"), 0.0, 30.0, 0.0, 0.1,
         key=keep("gif_fade_duration"),
-        help="Per-row override: `GIF_Fade_Duration`. Applies to the first gif "
-             "only — the rest of the sequence cuts straight in.",
+        help=t("Per-row override: `GIF_Fade_Duration`. Applies to the first gif "
+             "only — the rest of the sequence cuts straight in."),
     )
 
-    st.subheader("Layer order (z-index)")
+    st.subheader(t("Layer order (z-index)"))
     st.caption(
-        "Which element sits on top when they overlap — higher number = nearer "
-        "the front. The background is always at the back. Applies to every video."
+        t("Which element sits on top when they overlap — higher number = nearer "
+        "the front. The background is always at the back. Applies to every video.")
     )
     video_z = st.number_input(
-        "Promo video", 1, 99, 1, 1, key=keep("z_video"),
-        help="Stacking order of the promo video layer.",
+        t("Promo video"), 1, 99, 1, 1, key=keep("z_video"),
+        help=t("Stacking order of the promo video layer."),
     )
     gif_z = st.number_input(
-        "GIFs", 1, 99, 2, 1, key=keep("z_gif"),
-        help="Stacking order of the GIF layer. Below the CTA layers by "
+        t("GIFs"), 1, 99, 2, 1, key=keep("z_gif"),
+        help=t("Stacking order of the GIF layer. Below the CTA layers by "
              "default — it is decoration, so it yields to anything carrying a "
              "message. Raise it above the promo video's number to float a gif "
-             "over the video instead of behind it.",
+             "over the video instead of behind it."),
     )
     cta_video_z = st.number_input(
-        "CTA video", 1, 99, 3, 1, key=keep("z_cta_video"),
-        help="Stacking order of the CTA video layer.",
+        t("CTA video"), 1, 99, 3, 1, key=keep("z_cta_video"),
+        help=t("Stacking order of the CTA video layer."),
     )
     cta_image_z = st.number_input(
-        "CTA image", 1, 99, 4, 1, key=keep("z_cta_image"),
-        help="Stacking order of the CTA image (button) layer.",
+        t("CTA image"), 1, 99, 4, 1, key=keep("z_cta_image"),
+        help=t("Stacking order of the CTA image (button) layer."),
     )
     text_z = st.number_input(
-        "Texts", 1, 99, 5, 1, key=keep("z_text"),
-        help="Stacking order of the headline / subheading / footer texts.",
+        t("Texts"), 1, 99, 5, 1, key=keep("z_text"),
+        help=t("Stacking order of the headline / subheading / footer texts."),
     )
     st.caption(
-        "The background videos have no number: they always sit directly "
+        t("The background videos have no number: they always sit directly "
         "beneath the texts, over any layer whose number is at or below the "
-        "texts'. (A layer raised ABOVE the texts also rises above the veil.)"
+        "texts'. (A layer raised ABOVE the texts also rises above the veil.)")
     )
 
-    st.subheader("Text style")
+    st.subheader(t("Text style"))
     st.caption(
-        "Defaults for every text — per-row Excel columns `*_Font`, `*_Style`, "
+        t("Defaults for every text — per-row Excel columns `*_Font`, `*_Style`, "
         "`*_Opacity` and `*_BgOpacity` override them, and `*_BgColor` adds a "
-        "highlight box behind any text."
+        "highlight box behind any text.")
     )
     default_font = st.selectbox(
-        "Default font", FONT_CHOICES, index=0, key=keep("default_font"),
-        help="A bundled font family, the system font, or your uploaded font. "
-             "Override per text with `Headline_Font` etc.",
-    )
+        t("Default font"), FONT_CHOICES, index=0, key=keep("default_font"),
+        help=t("A bundled font family, the system font, or your uploaded font. "
+             "Override per text with `Headline_Font` etc."),
+     format_func=option_labels(FONT_CHOICES, localize_format(str)))
     default_style = st.selectbox(
-        "Default artistic style", TEXT_STYLES, index=0, key=keep("default_style"),
-        help="classic = plain · outline = contrasting border · shadow = drop "
-             "shadow · neon = glow. Override per text with `Headline_Style` etc.",
-    )
+        t("Default artistic style"), TEXT_STYLES, index=0, key=keep("default_style"),
+        help=t("classic = plain · outline = contrasting border · shadow = drop "
+             "shadow · neon = glow. Override per text with `Headline_Style` etc."),
+     format_func=option_labels(TEXT_STYLES, localize_format(str)))
     text_opacity_pct = st.slider(
-        "Text opacity (%)", 0, 100, 100, key=keep("text_opacity_pct"),
-        help="How solid every text is. Below 100 the video and background show "
+        t("Text opacity (%)"), 0, 100, 100, key=keep("text_opacity_pct"),
+        help=t("How solid every text is. Below 100 the video and background show "
              "through the letters (the outline, glow and shadow fade with them). "
-             "Override per text with `Headline_Opacity` etc.",
+             "Override per text with `Headline_Opacity` etc."),
     )
     text_bg_opacity_pct = st.slider(
-        "Highlight box opacity (%)", 0, 100, 100, key=keep("text_bg_opacity_pct"),
-        help="Same, for the `*_BgColor` box behind a text — a translucent box "
+        t("Highlight box opacity (%)"), 0, 100, 100, key=keep("text_bg_opacity_pct"),
+        help=t("Same, for the `*_BgColor` box behind a text — a translucent box "
              "with solid text on top is the classic caption look. Override per "
-             "text with `Headline_BgOpacity` etc.",
+             "text with `Headline_BgOpacity` etc."),
     )
 
-    st.subheader("Text fit boxes (optional)")
+    st.subheader(t("Text fit boxes (optional)"))
     st.caption(
-        "Give a text a fixed box and the box drives the type: the text re-wraps "
+        t("Give a text a fixed box and the box drives the type: the text re-wraps "
         "to the box's width and its font size is picked so the whole block — "
         "including any outline or glow — fills the box without spilling out. "
         "Line breaks are added **and removed** as the box changes, so long and "
-        "short texts come out optically the same size across a batch."
+        "short texts come out optically the same size across a batch.")
     )
     st.caption(
-        f"Both width and height are needed; **0 = off**, which leaves that text "
-        f"behaving exactly as before (its `*_Size` cell, wrapped to the canvas). "
-        f"The box is centred on the text's X/Y, so switching it on never moves "
-        f"anything. Per-row overrides: `Headline_Width` / `Headline_Height`, and "
-        f"the same for Subheading and Footer. Text that cannot fit even at "
-        f"{TEXT_FIT_MIN_SIZE}px is drawn at {TEXT_FIT_MIN_SIZE}px and flagged on "
-        "the row rather than shrunk into illegibility."
+        t("Both width and height are needed; **0 = off**, which leaves that text behaving "
+          "exactly as before (its `*_Size` cell, wrapped to the canvas). The box is centred on "
+          "the text's X/Y, so switching it on never moves anything. Per-row overrides: "
+          "`Headline_Width` / `Headline_Height`, and the same for Subheading and Footer. Text "
+          "that cannot fit even at {0}px is drawn at {1}px and flagged on the row rather than "
+          "shrunk into illegibility.", TEXT_FIT_MIN_SIZE, TEXT_FIT_MIN_SIZE)
     )
     text_box_dims = {}
     for _role in TEXT_ROLES:
         _cw, _ch = st.columns(2)
         text_box_dims[_role] = (
-            _cw.number_input(f"{_role} box width", 0, CANVAS_W, 0, 10,
+            _cw.number_input(t("{0} box width", t(_role)), 0, CANVAS_W, 0, 10,
                              key=keep(f"tbox_w_{_role}")),
-            _ch.number_input(f"{_role} box height", 0, CANVAS_H, 0, 10,
+            _ch.number_input(t("{0} box height", t(_role)), 0, CANVAS_H, 0, 10,
                              key=keep(f"tbox_h_{_role}")),
         )
 
-    st.subheader("Subliminal text (experimental)")
+    st.subheader(t("Subliminal text (experimental)"))
     subliminal_targets = st.multiselect(
-        "Apply to",
+        t("Apply to"),
         options=["Headline", "Subheading", "Footer"],
-        default=[],
+        default=list(defaults.SUBLIMINAL_TARGETS),
         max_selections=2, key=keep("subliminal_targets"),
-        help="Which texts get the effect (up to two at a time; empty = off): no "
+        help=t("Which texts get the effect (up to two at a time; empty = off): no "
              "single frame shows the whole text, but it cycles fast enough to "
              "read as whole in motion. Override per text with a "
-             "`<Role>_Subliminal` cell (yes/no).",
-    )
+             "`<Role>_Subliminal` cell (yes/no)."),
+     format_func=option_labels(["Headline", "Subheading", "Footer"], localize_format(str)))
     subliminal_enabled = bool(subliminal_targets)
     if subliminal_enabled:
         subliminal_mode = st.radio(
-            "Effect style",
+            t("Effect style"),
             options=["hide", "show"],
-            format_func=lambda m: {"hide": "Hide a slice (recommended)",
-                                   "show": "Show only a slice"}[m],
+            format_func=option_labels(["hide", "show"], lambda m: {"hide": t("Hide a slice (recommended)"),
+                                   "show": t("Show only a slice")}[m]),
             key=keep("subliminal_mode"),
-            help="Hide a slice = every frame shows the whole text minus ~1/K of "
+            help=t("Hide a slice = every frame shows the whole text minus ~1/K of "
                  "the words, so it stays bright and solid. Show only a slice = "
                  "every frame shows ONLY ~1/K of the words; each word is lit just "
                  "1/K of the time, so it time-averages to about 1/K brightness "
                  "and looks faint. Raising fps shortens the cycle but does not "
-                 "change that brightness ratio.",
+                 "change that brightness ratio."),
         )
         subliminal_k = st.slider(
-            "Frames per cycle (K)", 2, 8, 3, key=keep("subliminal_k"),
-            help="The number of distinct frames before the effect repeats "
+            t("Frames per cycle (K)"), 2, 8, defaults.SUBLIMINAL_K, key=keep("subliminal_k"),
+            help=t("The number of distinct frames before the effect repeats "
                  "(K/fps seconds). Higher K = a longer, less obviously repeating "
-                 "cycle. 3 is a good default.",
+                 "cycle. Defaults to 7."),
         )
         # Pattern + amount apply to the hide style only (show is always the even
         # 1/K comb).
         if subliminal_mode == "hide":
             subliminal_pattern = st.radio(
-                "Hidden characters",
+                t("Hidden characters"),
                 options=["random", "ordered"],
-                format_func=lambda p: {"random": "Random each cycle",
-                                       "ordered": "Fixed pattern"}[p],
+                format_func=option_labels(["random", "ordered"], lambda p: {"random": t("Random each cycle"),
+                                       "ordered": t("Fixed pattern")}[p]),
                 key=keep("subliminal_pattern"),
-                help="Random = a different, evenly-spread set is hidden each "
+                help=t("Random = a different, evenly-spread set is hidden each "
                      "frame (seeded, so the preview still matches) and never "
                      "repeats the same comb. Fixed = the same characters blank "
-                     "out in the same frames every cycle.",
+                     "out in the same frames every cycle."),
             )
             subliminal_hide_pct = st.slider(
-                "Hidden per frame (%)", 15, 70, 33, key=keep("subliminal_hide_pct"),
+                t("Hidden per frame (%)"), 15, 70, defaults.SUBLIMINAL_HIDE_PCT, key=keep("subliminal_hide_pct"),
                 disabled=subliminal_pattern != "random",
-                help="Random pattern only. ~33% (≈100/K) keeps every character "
+                help=t("Random pattern only. ~33% (≈100/K) keeps every character "
                      "hidden exactly once per cycle and stays bright. Higher "
                      "hides more per frame, so the text looks fainter. The fixed "
-                     "pattern always hides ~1/K.",
+                     "pattern always hides ~1/K."),
             )
         else:
             subliminal_pattern = "ordered"
-            subliminal_hide_pct = 33
+            subliminal_hide_pct = defaults.SUBLIMINAL_HIDE_PCT
         subliminal_granularity = st.radio(
-            "Split by", ["word", "char"], horizontal=True,
+            t("Split by"), ["word", "char"], horizontal=True,
             key=keep("subliminal_granularity"),
-            help="Word = omit whole words (more readable). Char = omit letters "
-                 "(auto-used when there aren't enough words for K).",
-        )
+            help=t("Word = omit whole words (more readable). Char = omit letters "
+                 "(auto-used when there aren't enough words for K)."),
+         format_func=option_labels(["word", "char"], localize_format(str)))
         subliminal_all_intra = st.checkbox(
-            "Preserve frame-by-frame (larger files)",
-            value=True, key=keep("subliminal_all_intra"),
-            help="Encode every frame independently so a frame-scrub of THIS file "
+            t("Preserve frame-by-frame (larger files)"),
+            value=defaults.SUBLIMINAL_ALL_INTRA, key=keep("subliminal_all_intra"),
+            help=t("Encode every frame independently so a frame-scrub of THIS file "
                  "never shows the whole text. Turning this off shrinks files but "
-                 "lets the codec blur frames together.",
+                 "lets the codec blur frames together."),
         )
     else:
         subliminal_mode = "hide"
         subliminal_pattern = "random"
-        subliminal_hide_pct = 33
-        subliminal_k = 3
+        subliminal_hide_pct = defaults.SUBLIMINAL_HIDE_PCT
+        subliminal_k = defaults.SUBLIMINAL_K
         subliminal_granularity = "word"
-        subliminal_all_intra = True
+        subliminal_all_intra = defaults.SUBLIMINAL_ALL_INTRA
 
-    st.subheader("Output")
+    st.subheader(t("Output"))
     fps = st.select_slider(
-        "Frame rate (fps)", options=list(FPS_CHOICES), value=FPS_CHOICES[0],
+        t("Frame rate (fps)"), options=list(FPS_CHOICES), value=FPS_CHOICES[0],
         key=keep("fps"),
-        help="60 halves the subliminal cycle length (K/fps seconds), so the "
+        help=t("60 halves the subliminal cycle length (K/fps seconds), so the "
              "effect blends more smoothly — at the cost of roughly double the "
-             "frames to encode. Both survive upload to every major platform.",
-    )
-    crf = st.slider("Quality (CRF — lower = better/bigger)", 16, 28, 18,
+             "frames to encode. Both survive upload to every major platform."),
+     format_func=option_labels(list(FPS_CHOICES), localize_format(str)))
+    crf = st.slider(t("Quality (CRF — lower = better/bigger)"), 16, 28, 18,
                     key=keep("crf"))
     preset = st.select_slider(
-        "Encoder speed",
+        t("Encoder speed"),
         options=["veryfast", "faster", "fast", "medium", "slow"],
-        value="medium", key=keep("encoder_preset"),
-        help="Faster presets render quicker but produce slightly larger files.",
-    )
+        value=defaults.ENCODER_PRESET, key=keep("encoder_preset"),
+        help=t("Faster presets render quicker but produce slightly larger files."),
+     format_func=option_labels(["veryfast", "faster", "fast", "medium", "slow"], localize_format(str)))
     # One render only keeps 1-2 cores busy (the compositing pipeline inside
     # FFmpeg is serial), so many-core machines need many concurrent renders to
     # saturate. The slider tops out at the core count; RAM is the real
     # ceiling — budget roughly 2-6 GB per render when subliminal texts are on.
-    max_workers = max(4, os.cpu_count() or 4)
+    max_workers = defaults.max_workers()
     workers = st.slider(
-        "Parallel renders", 1, max_workers, min(2, max_workers),
+        t("Parallel renders"), 1, max_workers, max_workers,
         key=keep("workers"),
-        help="Concurrent FFmpeg processes. 2 is a good default on office "
-             "machines; on a many-core VM push toward ~1 per 2 cores "
-             "(e.g. 48 on 112 cores). Watch RAM: ~2-6 GB per render.",
+        help=t("Concurrent FFmpeg processes. Defaults to the panel maximum on "
+             "this machine. Each render uses roughly 2–6 GB of RAM."),
     )
     font_file = st.file_uploader(
-        "Custom font (TTF/OTF, optional)", type=["ttf", "otf"],
+        t("Custom font (TTF/OTF, optional)"), type=["ttf", "otf"],
+        on_change=presets_ui.upload_changed, args=("font",),
         key=presets_ui.uploader_key("font"),
-        help=f"Upload your own font, then pick “{FONT_CUSTOM}” as the default "
-             "font above (or set a `*_Font` cell to it) to use it.",
+        help=t("Upload your own font, then pick “{0}” as the default font above (or set a "
+               "`*_Font` cell to it) to use it.", t(FONT_CUSTOM)),
     )
     font_file = presets_ui.with_saved("font", font_file, multiple=False)
 
@@ -1145,11 +1144,12 @@ config = RenderConfig(
 )
 
 # ---- uploads
-st.subheader("1. Upload assets")
+st.subheader(t("1. Upload assets"))
 col1, col2 = st.columns(2)
 with col1:
     excel_file = presets_ui.with_saved(
-        "excel", st.file_uploader("Excel file (.xlsx)", type=["xlsx"],
+        "excel", st.file_uploader(t("Excel file (.xlsx)"), type=["xlsx"],
+                                  on_change=presets_ui.upload_changed, args=("excel",),
                                   key=presets_ui.uploader_key("excel")),
         multiple=False)
     # Declared BEFORE the uploader it disables: Streamlit refuses to change a
@@ -1157,21 +1157,69 @@ with col1:
     # which runs earlier in the script but sees the new value straight away
     # because a tick triggers a rerun with session_state already updated.
     st.checkbox(
-        "Use Promo Alternate clips instead", key=keep("promo_alt"),
-        help="No promo video at all. The promo's box is filled by a pool of "
+        t("Use Promo Alternate clips instead"), key=keep("promo_alt"),
+        help=t("No promo video at all. The promo's box is filled by a pool of "
              "clips uploaded in the sidebar, playing back-to-back, and the "
              "voiceover and its captions decide how long each video runs. The "
-             "CTA clips keep cycling in their own box alongside.",
+             "CTA clips keep cycling in their own box alongside."),
     )
+    promo_source = st.radio(
+        t("Promo video source"), options=["upload", "drive_folder"],
+        format_func=option_labels(["upload", "drive_folder"], lambda source: {
+            "upload": t("Upload files"),
+            "drive_folder": t("Google Drive folder"),
+        }[source]),
+        horizontal=True, disabled=promo_alt, key=keep("promo_source"),
+    )
+    if promo_alt:
+        promo_source = "upload"
+    promo_drive_files = []
+    promos_drive_folder = ""
+    if promo_source == "drive_folder":
+        from integrations import drive
+
+        promos_drive_folder = st.text_input(
+            t("Promo videos Google Drive folder link"),
+            key=keep("promos_drive_folder"),
+            help=t("Share this folder with the service account (Viewer access). "
+                   "An ordinary My Drive folder also works."),
+        ).strip()
+        if st.button(t("Read promo video list"), disabled=not promos_drive_folder,
+                     key="read_drive_promos"):
+            try:
+                with st.spinner(t("Reading promo videos from Drive…")):
+                    entries = drive.list_videos(
+                        drive.extract_id(promos_drive_folder),
+                        max_files=MAX_PROMO_VIDEOS)
+                st.session_state["_drive_promos"] = {
+                    "link": promos_drive_folder, "files": entries}
+                if not entries:
+                    st.warning(t("This Drive folder has no video files."))
+            except Exception as exc:  # noqa: BLE001 — Drive API and transport errors
+                st.session_state.pop("_drive_promos", None)
+                st.error(t("Could not read promo videos: {0}", exc))
+        listed = st.session_state.get("_drive_promos") or {}
+        if listed.get("link") == promos_drive_folder:
+            promo_drive_files = listed["files"]
+        st.caption(t("Read the list first. Videos download directly to the server "
+                     "after you submit the job; a preview downloads only the "
+                     "selected video."))
+        if promo_drive_files:
+            st.caption(t("{0} promo video(s), {1:,.1f} GB",
+                         len(promo_drive_files),
+                         sum(f["size"] for f in promo_drive_files) / 1024 ** 3))
     promo_files = st.file_uploader(
-        f"Promo video(s) (MP4) — up to {MAX_PROMO_VIDEOS}", type=["mp4"],
-        accept_multiple_files=True, disabled=promo_alt,
+        t("Promo video(s) (MP4) — up to {0}", MAX_PROMO_VIDEOS), type=["mp4"],
+        accept_multiple_files=True, disabled=promo_alt or promo_source != "upload",
+        on_change=presets_ui.upload_changed, args=("promos",),
         key=presets_ui.uploader_key("promos"),
-        help="Upload one to use it in every video. Upload several and a "
+        help=t("Upload one to use it in every video. Upload several and a "
              "multi-batch render gives each batch its own promo video, cycling "
-             "if there are fewer promos than batches.",
+             "if there are fewer promos than batches."),
     )
     promo_files = presets_ui.with_saved("promos", promo_files, multiple=True)
+    if promo_source != "upload":
+        promo_files = []
     # Disabling an uploader does NOT clear what it already holds — the files
     # stay in session_state and would still be staged at submit. Drop them here
     # so everything downstream (the batch default, the grids, the pairing table,
@@ -1180,8 +1228,8 @@ with col1:
         promo_files = []
         if not promo_alt_files:
             st.warning(
-                "Promo Alternate is on but its pool is empty — upload clips "
-                "under **Promo Alternate** in the sidebar.")
+                t("Promo Alternate is on but its pool is empty — upload clips "
+                "under **Promo Alternate** in the sidebar."))
     # Truncated HERE, not in stage_uploads, because everything below reads this
     # list: the "Batches to render" DEFAULT (Streamlit raises rather than clamps
     # when a default lands above max_value, so an over-long upload took the page
@@ -1191,8 +1239,7 @@ with col1:
     # One guard at the source keeps all of them agreeing with what is staged.
     if len(promo_files or []) > MAX_PROMO_VIDEOS:
         st.warning(
-            f"{len(promo_files)} promo videos uploaded — only the first "
-            f"{MAX_PROMO_VIDEOS} are used. The rest are dropped."
+            t("{0} promo videos uploaded — only the first {1} are used. The rest are dropped.", len(promo_files), MAX_PROMO_VIDEOS)
         )
         promo_files = promo_files[:MAX_PROMO_VIDEOS]
     if promo_files:
@@ -1200,20 +1247,22 @@ with col1:
         # long as the tab is open, AND is copied into the job's assets/ folder
         # on submit. Worth seeing before waiting out a multi-gigabyte upload.
         _promo_gb = sum(getattr(f, "size", 0) for f in promo_files) / 1024 ** 3
-        st.caption(f"{len(promo_files)} promo video(s), {_promo_gb:,.1f} GB")
+        st.caption(t("{0} promo video(s), {1:,.1f} GB", len(promo_files), _promo_gb))
     # Preview and Render Row work off a single promo — the first one.
     video_file = promo_files[0] if promo_files else None
 with col2:
     zip_file = st.file_uploader(
-        "Background images (ZIP, optional)", type=["zip"],
-        help="Without a ZIP, videos render on the solid background color set in "
+        t("Background images (ZIP, optional)"), type=["zip"],
+        help=t("Without a ZIP, videos render on the solid background color set in "
              "the sidebar (Layout section). The images can also come from a "
-             "Drive folder — see 'Background images' under 3. CTA clips.",
+             "Drive folder — see 'Background images' under 3. CTA clips."),
+        on_change=presets_ui.upload_changed, args=("bg_zip",),
         key=presets_ui.uploader_key("bg_zip"),
     )
     zip_file = presets_ui.with_saved("bg_zip", zip_file, multiple=False)
     cta_file = presets_ui.with_saved(
-        "cta_image", st.file_uploader("CTA image (PNG, optional)", type=["png"],
+        "cta_image", st.file_uploader(t("CTA image (PNG, optional)"), type=["png"],
+                                      on_change=presets_ui.upload_changed, args=("cta_image",),
                                       key=presets_ui.uploader_key("cta_image")),
         multiple=False)
 
@@ -1224,27 +1273,27 @@ if excel_file is not None:
         df = pd.read_excel(io.BytesIO(excel_file.getvalue()), engine="openpyxl")
         df.columns = [str(c).strip() for c in df.columns]
     except Exception as exc:  # noqa: BLE001
-        st.error(f"Could not read the Excel file: {exc}")
+        st.error(t("Could not read the Excel file: {0}", exc))
 
     if df is not None:
         missing = validate_dataframe(df)
         if missing:
             st.error(
-                "The Excel file is missing required columns: "
-                + ", ".join(f"`{c}`" for c in missing)
+                t("The Excel file is missing required columns: ")
+                + t(", ".join(f"`{c}`" for c in missing))
             )
-            with st.expander("Supported columns"):
+            with st.expander(t("Supported columns")):
                 st.code(
-                    "Required:\n  " + "\n  ".join(REQUIRED_COLUMNS)
-                    + "\n\nOptional (defaults / auto-placement when absent):\n  "
+                    t("Required:\n  ") + "\n  ".join(REQUIRED_COLUMNS)
+                    + t("\n\nOptional (defaults / auto-placement when absent):\n  ")
                     + "\n  ".join(c for c in ALL_COLUMNS if c not in REQUIRED_COLUMNS)
                 )
             df = None
         elif df.empty:
-            st.error("The Excel file has no data rows.")
+            st.error(t("The Excel file has no data rows."))
             df = None
         else:
-            st.success(f"Excel loaded — {len(df)} video(s) to generate.")
+            st.success(t("Excel loaded — {0} video(s) to generate.", len(df)))
             # Edits saved from the preview editor belong to one specific
             # sheet — drop them (and the stale preview) on a new upload.
             file_key = f"{excel_file.name}:{excel_file.size}"
@@ -1259,10 +1308,10 @@ if excel_file is not None:
             absent = missing_optional_columns(df)
             if absent:
                 st.caption(
-                    "Columns not in this sheet (defaults / auto-placement will be used): "
-                    + ", ".join(f"`{c}`" for c in absent)
+                    t("Columns not in this sheet (defaults / auto-placement will be used): ")
+                    + t(", ".join(f"`{c}`" for c in absent))
                 )
-            with st.expander("Preview spreadsheet data"):
+            with st.expander(t("Preview spreadsheet data")):
                 st.dataframe(df, hide_index=True, width="stretch")
 
 # ---- optional per-promo text
@@ -1271,33 +1320,41 @@ if excel_file is not None:
 # Uploading one makes that role's text come from the grid instead of the sheet;
 # everything else about the row — size, font, colour, position, background box
 # — is untouched, which is the whole point. See text_grids.py.
-promo_names = [f.name for f in (promo_files or [])]
+promo_names = ([f["name"] for f in promo_drive_files] if promo_source == "drive_folder"
+               else [f.name for f in (promo_files or [])])
+promo_key = (promo_source, [(f["id"], f["name"], f["size"]) for f in promo_drive_files],
+             [(f.name, f.size) for f in (promo_files or [])])
+if st.session_state.get("_promo_key", promo_key) != promo_key:
+    for stale in ("preview_payload", "preview_nonce", "preview_baseline_edits",
+                  "row_render"):
+        st.session_state.pop(stale, None)
+st.session_state["_promo_key"] = promo_key
 sheet_rows = len(df) if df is not None else 0
 grid_keys = {role: f"text_grid_{role}" for role in TEXT_ROLES}
 grid_uploads: dict[str, object] = {}
 
 with st.expander(
-    "Per-promo heading, subheading and footer text (optional)",
+    t("Per-promo heading, subheading and footer text (optional)"),
     # Opened once something is in it, so a blocking error is never hidden
     # behind a collapsed panel.
     expanded=any(st.session_state.get(presets_ui.uploader_key(k)) is not None
                  or presets_ui.has_saved(k) for k in grid_keys.values()),
 ):
     st.caption(
-        "Upload a sheet whose **column headers are your promo video filenames** "
+        t("Upload a sheet whose **column headers are your promo video filenames** "
         "and whose rows are the text for each row of the main Excel — so the "
         "same row can say something different on every promo. Row 1 here is "
         "row 1 there. A sheet you upload replaces **only** that text: size, "
         "font, colour, position and background box still come from the main "
         "Excel and the sidebar. Leave a cell blank to keep the main Excel's "
-        "text for that one."
+        "text for that one.")
     )
     if promo_alt:
         st.info(
-            "Not used with Promo Alternate — these sheets match their columns to "
+            t("Not used with Promo Alternate — these sheets match their columns to "
             "promo video filenames, and this mode has no promo videos. Per-row "
             "text comes from the main Excel as usual. Anything uploaded here is "
-            "kept and used again as soon as the mode is turned off."
+            "kept and used again as soon as the mode is turned off.")
         )
     # The uploaders are instantiated either way: Streamlit discards a keyed
     # widget's state the moment a run stops rendering it, so hiding them would
@@ -1308,11 +1365,12 @@ with st.expander(
     # submit at all.
     for column, role in zip(st.columns(len(TEXT_ROLES)), TEXT_ROLES):
         upload = column.file_uploader(
-            f"{role} by promo (.xlsx)", type=["xlsx"],
+            t("{0} by promo (.xlsx)", t(role)), type=["xlsx"],
+            on_change=presets_ui.upload_changed, args=(grid_keys[role],),
             key=presets_ui.uploader_key(grid_keys[role]),
             disabled=promo_alt,
-            help=f"One column per promo video, one row per row of the main "
-                 f"Excel. Overrides the main sheet's `{role}` column.",
+            help=t("One column per promo video, one row per row of the main Excel. Overrides the"
+                   " main sheet's `{0}` column.", role),
         )
         upload = presets_ui.with_saved(grid_keys[role], upload, multiple=False,
                                        where=column)
@@ -1321,30 +1379,30 @@ with st.expander(
     if promo_alt:
         pass
     elif promo_names and sheet_rows:
-        st.caption("Templates below already carry the right headers and row "
-                   "count — fill one in and upload it back.")
+        st.caption(t("Templates below already carry the right headers and row "
+                   "count — fill one in and upload it back."))
         for column, role in zip(st.columns(len(TEXT_ROLES)), TEXT_ROLES):
             column.download_button(
-                f"⬇️ {role} template",
+                t("⬇️ {0} template", t(role)),
                 data=text_grids.template_bytes(role, promo_names, sheet_rows),
                 file_name=f"{role.lower()}_by_promo.xlsx", mime=XLSX_MIME,
                 key=f"text_grid_template_{role}", width="stretch",
             )
     else:
-        st.caption("Upload the main Excel and your promo video(s) first to get "
-                   "templates with the headers already filled in.")
+        st.caption(t("Upload the main Excel and your promo video(s) first to get "
+                   "templates with the headers already filled in."))
 
     grid_reports, grid_overrides, grid_errors = text_grids.check_uploads(
         grid_uploads, promo_names, sheet_rows, reader=read_text_grid)
 
     if any(u is not None for u in grid_uploads.values()):
         if not promo_names:
-            st.info("Upload your promo video(s) — the column headers are "
-                    "checked against their filenames.")
+            st.info(t("Upload your promo video(s) — the column headers are "
+                    "checked against their filenames."))
         checked = st.button(
-            "🔍 Check promo names against these sheets", width="stretch",
-            help="Shows which column of each sheet feeds which promo video.",
-        )
+            t("🔍 Check promo names against these sheets"), width="stretch",
+            help=t("Shows which column of each sheet feeds which promo video."),
+         key='_ui_app_check_promo_names_against_these_sheets')
         # Shown on demand, but forced whenever something is wrong: an error
         # here refuses the batch, so it cannot be behind a button nobody pressed.
         if (checked or grid_errors) and promo_names:
@@ -1352,33 +1410,32 @@ with st.expander(
                        for role, report in grid_reports.items()}
             pairing = []
             for index, name in enumerate(promo_names):
-                entry = {"#": index + 1, "Promo video": name}
+                entry = {"#": index + 1, t("Promo video"): name}
                 for role in TEXT_ROLES:
                     if role not in grid_reports:
-                        entry[role] = "— not uploaded"
+                        entry[t(role)] = t("— not uploaded")
                         continue
                     column = matched[role].get(index)
-                    entry[role] = (f"✅ column “{column}”" if column
-                                   else "⚠️ falls back to the main Excel")
+                    entry[t(role)] = (t("✅ column “{0}”", column) if column
+                                          else t("⚠️ falls back to the main Excel"))
                 pairing.append(entry)
             st.dataframe(pd.DataFrame(pairing), hide_index=True, width="stretch")
             if grid_reports:
-                st.caption(" · ".join(
-                    f"**{role}**: {r.grid_rows} row(s) vs the main Excel's "
-                    f"{r.sheet_rows}, {r.matched}/{len(promo_names)} promo(s) "
-                    "matched" for role, r in grid_reports.items()))
+                st.caption(t(" · ".join(
+                    t("**{0}**: {1} row(s) vs the main Excel's {2}, {3}/{4} promo(s) matched",
+                      t(role), r.grid_rows, r.sheet_rows, r.matched, len(promo_names)) for role, r in grid_reports.items())))
         for message in grid_errors:
-            st.error(message)
+            st.error(t(message))
         if checked or grid_errors:
             for report in grid_reports.values():
                 for message in report.warnings:
-                    st.warning(message)
+                    st.warning(t(message))
         if checked and grid_overrides and not grid_errors:
             st.success(
-                "Every column matches a promo video — "
-                + ", ".join(f"{role} ✓" for role in sorted(grid_overrides))
-                + ". These sheets will be used instead of the main Excel's "
-                  "text.")
+                t("Every column matches a promo video — ")
+                + t(", ".join(f"{t(role)} ✓" for role in sorted(grid_overrides)))
+                + t(". These sheets will be used instead of the main Excel's "
+                  "text."))
 
 # A grid swap changes what every row says, so a preview rendered from the
 # previous one is a picture of something that will never be generated. Saved
@@ -1397,55 +1454,57 @@ st.session_state["text_grid_key"] = grid_key
 # In Promo Alternate mode the alternate pool stands in for the promo — it is
 # what fills the promo's box, so it is what "have we got a picture yet" means.
 ready = df is not None and (bool(promo_alt_files) if promo_alt
-                            else video_file is not None)
+                            else bool(promo_names))
 if not ready:
     st.info(
-        "Upload the Excel sheet and "
-        + ("Promo Alternate clips (sidebar)" if promo_alt else "a promo video")
-        + " to enable preview and generation. The background ZIP and CTA image "
+        t("Upload the Excel sheet and ")
+        + (t("Promo Alternate clips (sidebar)") if promo_alt else
+           t("a promo video (upload files or read a Google Drive folder)"))
+        + t(" to enable preview and generation. The background ZIP and CTA image "
           "are optional — without backgrounds, videos render on the sidebar's "
-          "background color."
+          "background color.")
     )
 
 # ---- actions
-st.subheader("2. Preview a row")
+st.subheader(t("2. Preview a row"))
 
 # With several promos uploaded, Preview and Render Row always used the first
 # one — so there was no way to see how a particular row looks against a
 # particular promo. In the real batch every row is paired automatically and
 # spread across all of them; this is for checking one pairing by eye.
-if promo_files and len(promo_files) > 1:
+if len(promo_names) > 1:
     col_row, col_promo, col_preview, col_render = st.columns(
         [1, 1.6, 1.4, 1.4], vertical_alignment="bottom")
     promo_choice = col_promo.selectbox(
-        "Promo video", options=list(range(len(promo_files))),
-        format_func=lambda i: f"{i + 1}. {promo_files[i].name}",
+        t("Promo video"), options=list(range(len(promo_names))),
+        format_func=option_labels(list(range(len(promo_names))), lambda i: f"{i + 1}. {promo_names[i]}"),
         disabled=not ready,
-        help="Which promo to pair with this row for the preview and the test "
+        help=t("Which promo to pair with this row for the preview and the test "
              "render. The full batch pairs every row automatically, spread "
-             "evenly across all of them.",
-    )
+             "evenly across all of them."),
+     key='_ui_app_promo_video')
     # Preview and Render Row below build their workspace from this one.
-    video_file = promo_files[promo_choice]
+    if promo_source == "upload":
+        video_file = promo_files[promo_choice]
 else:
     promo_choice = 0
     col_row, col_preview, col_render = st.columns(
         [1, 1.5, 1.5], vertical_alignment="bottom")
 
 preview_row = col_row.number_input(
-    "Row to preview", 1, len(df) if df is not None else 1, 1, disabled=not ready,
-    help="Excel data row number (1 = the first row below the header).",
-)
-preview_clicked = col_preview.button("👁️ Preview Row", disabled=not ready, width="stretch")
+    t("Row to preview"), 1, len(df) if df is not None else 1, 1, disabled=not ready,
+    help=t("Excel data row number (1 = the first row below the header)."),
+ key='_ui_app_row_to_preview')
+preview_clicked = col_preview.button(t("👁️ Preview Row"), disabled=not ready, width="stretch", key='_ui_app_preview_row')
 render_row_clicked = col_render.button(
-    "🎬 Render Row", disabled=not ready, width="stretch",
-    help="Render this one row to a real MP4 — with your saved edits — and play "
-         "it here. Slower than the static preview, but it's the actual video.",
-)
+    t("🎬 Render Row"), disabled=not ready, width="stretch",
+    help=t("Render this one row to a real MP4 — with your saved edits — and play "
+         "it here. Slower than the static preview, but it's the actual video."),
+ key='_ui_app_render_row')
 
 
 # ---- clip source: the whole point of the unified flow
-st.subheader("3. CTA clips")
+st.subheader(t("3. CTA clips"))
 
 
 def _scrapes_with_clips() -> list[dict]:
@@ -1466,17 +1525,16 @@ def _scrapes_with_clips() -> list[dict]:
 
 available = _scrapes_with_clips()
 clip_source = st.radio(
-    "Where do the clips come from?",
+    t("Where do the clips come from?"),
     options=["upload", "drive_folder", "scrape_job", "scrape_now"],
-    format_func=lambda m: {
-        "upload": "Upload files in the sidebar (as before)",
-        "drive_folder": "Paste a Google Drive folder link — the server "
-                        "downloads them itself (no upload)",
-        "scrape_job": f"Use a previous scrape already on this machine "
-                      f"({len(available)} available)",
-        "scrape_now": "Scrape an account now (TikTok, Instagram or YouTube), "
-                      "as part of this run",
-    }[m],
+    format_func=option_labels(["upload", "drive_folder", "scrape_job", "scrape_now"], lambda m: {
+        "upload": t("Upload files in the sidebar (as before)"),
+        "drive_folder": t("Paste a Google Drive folder link — the server "
+                        "downloads them itself (no upload)"),
+        "scrape_job": t("Use a previous scrape already on this machine ({0} available)", len(available)),
+        "scrape_now": t("Scrape an account now (TikTok, Instagram or YouTube), "
+                      "as part of this run"),
+    }[m]),
     horizontal=False,
     key=keep("clip_source"),
 )
@@ -1484,104 +1542,104 @@ clip_source = st.radio(
 clip_params: dict = {}
 if clip_source == "drive_folder":
     st.caption(
-        "The clips never touch your browser: the server fetches them straight "
+        t("The clips never touch your browser: the server fetches them straight "
         "from Drive when the batch runs, which is Google-to-Google rather than "
         "up your own connection. Share the folder with the service account "
         "first — read access is enough, and unlike the *upload* destination it "
-        "can be an ordinary My Drive folder."
+        "can be an ordinary My Drive folder.")
     )
     drive_clip_layout = st.radio(
-        "Folder layout",
+        t("Folder layout"),
         options=["per_slot", "pooled"],
-        format_func=lambda m: {
-            "per_slot": "One folder per clip slot (same as the sidebar uploaders)",
-            "pooled": "One folder for everything — deal the clips across the slots",
-        }[m],
+        format_func=option_labels(["per_slot", "pooled"], lambda m: {
+            "per_slot": t("One folder per clip slot (same as the sidebar uploaders)"),
+            "pooled": t("One folder for everything — deal the clips across the slots"),
+        }[m]),
         horizontal=False, key=keep("drive_clip_layout"),
-        help="Per-slot keeps control of which clip plays where. Pooled is the "
+        help=t("Per-slot keeps control of which clip plays where. Pooled is the "
              "unattended version: every clip in the folder is used, spread "
-             "evenly across the slots and never used twice.",
+             "evenly across the slots and never used twice."),
     )
     clip_params["drive_clip_layout"] = drive_clip_layout
 
     if drive_clip_layout == "per_slot":
         clip_params["clips_drive_folders"] = [
             st.text_input(
-                f"Clip {i} — Drive folder link", key=keep(f"cta_clip_drive_{i}"),
-                placeholder="https://drive.google.com/drive/folders/…",
-                help="The folder holding this position's sample videos. Leave "
-                     "blank to skip this slot.",
+                t("Clip {0} — Drive folder link", i), key=keep(f"cta_clip_drive_{i}"),
+                placeholder=t("https://drive.google.com/drive/folders/…"),
+                help=t("The folder holding this position's sample videos. Leave "
+                     "blank to skip this slot."),
             ).strip()
             for i in range(1, cta_slot_count + 1)
         ]
-        _links_to_check = [(f"Clip {i}", link) for i, link
+        _links_to_check = [(t("Clip {0}", i), link) for i, link
                            in enumerate(clip_params["clips_drive_folders"], start=1)
                            if link]
     else:
         clip_params["clips_drive_folder"] = st.text_input(
-            "Drive folder link", key=keep("cta_clips_drive_pooled"),
-            placeholder="https://drive.google.com/drive/folders/…",
-            help="Every video in this folder — and its sub-folders — becomes "
-                 "part of the pool.",
+            t("Drive folder link"), key=keep("cta_clips_drive_pooled"),
+            placeholder=t("https://drive.google.com/drive/folders/…"),
+            help=t("Every video in this folder — and its sub-folders — becomes "
+                 "part of the pool."),
         ).strip()
-        _links_to_check = ([("Clips", clip_params["clips_drive_folder"])]
+        _links_to_check = ([(t("Clips"), clip_params["clips_drive_folder"])]
                            if clip_params["clips_drive_folder"] else [])
 
     # Checking here costs one API call and saves finding out three minutes into
     # a multi-hour job that the folder was never shared.
-    if st.button("🔍 Check the folder(s)", disabled=not _links_to_check):
+    if st.button(t("🔍 Check the folder(s)"), disabled=not _links_to_check, key='_ui_app_check_the_folder_s'):
         from integrations import drive as _drv
 
-        with st.spinner("Reading Drive…"):
+        with st.spinner(t("Reading Drive…")):
             for _label, _link in _links_to_check:
                 _ok, _msg = _drv.check_source(_link)
                 (st.success if _ok else st.error)(f"**{_label}** — {_msg}")
     elif not _links_to_check:
-        st.caption("Paste a folder link to enable the check.")
+        st.caption(t("Paste a folder link to enable the check."))
 
 elif clip_source == "scrape_job":
     if not available:
         st.warning(
-            "No finished scrape has clips on this machine. Scrapes are "
+            t("No finished scrape has clips on this machine. Scrapes are "
             "removed from the server once their clips are safely in Google "
             "Drive, so this list only holds ones that have not been uploaded "
             "yet. To reuse clips that are already in Drive, choose "
             "**Google Drive folder** above and paste that scrape's folder "
-            "link — no re-scraping needed."
+            "link — no re-scraping needed.")
         )
     else:
         pick = st.selectbox(
-            "Which scrape", options=[j["id"] for j in available],
-            format_func=lambda i: next(
-                f"{j['label']} — {j['n_clips']} clips" for j in available if j["id"] == i),
-        )
+            t("Which scrape"), options=[j["id"] for j in available],
+            format_func=option_labels([j["id"] for j in available], lambda i: t(next(
+                t("{0} — {1} clips", j["label"], j["n_clips"]) for j in available if j["id"] == i))),
+         key='_ui_app_which_scrape')
         clip_params["clips_from_job"] = pick
 
 elif clip_source == "scrape_now":
     clip_params["account"] = st.text_input(
-        "Account link (or a TikTok @handle)", key=keep("scrape_account"),
-        placeholder="https://www.tiktok.com/@someaccount",
-        help="A TikTok, Instagram or YouTube profile link — the link says "
-             "which site to scrape. A bare @handle is taken as TikTok.",
+        t("Account link (or a TikTok @handle)"), key=keep("scrape_account"),
+        placeholder=t("https://www.tiktok.com/@someaccount"),
+        help=t("A TikTok, Instagram or YouTube profile link — the link says "
+             "which site to scrape. A bare @handle is taken as TikTok."),
     )
     col_l, col_s, col_d = st.columns(3)
     clip_params["scrape_limit"] = col_l.number_input(
-        "Max videos to scan", 10, 5000, 200, 10, key=keep("scrape_limit"),
-        help="Enumeration runs at roughly 0.26s per post, then downloads are "
-             "rate-limited to about one per 1-2s.")
+        t("Max videos to scan"), 10, 5000, 200, 10, key=keep("scrape_limit"),
+        help=t("Enumeration runs at roughly 0.26s per post, then downloads are "
+             "rate-limited to about one per 1-2s."))
     clip_params["trim_start"] = col_s.number_input(
-        "Trim start (s)", 0.0, 60.0, settings.SCRAPE_TRIM_START, 0.5,
+        t("Trim start (s)"), 0.0, 60.0, settings.SCRAPE_TRIM_START, 0.5,
         key=keep("trim_start"))
     clip_params["trim_duration"] = col_d.number_input(
-        "Trim length (s)", 1.0, 60.0, settings.SCRAPE_TRIM_DURATION, 0.5,
+        t("Trim length (s)"), 1.0, 60.0, settings.SCRAPE_TRIM_DURATION, 0.5,
         key=keep("trim_duration"))
 
 if clip_source != "upload":
     st.caption(
-        "The sidebar clip uploaders are ignored in this mode — clips come from "
-        + ("Drive instead. The sidebar's *Number of clip slots* and the per-clip "
-           "speeds still apply." if clip_source == "drive_folder"
-           else "the scrape instead.")
+        t("The sidebar clip uploaders are ignored in this mode — clips come from ")
+        + (t("Drive instead. The sidebar's *Number of clip slots* and the per-clip "
+           "speeds still apply.") if clip_source == "drive_folder"
+           else t("the scrape instead."))
     )
     # Both non-upload sources fill the same cta_slot_N folders, so the slot
     # count has to travel with the job.
@@ -1590,91 +1648,91 @@ if clip_source != "upload":
 if clip_source in ("scrape_job", "scrape_now"):
     col_st, col_ps = st.columns(2)
     clip_params["clip_strategy"] = col_st.selectbox(
-        "Which clips to use",
+        t("Which clips to use"),
         options=["top_views", "all"],
-        format_func=lambda s: {"top_views": "Best by view count (recommended)",
-                               "all": "All of them"}[s],
+        format_func=option_labels(["top_views", "all"], lambda s: {"top_views": t("Best by view count (recommended)"),
+                               "all": t("All of them")}[s]),
         key=keep("clip_strategy"),
-        help="Curation as a rule rather than a chore: the highest-performing "
+        help=t("Curation as a rule rather than a chore: the highest-performing "
              "clips fill the slots, and the run needs no attention. Clips are "
              "then shuffled into slots, so no slot systematically gets the "
-             "best ones and no clip is used twice.",
+             "best ones and no clip is used twice."),
     )
     clip_params["clips_per_slot"] = col_ps.number_input(
-        "Clips per slot", 1, 50, 10, 1, key=keep("clips_per_slot"))
+        t("Clips per slot"), 1, 50, 10, 1, key=keep("clips_per_slot"))
 
 # ---- GIF source. Deliberately its OWN selector rather than reusing
 # clip_source: the CTA options include "scrape a TikTok account", which has no
 # meaning for a pool of gif loops, and the two layers are independent
 # everywhere else too.
-st.markdown("**GIFs**")
+st.markdown(t("**GIFs**"))
 gif_source = st.radio(
-    "Where do the GIFs come from?",
+    t("Where do the GIFs come from?"),
     options=["upload", "drive_folder"],
-    format_func=lambda m: {
-        "upload": "Upload them in the sidebar (as above)",
-        "drive_folder": "Paste a Google Drive folder link — the server "
-                        "downloads them itself (no upload)",
-    }[m],
+    format_func=option_labels(["upload", "drive_folder"], lambda m: {
+        "upload": t("Upload them in the sidebar (as above)"),
+        "drive_folder": t("Paste a Google Drive folder link — the server "
+                        "downloads them itself (no upload)"),
+    }[m]),
     horizontal=True,
     key=keep("gif_source"),
-    help="Independent of where the CTA clips come from.",
+    help=t("Independent of where the CTA clips come from."),
 )
 if gif_source == "drive_folder":
     clip_params["gifs_drive_folder"] = st.text_input(
-        "GIF folder — Drive link", key=keep("gifs_drive"),
-        placeholder="https://drive.google.com/drive/folders/…",
-        help="Every video in this folder — and its sub-folders — becomes part "
-             "of the gif pool. Share it with the service account first.",
+        t("GIF folder — Drive link"), key=keep("gifs_drive"),
+        placeholder=t("https://drive.google.com/drive/folders/…"),
+        help=t("Every video in this folder — and its sub-folders — becomes part "
+             "of the gif pool. Share it with the service account first."),
     ).strip()
-    st.caption("The sidebar GIF uploader is ignored in this mode.")
-    if st.button("🔍 Check the GIF folder",
-                 disabled=not clip_params.get("gifs_drive_folder")):
+    st.caption(t("The sidebar GIF uploader is ignored in this mode."))
+    if st.button(t("🔍 Check the GIF folder"),
+                 disabled=not clip_params.get("gifs_drive_folder"), key='_ui_app_check_the_gif_folder'):
         from integrations import drive as _drv
 
-        with st.spinner("Reading Drive…"):
+        with st.spinner(t("Reading Drive…")):
             _ok, _msg = _drv.check_source(clip_params["gifs_drive_folder"])
-            (st.success if _ok else st.error)(f"**GIFs** — {_msg}")
+            (st.success if _ok else st.error)(t("**GIFs** — {0}", t(_msg)))
 
 # ---- Background-image source. Its own selector, same as the pools below: the
 # images are independent of every clip layer. Files land in the same folder a ZIP
 # would have been extracted into, so BG_Image names and the random deal behave
 # identically whichever way they arrive.
-st.markdown("**Background images**")
+st.markdown(t("**Background images**"))
 bg_image_source = st.radio(
-    "Where do the background images come from?",
+    t("Where do the background images come from?"),
     options=["upload", "drive_folder"],
-    format_func=lambda m: {
-        "upload": "Upload a ZIP in the sidebar (as above)",
-        "drive_folder": "Paste a Google Drive folder link — the server "
-                        "downloads them itself (no upload)",
-    }[m],
+    format_func=option_labels(["upload", "drive_folder"], lambda m: {
+        "upload": t("Upload a ZIP in the sidebar (as above)"),
+        "drive_folder": t("Paste a Google Drive folder link — the server "
+                        "downloads them itself (no upload)"),
+    }[m]),
     horizontal=True,
     key=keep("bg_image_source"),
-    help="Independent of where the clips, gifs and background videos come from.",
+    help=t("Independent of where the clips, gifs and background videos come from."),
 )
 if bg_image_source == "drive_folder":
     clip_params["bg_images_drive_folder"] = st.text_input(
-        "Background images folder — Drive link", key=keep("bg_images_drive"),
-        placeholder="https://drive.google.com/drive/folders/…",
-        help="Every image (PNG/JPG/WEBP/BMP) in this folder — and its "
+        t("Background images folder — Drive link"), key=keep("bg_images_drive"),
+        placeholder=t("https://drive.google.com/drive/folders/…"),
+        help=t("Every image (PNG/JPG/WEBP/BMP) in this folder — and its "
              "sub-folders — joins the background pool. Share it with the "
              "service account first. An Excel BG_Image cell can name any file "
-             "in it; blank cells get a random one.",
+             "in it; blank cells get a random one."),
     ).strip()
     st.caption(
-        "The sidebar ZIP uploader is ignored in this mode. Preview and *Render "
+        t("The sidebar ZIP uploader is ignored in this mode. Preview and *Render "
         "row* don't read Drive either, so they show the solid background color; "
-        "the batch itself uses the folder."
+        "the batch itself uses the folder.")
     )
-    if st.button("🔍 Check the background images folder",
-                 disabled=not clip_params.get("bg_images_drive_folder")):
+    if st.button(t("🔍 Check the background images folder"),
+                 disabled=not clip_params.get("bg_images_drive_folder"), key='_ui_app_check_the_background_images_folder'):
         from integrations import drive as _drv
 
-        with st.spinner("Reading Drive…"):
+        with st.spinner(t("Reading Drive…")):
             _ok, _msg = _drv.check_source(clip_params["bg_images_drive_folder"],
                                           kind="image")
-            (st.success if _ok else st.error)(f"**Background images** — {_msg}")
+            (st.success if _ok else st.error)(t("**Background images** — {0}", t(_msg)))
 
 
 def _for_preview(frame):
@@ -1685,101 +1743,105 @@ def _for_preview(frame):
 
 # ---- Background-video source. Its own selector for the same reason the gifs
 # have one: the pool is independent of both clip layers everywhere else.
-st.markdown("**Background videos**")
+st.markdown(t("**Background videos**"))
 bg_video_source = st.radio(
-    "Where do the background videos come from?",
+    t("Where do the background videos come from?"),
     options=["upload", "drive_folder"],
-    format_func=lambda m: {
-        "upload": "Upload them in the sidebar (as above)",
-        "drive_folder": "Paste a Google Drive folder link — the server "
-                        "downloads them itself (no upload)",
-    }[m],
+    format_func=option_labels(["upload", "drive_folder"], lambda m: {
+        "upload": t("Upload them in the sidebar (as above)"),
+        "drive_folder": t("Paste a Google Drive folder link — the server "
+                        "downloads them itself (no upload)"),
+    }[m]),
     horizontal=True,
     key=keep("bg_video_source"),
-    help="Independent of where the CTA clips and gifs come from.",
+    help=t("Independent of where the CTA clips and gifs come from."),
 )
 if bg_video_source == "drive_folder":
     clip_params["bg_videos_drive_folder"] = st.text_input(
-        "Background videos folder — Drive link", key=keep("bg_videos_drive"),
-        placeholder="https://drive.google.com/drive/folders/…",
-        help="Every video in this folder — and its sub-folders — joins the "
-             "background pool. Share it with the service account first.",
+        t("Background videos folder — Drive link"), key=keep("bg_videos_drive"),
+        placeholder=t("https://drive.google.com/drive/folders/…"),
+        help=t("Every video in this folder — and its sub-folders — joins the "
+             "background pool. Share it with the service account first."),
     ).strip()
-    st.caption("The sidebar background-video uploader is ignored in this mode.")
-    if st.button("🔍 Check the background videos folder",
-                 disabled=not clip_params.get("bg_videos_drive_folder")):
+    st.caption(t("The sidebar background-video uploader is ignored in this mode."))
+    if st.button(t("🔍 Check the background videos folder"),
+                 disabled=not clip_params.get("bg_videos_drive_folder"), key='_ui_app_check_the_background_videos_folder'):
         from integrations import drive as _drv
 
-        with st.spinner("Reading Drive…"):
+        with st.spinner(t("Reading Drive…")):
             _ok, _msg = _drv.check_source(clip_params["bg_videos_drive_folder"])
-            (st.success if _ok else st.error)(f"**Background videos** — {_msg}")
+            (st.success if _ok else st.error)(t("**Background videos** — {0}", t(_msg)))
 
 # ---- Music source. Its own selector again, and the only one that reads AUDIO
 # files out of Drive — a folder of MP3s is invisible to the three above.
-st.markdown("**Music**")
+st.markdown(t("**Music**"))
 music_source = st.radio(
-    "Where does the music come from?",
+    t("Where does the music come from?"),
     options=["upload", "drive_folder"],
-    format_func=lambda m: {
-        "upload": "Upload it in the sidebar (as above)",
-        "drive_folder": "Paste a Google Drive folder link — the server "
-                        "downloads it itself (no upload)",
-    }[m],
+    format_func=option_labels(["upload", "drive_folder"], lambda m: {
+        "upload": t("Upload it in the sidebar (as above)"),
+        "drive_folder": t("Paste a Google Drive folder link — the server "
+                        "downloads it itself (no upload)"),
+    }[m]),
     horizontal=True,
     key=keep("music_source"),
-    help="Independent of where the clips, gifs and background videos come from.",
+    help=t("Independent of where the clips, gifs and background videos come from."),
 )
 if music_source == "drive_folder":
     clip_params["music_drive_folder"] = st.text_input(
-        "Music folder — Drive link", key=keep("music_drive"),
-        placeholder="https://drive.google.com/drive/folders/…",
-        help="Every audio file in this folder — and its sub-folders — joins the "
-             "music pool. Share it with the service account first.",
+        t("Music folder — Drive link"), key=keep("music_drive"),
+        placeholder=t("https://drive.google.com/drive/folders/…"),
+        help=t("Every audio file in this folder — and its sub-folders — joins the "
+             "music pool. Share it with the service account first."),
     ).strip()
-    st.caption("The sidebar music uploader is ignored in this mode.")
-    if st.button("🔍 Check the music folder",
-                 disabled=not clip_params.get("music_drive_folder")):
+    st.caption(t("The sidebar music uploader is ignored in this mode."))
+    if st.button(t("🔍 Check the music folder"),
+                 disabled=not clip_params.get("music_drive_folder"), key='_ui_app_check_the_music_folder'):
         from integrations import drive as _drv
 
-        with st.spinner("Reading Drive…"):
+        with st.spinner(t("Reading Drive…")):
             _ok, _msg = _drv.check_source(clip_params["music_drive_folder"],
                                           kind="audio")
-            (st.success if _ok else st.error)(f"**Music** — {_msg}")
+            (st.success if _ok else st.error)(t("**Music** — {0}", t(_msg)))
 if music_source == "upload" and not music_files and music_volume:
-    st.caption("No tracks uploaded yet — the music layer stays off until there "
-               "are some.")
+    st.caption(t("No tracks uploaded yet — the music layer stays off until there "
+               "are some."))
 
 # ---- captions
-st.subheader("4. Captions")
+st.subheader(t("4. Captions"))
 _pool = store.active_pool()
-if _pool:
-    st.caption(f"Active pool: **{_pool['combinations']:,} unique pairs** left to "
-               f"draw from · theme *{_pool.get('theme')}*")
 caption_mode = st.radio(
-    "Captions",
-    options=["existing", "generate"],
-    format_func=lambda m: {
-        "existing": ("Use the active caption pool" if _pool
-                     else "No pool — name files from the sheet's Headline"),
-        "generate": "Generate a fresh pool first (Gemini)",
-    }[m],
+    t("Captions"),
+    options=["existing", "generate", "none"],
+    format_func=option_labels(["existing", "generate", "none"], lambda m: {
+        "existing": (t("Use the active caption pool") if _pool
+                     else t("No pool — name files from the sheet's Headline")),
+        "generate": t("Generate a fresh pool first (Gemini)"),
+        "none": t("None — no captions; name files from Headline"),
+    }[m]),
     horizontal=True,
     key=keep("caption_mode"),
 )
-caption_params: dict = {}
+caption_params: dict = {"caption_mode": caption_mode}
+if _pool and caption_mode != "none":
+    st.caption(t("Active pool: **{0:,} unique pairs** left to draw from · theme *{1}*", _pool['combinations'], _pool.get('theme')))
+if caption_mode == "none":
+    st.session_state[keep("fixed_tail")] = False
+    st.session_state[keep("hashtag_source")] = "none"
 
 fixed_tail = st.checkbox(
-    "End every filename with a fixed call-to-action line",
+    t("End every filename with a fixed call-to-action line"),
     value=False, key=keep("fixed_tail"),
-    help="One of the lines below is picked at random for each video and added "
+    disabled=caption_mode == "none",
+    help=t("One of the lines below is picked at random for each video and added "
          "after its caption. Hashtags are switched off while this is on — the "
          "name carries one ending, not two, and both would not fit inside the "
-         "90-character cap.",
+         "90-character cap."),
 )
 caption_params["fixed_tail"] = bool(fixed_tail)
 if fixed_tail:
-    st.caption("One of these, at random, per video:\n\n"
-               + "\n".join(f"- {t}" for t in caption_naming.FIXED_TAILS))
+    st.caption(t("One of these, at random, per video:\n\n")
+               + t("\n".join(f"- {t}" for t in caption_naming.FIXED_TAILS)))
     # A pool generated before the caption limit dropped holds captions too long
     # to sit beside the line, and they are cut at naming time. Measured against
     # the real pool rather than guessed, so the warning only appears when it
@@ -1789,25 +1851,24 @@ if fixed_tail:
     _over = [c for c in ((_pool or {}).get("captions") or []) if len(c) > _room]
     if _over and caption_mode == "existing":
         st.warning(
-            f"**{len(_over):,} of {len(_pool['captions']):,} captions in the "
-            f"active pool are longer than {_room} characters** and will be cut "
-            f"to fit beside the line (the line itself is never cut). This pool "
-            f"predates the {settings.CAPTION_MAX_CHARS}-character limit — "
-            f"generate a fresh one to avoid it."
+            t("**{0:,} of {1:,} captions in the active pool are longer than {2} characters** and"
+              " will be cut to fit beside the line (the line itself is never cut). This pool "
+              "predates the {3}-character limit — generate a fresh one to avoid it.", len(_over), len(_pool['captions']), _room, settings.CAPTION_MAX_CHARS)
         )
 
 hashtag_source = st.radio(
-    "Hashtags",
+    t("Hashtags"),
     options=["pool", "excel", "none"],
-    format_func=lambda m: {
-        "pool": "From the caption pool",
-        "excel": "From an Excel file I upload",
-        "none": "None — filenames are the caption only",
-    }[m],
+    format_func=option_labels(["pool", "excel", "none"], lambda m: {
+        "pool": t("From the caption pool"),
+        "excel": t("From an Excel file I upload"),
+        "none": (t("None — filenames use Headline") if caption_mode == "none"
+                 else t("None — filenames are the caption only")),
+    }[m]),
     horizontal=True,
-    disabled=bool(fixed_tail), key=keep("hashtag_source"),
-    help="Hashtags are optional. Without them the short filename is just the "
-         "caption, still capped at 90 characters.",
+    disabled=bool(fixed_tail) or caption_mode == "none", key=keep("hashtag_source"),
+    help=t("Hashtags are optional. Without them the short filename is just the "
+         "caption, still capped at 90 characters."),
 )
 if fixed_tail:
     # Recorded as 'none' so nothing downstream reads a stale choice as live —
@@ -1820,97 +1881,97 @@ script_file = None
 script_source = "upload"
 if voice_enabled:
     script_source = st.radio(
-        "Scripts",
+        t("Scripts"),
         options=["upload", "generate"],
-        format_func=lambda m: {
-            "upload": "From a file I upload",
-            "generate": "Generate one per video (Gemini)",
-        }[m],
+        format_func=option_labels(["upload", "generate"], lambda m: {
+            "upload": t("From a file I upload"),
+            "generate": t("Generate one per video (Gemini)"),
+        }[m]),
         horizontal=True, key=keep("script_source"),
-        help="Either way, a row with its own `Voiceover` cell keeps it, and a "
-             "row with only `Screen_Text` stays silent.",
+        help=t("Either way, a row with its own `Voiceover` cell keeps it, and a "
+             "row with only `Screen_Text` stays silent."),
     )
 if voice_enabled and script_source == "generate":
     caption_params["script_prompt"] = st.text_area(
-        "Script prompt",
+        t("Script prompt"),
         height=200, key=keep("script_prompt"),
-        placeholder="e.g. Write a 15-second TikTok voiceover for a skincare "
+        placeholder=t("e.g. Write a 15-second TikTok voiceover for a skincare "
                     "serum. Open with a hook, name one benefit, end with a "
-                    "call to action. Casual, second person.",
-        help="Sent to Gemini as written — describe the product, tone and "
+                    "call to action. Casual, second person."),
+        help=t("Sent to Gemini as written — describe the product, tone and "
              "length here. The app only adds how many scripts to write and "
              "asks for plain spoken text. Every video gets its own script, "
              "written when the job starts, and each script is also the "
-             "video's on-screen caption.",
+             "video's on-screen caption."),
     )
     _prompt = caption_params["script_prompt"].strip()
     if not _prompt:
-        st.error("A script prompt is required to generate scripts — enter "
-                 "one, or switch Scripts to an uploaded file.")
+        st.error(t("A script prompt is required to generate scripts — enter "
+                 "one, or switch Scripts to an uploaded file."))
     _sample = st.session_state.get("sample_script") or {}
     _have_sample = _sample.get("prompt") == _prompt and bool(_sample.get("script"))
-    if st.button("🔄 New sample script" if _have_sample else "✍️ Write a sample script",
+    if st.button(t("🔄 New sample script") if _have_sample else t("✍️ Write a sample script"),
                  disabled=not _prompt,
-                 help="Preview and Render row narrate one sample from this "
+                 help=t("Preview and Render row narrate one sample from this "
                       "prompt, written on first use and kept until the prompt "
                       "changes. The batch still writes a new script for every "
-                      "video."):
+                      "video."), key="_ui_app_1813_" + str("🔄 New sample script" if _have_sample else "✍️ Write a sample script")):
         st.session_state.pop("sample_script", None)
         sample_script(_prompt)
         _sample = st.session_state.get("sample_script") or {}
         _have_sample = bool(_sample.get("script"))
     if _have_sample:
-        st.caption(f"Sample for Preview and Render row (click Preview again "
-                   f"after changing it): “{_sample['script']}”")
+        st.caption(t("Sample for Preview and Render row (click Preview again after changing it): “{0}”", _sample['script']))
     if not settings.gemini_configured():
-        st.warning("Vertex AI isn't configured — no scripts will be written "
-                   "and those videos will render silent.")
+        st.warning(t("Vertex AI isn't configured — no scripts will be written "
+                   "and those videos will render silent."))
 caption_params["script_source"] = script_source
 if voice_enabled and script_source == "upload":
     script_file = st.file_uploader(
-        "Script pool (.txt / .xlsx) — one script per line or per paragraph",
+        t("Script pool (.txt / .xlsx) — one script per line or per paragraph"),
         type=["txt", "md", "xlsx", "csv"],
+        on_change=presets_ui.upload_changed, args=("scripts",),
         key=presets_ui.uploader_key("scripts"),
-        help="Used only for rows with an empty `Voiceover` cell. Scripts are "
+        help=t("Used only for rows with an empty `Voiceover` cell. Scripts are "
              "dealt round-robin so the spread across the batch is even, and "
              "each one rotates through the chosen voices. A .txt with blank "
              "lines between entries treats each paragraph as one script; "
-             "without blank lines, one per line.",
+             "without blank lines, one per line."),
     )
     script_file = presets_ui.with_saved("scripts", script_file, multiple=False)
     if script_file is not None:
         from speech.pool import parse_scripts as _parse_scripts
         _preview = _parse_scripts(script_file.getvalue(), script_file.name)
         if _preview:
-            st.caption(f"**{len(_preview)}** script(s) — first one: "
-                       f"“{_preview[0][:90]}”")
+            st.caption(t("**{0}** script(s) — first one: “{1}”", len(_preview), _preview[0][:90]))
         else:
-            st.warning(f"No scripts found in `{script_file.name}`. Rows with an "
-                       "empty Voiceover cell will render silent.")
+            st.warning(t("No scripts found in `{0}`. Rows with an empty Voiceover cell will render silent.", script_file.name))
 
 hashtag_file = None
 if hashtag_source == "excel":
     hashtag_file = st.file_uploader(
-        "Hashtag sets (.xlsx) — one set per row in the first column",
-        type=["xlsx"], key=presets_ui.uploader_key("hashtags"),
-        help="e.g. a column of rows like '#asmr #satisfying #fyp'. They are "
-             "cycled across the batch, so the spread is even.",
+        t("Hashtag sets (.xlsx) — one set per row in the first column"),
+        type=["xlsx"],
+        on_change=presets_ui.upload_changed, args=("hashtags",),
+        key=presets_ui.uploader_key("hashtags"),
+        help=t("e.g. a column of rows like '#asmr #satisfying #fyp'. They are "
+             "cycled across the batch, so the spread is even."),
     )
     hashtag_file = presets_ui.with_saved("hashtags", hashtag_file, multiple=False)
     col_t, col_p = st.columns([1, 2])
     with col_t:
         st.download_button(
-            "⬇️ Sample file",
+            t("⬇️ Sample file"),
             data=hashtag_template_bytes(),
             file_name="hashtags_sample.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            help="A ready-to-edit workbook — replace the rows with your own.",
-        )
+            help=t("A ready-to-edit workbook — replace the rows with your own."),
+         key='_ui_app_sample_file')
     with col_p:
         if hashtag_file is None:
             st.warning(
-                "**No file yet** — the caption pool's hashtags will be used "
-                "instead. Upload one, or switch the setting above."
+                t("**No file yet** — the caption pool's hashtags will be used "
+                "instead. Upload one, or switch the setting above.")
             )
         else:
             # Parsed here, not at render time, so a wrong column or an empty
@@ -1924,24 +1985,23 @@ if hashtag_source == "excel":
                 parsed = [p for p in parsed if p]
                 if not parsed:
                     st.error(
-                        "No hashtags found in the first column. Each row should "
-                        "hold one set, e.g. `#asmr #satisfying #fyp`."
+                        t("No hashtags found in the first column. Each row should "
+                        "hold one set, e.g. `#asmr #satisfying #fyp`.")
                     )
                 else:
-                    st.success(f"**{len(parsed)} hashtag set(s)** read from "
-                               f"`{hashtag_file.name}`.")
-                    st.caption("First few: " + " · ".join(parsed[:3]))
+                    st.success(t("**{0} hashtag set(s)** read from `{1}`.", len(parsed), hashtag_file.name))
+                    st.caption(t("First few: ") + t(" · ".join(parsed[:3])))
             except Exception as exc:  # noqa: BLE001
-                st.error(f"Couldn't read that file: {exc}")
+                st.error(t("Couldn't read that file: {0}", exc))
 
 if caption_mode == "generate":
     caption_params["generate_pool"] = True
     caption_params["force_new_pool"] = True
     caption_params["caption_theme"] = st.text_input(
-        "Caption theme", value=settings.CAPTION_THEME, key=keep("caption_theme"),
-        placeholder="e.g. satisfying ASMR clips promoting a skincare brand",
-        help="The single biggest lever on caption quality — be specific about "
-             "the product and the audience.",
+        t("Caption theme"), value=settings.CAPTION_THEME, key=keep("caption_theme"),
+        placeholder=t("e.g. satisfying ASMR clips promoting a skincare brand"),
+        help=t("The single biggest lever on caption quality — be specific about "
+             "the product and the audience."),
     )
     # One caption per video, never reused, so this needs to reach
     # `batches x rows` — checked against the real total in section 5 below,
@@ -1950,42 +2010,40 @@ if caption_mode == "generate":
     if hashtag_source == "pool":
         col_cc, col_hh = st.columns(2)
         caption_params["caption_count"] = col_cc.number_input(
-            "Captions", 50, _cap_max, 500, 50, key=keep("caption_count"))
+            t("Captions"), 50, _cap_max, 500, 50, key=keep("caption_count"))
         caption_params["hashtag_count"] = col_hh.number_input(
-            "Hashtag sets", 25, settings.HASHTAG_POOL_MAX, 100, 25,
+            t("Hashtag sets"), 25, settings.HASHTAG_POOL_MAX, 100, 25,
             key=keep("hashtag_count"))
     else:
         # Generating hashtag sets that an uploaded sheet would immediately
         # override is money spent on output nobody sees.
         caption_params["caption_count"] = st.number_input(
-            "Captions", 50, _cap_max, 500, 50, key=keep("caption_count"))
+            t("Captions"), 50, _cap_max, 500, 50, key=keep("caption_count"))
         caption_params["hashtag_count"] = 0
         st.caption(
-            "Only captions will be generated — hashtags come from "
-            + ("your uploaded file." if hashtag_source == "excel"
-               else "the fixed call-to-action line above." if fixed_tail
-               else "nowhere, by choice.")
+            t("Only captions will be generated — hashtags come from ")
+            + (t("your uploaded file.") if hashtag_source == "excel"
+               else t("the fixed call-to-action line above.") if fixed_tail
+               else t("nowhere, by choice."))
         )
     # Same arithmetic the Setup page shows. Worth repeating here because this
     # is where a large batch gets planned, and a big pool is neither instant
     # nor free — 16,000 captions is ~160 model calls.
     _cc = int(caption_params["caption_count"])
     st.caption(
-        f"~{max(1, _cc // 100)} model call(s), run "
-        f"{settings.CAPTION_CONCURRENCY} at a time — roughly "
-        f"${_cc / 2000 * 2:.2f} of {settings.GEMINI_POOL_MODEL} usage."
+        t("~{0} model call(s), run {1} at a time — roughly ${2:.2f} of {3} usage.", max(1, _cc // 100), settings.CAPTION_CONCURRENCY, _cc / 2000 * 2, settings.GEMINI_POOL_MODEL)
     )
     if not caption_params["caption_theme"].strip():
         st.error(
-            "A caption theme is required to generate a pool — it is what the "
+            t("A caption theme is required to generate a pool — it is what the "
             "captions are about. Enter one, or switch to “Use the active "
-            "caption pool”."
+            "caption pool”.")
         )
     if not settings.gemini_configured():
-        st.warning("Vertex AI isn't configured — this stage will be skipped and "
-                   "files will fall back to Headline names.")
+        st.warning(t("Vertex AI isn't configured — this stage will be skipped and "
+                   "files will fall back to Headline names."))
 
-st.subheader("5. Generate")
+st.subheader(t("5. Generate"))
 
 # One sheet becomes `batches x rows` videos: the same rows rendered once per
 # batch, each pass with a different promo video and different clip picks.
@@ -2008,43 +2066,42 @@ col_c = None if promo_alt else cols[2]
 # Default to one pass per promo, which is the pairing people expect: every row
 # rendered once with every promo. With no promos there is no such pairing, so
 # one pass — more is a deliberate ask for more variants.
-_n_promos = max(1, len(promo_files or []))
+_n_promos = max(1, len(promo_names))
 _batches_default = 1 if promo_alt else _n_promos
 # Keyed so a saved job can set it, which means it no longer re-defaults by
 # itself when the promo count changes — follow_default puts that back.
 presets_ui.follow_default("n_batches", _batches_default)
 n_batches = col_b.number_input(
-    "Batches to render", 1, MAX_PASSES, _batches_default, 1,
+    t("Batches to render"), 1, MAX_PASSES, _batches_default, 1,
     disabled=not ready, key=keep("n_batches"),
-    help="How many times the sheet is rendered. "
-         + ("Each pass draws a different Promo Alternate sequence and different "
+    help=t("How many times the sheet is rendered. ")
+         + (t("Each pass draws a different Promo Alternate sequence and different "
             "CTA clips for every row, so N passes give N different videos per "
-            "row." if promo_alt else
-            "Each pass uses the next promo video and picks different sample "
+            "row.") if promo_alt else
+            t("Each pass uses the next promo video and picks different sample "
             "clips. Set this to the number of promos and every row is rendered "
-            "once with every promo."),
+            "once with every promo.")),
 )
 if not promo_alt and _n_promos > 1 and int(n_batches) < _n_promos:
     st.warning(
-        f"Only {int(n_batches)} pass(es) but {_n_promos} promo videos — promos "
-        f"{int(n_batches) + 1}–{_n_promos} would never be used. Set batches to "
-        f"{_n_promos} to render every row with every promo."
+        t("Only {0} pass(es) but {1} promo videos — promos {2}–{3} would never be used. Set "
+          "batches to {4} to render every row with every promo.", int(n_batches), _n_promos, int(n_batches) + 1, _n_promos, _n_promos)
     )
 presets_ui.follow_default("n_folders", int(n_batches))
 n_folders = col_f.number_input(
-    "Output folders", 1, MAX_PASSES, int(n_batches), 1, disabled=not ready,
+    t("Output folders"), 1, MAX_PASSES, int(n_batches), 1, disabled=not ready,
     key=keep("n_folders"),
-    help="Finished videos are mixed evenly across this many Drive folders, so "
+    help=t("Finished videos are mixed evenly across this many Drive folders, so "
          "no folder is just one promo video. Usually the same as the batch "
-         "count. A minimum when a copies limit is set beside it.",
+         "count. A minimum when a copies limit is set beside it."),
 )
 max_per_folder = 0 if col_c is None else col_c.number_input(
-    "Max copies of one promo per folder", 0, 10_000, 0, 1, disabled=not ready,
+    t("Max copies of one promo per folder"), 0, 10_000, 0, 1, disabled=not ready,
     key=keep("max_per_folder"),
-    help="0 = off. When set, the output-folder count is raised (never lowered) "
+    help=t("0 = off. When set, the output-folder count is raised (never lowered) "
          "until no folder holds more videos made from any one promo than this. "
          "More folders means SMALLER folders — if you need big folders at this "
-         "limit, upload more promo videos instead.",
+         "limit, upload more promo videos instead."),
 )
 
 # The folder count actually submitted. `n_folders` above is a floor, not the
@@ -2059,53 +2116,48 @@ if max_per_folder and df is not None and len(df):
     n_folders_eff = next(
         (f for f in range(int(n_folders), MAX_PASSES + 1)
          if batching.max_copies_per_promo(
-             int(n_batches), len(df), f, max(1, len(promo_files or [])))
+             int(n_batches), len(df), f, max(1, len(promo_names)))
          <= max_per_folder),
         # Unsatisfiable at any folder count: too few promos for a folder this
         # size. Keep what was typed; the warning below says how many are needed.
         int(n_folders),
     )
 _PLATFORM_CHOICES = {
-    "yt,tk": "Both — yt.zip and tk.zip",
-    "tk": "TikTok only — tk.zip (long names)",
-    "yt": "YouTube only — yt.zip (short names)",
+    "yt,tk": t("Both — yt.zip and tk.zip"),
+    "tk": t("TikTok only — tk.zip (long names)"),
+    "yt": t("YouTube only — yt.zip (short names)"),
 }
 upload_platforms = st.selectbox(
-    "Publish which names?", list(_PLATFORM_CHOICES),
-    format_func=lambda key: _PLATFORM_CHOICES[key], disabled=not ready,
+    t("Publish which names?"), list(_PLATFORM_CHOICES),
+    format_func=option_labels(list(_PLATFORM_CHOICES), lambda key: t(_PLATFORM_CHOICES[key])), disabled=not ready,
     key=keep("upload_platforms"),
-    help="Google allows one account 750 GB per rolling 24 hours into Drive, "
+    help=t("Google allows one account 750 GB per rolling 24 hours into Drive, "
          "and each video is published under two names — so a very large batch "
          "cannot send both in one day. Pick one now and run this job again "
          "tomorrow with the other: the videos stay on the VM until both have "
-         "been published, and the second run skips what already landed.",
+         "been published, and the second run skips what already landed."),
 )
 
 if ready and df is not None:
     total_videos = len(df) * int(n_batches)
-    promo_count = len(promo_files or [])
+    promo_count = len(promo_names)
     _n_names = len(upload_platforms.split(","))
-    note = (f"**{len(df):,} rows x {int(n_batches)} passes = "
-            f"{total_videos:,} videos**, mixed across {n_folders_eff} folders, "
-            + (("each published twice under the SAME name — the fixed "
+    note = (t("**{0:,} rows x {1} passes = {2:,} videos**, mixed across {3} folders, ", len(df), int(n_batches), total_videos, n_folders_eff)
+            + ((t("each published twice under the SAME name — the fixed "
                 "call-to-action leaves the two forms identical, so one "
-                "platform's set is enough unless you want both folders."
-                if fixed_tail else "each published under both names.")
+                "platform's set is enough unless you want both folders.")
+                if fixed_tail else t("each published under both names."))
                if _n_names == 2 else
-               f"published as `{upload_platforms}.zip` only."))
+               t("published as `{0}.zip` only.", upload_platforms)))
     if promo_alt:
-        note += (f" No promo video: every pass draws its own Promo Alternate "
-                 f"sequence from the {len(promo_alt_files or [])} clip(s) "
-                 "uploaded, so the passes differ by their clips rather than by "
-                 "a promo.")
+        note += (t(" No promo video: every pass draws its own Promo Alternate sequence from the "
+                   "{0} clip(s) uploaded, so the passes differ by their clips rather than by a "
+                   "promo.", len(promo_alt_files or [])))
     elif promo_count > 1 and int(n_batches) == promo_count:
-        note += (f" Every row is rendered once with each of the {promo_count} "
-                 "promos — all pairings, no repeats.")
+        note += (t(" Every row is rendered once with each of the {0} promos — all pairings, no repeats.", promo_count))
     elif promo_count and int(n_batches) > promo_count:
-        note += (f" Only {promo_count} promo video(s), so they cycle across the "
-                 f"{int(n_batches)} passes — each pairing occurs "
-                 f"{int(n_batches) // promo_count}x.")
-    st.caption(note)
+        note += (t(" Only {0} promo video(s), so they cycle across the {1} passes — each pairing occurs {2}x.", promo_count, int(n_batches), int(n_batches) // promo_count))
+    st.caption(t(note))
 
     # What every folder will actually hold. Derived, not chosen: mix_into_folders
     # is stratified rather than shuffled, so this number was always guaranteed —
@@ -2113,15 +2165,13 @@ if ready and df is not None:
     _worst = batching.max_copies_per_promo(int(n_batches), len(df),
                                            n_folders_eff, max(1, promo_count))
     _per_folder = total_videos // max(1, n_folders_eff)
-    st.caption(f"{n_folders_eff} folder(s) x ~{_per_folder:,} videos"
+    st.caption(t("{0} folder(s) x ~{1:,} videos", n_folders_eff, _per_folder)
                + ("." if promo_alt else
-                  f", at most {_worst} copies of any one promo in any one "
-                  "folder."))
+                  t(", at most {0} copies of any one promo in any one folder.", _worst)))
     if n_folders_eff != int(n_folders):
         st.info(
-            f"Output folders raised {int(n_folders)} → {n_folders_eff} to keep "
-            f"every folder at ≤{int(max_per_folder)} copies of one promo. "
-            f"Folders are smaller as a result (~{_per_folder:,} videos each)."
+            t("Output folders raised {0} → {1} to keep every folder at ≤{2} copies of one promo."
+              " Folders are smaller as a result (~{3:,} videos each).", int(n_folders), n_folders_eff, int(max_per_folder), _per_folder)
         )
     elif max_per_folder and _worst > max_per_folder:
         # No folder count fixes this, so say which of the TWO factors is over
@@ -2135,16 +2185,14 @@ if ready and df is not None:
                                                MAX_PASSES, max(1, promo_count))
         _need = -(-int(n_batches) // int(max_per_folder))
         st.warning(
-            f"**{_worst} copies of one promo per folder, above your limit of "
-            f"{int(max_per_folder)}** — and no folder count fixes it: even at "
-            f"the {MAX_PASSES}-folder maximum it is {_floor}.  \n"
-            + (f"{promo_count} promo(s) across {int(n_batches)} passes means "
-               f"each one is reused {_reuse}x, so it lands at least {_reuse} "
-               f"times in some folder however the videos are split. Upload at "
-               f"least {_need} promo videos and set batches to match."
+            t("**{0} copies of one promo per folder, above your limit of {1}** — and no folder "
+              "count fixes it: even at the {2}-folder maximum it is {3}.  \n", _worst, int(max_per_folder), MAX_PASSES, _floor)
+            + (t("{0} promo(s) across {1} passes means each one is reused {2}x, so it lands at "
+                 "least {3} times in some folder however the videos are split. Upload at least "
+                 "{4} promo videos and set batches to match.", promo_count, int(n_batches), _reuse, _reuse, _need)
                if _reuse > max_per_folder else
-               f"{len(df):,} sheet rows is too many to thin out across "
-               f"{MAX_PASSES} folders. Use a shorter sheet, or raise the limit.")
+               t("{0:,} sheet rows is too many to thin out across {1} folders. Use a shorter "
+                 "sheet, or raise the limit.", len(df), MAX_PASSES))
         )
 
     # Captions are the other quantity that has to reach `batches x rows`: one
@@ -2155,30 +2203,25 @@ if ready and df is not None:
         _planned = int(caption_params.get("caption_count") or 0)
         if _planned < total_videos:
             st.warning(
-                f"**{_planned:,} captions for {total_videos:,} videos.** Each "
-                "video takes its own and none is ever reused, so this batch "
-                "would be refused before it rendered. Raise *Captions* in "
-                f"section 4 to at least {total_videos:,}."
+                t("**{0:,} captions for {1:,} videos.** Each video takes its own and none is "
+                  "ever reused, so this batch would be refused before it rendered. Raise "
+                  "*Captions* in section 4 to at least {2:,}.", _planned, total_videos, total_videos)
             )
-    elif _pool:
+    elif caption_mode == "existing" and _pool:
         _unused, _total_caps = store.pool_remaining(_pool["id"])
         if _unused < total_videos:
             st.warning(
-                f"**The active pool has {_unused:,} captions left of "
-                f"{_total_caps:,}, but this batch needs {total_videos:,}.** "
-                "A pool is a consumable and never starts over — generate a "
-                "fresh one, or render fewer batches."
+                t("**The active pool has {0:,} captions left of {1:,}, but this batch needs "
+                  "{2:,}.** A pool is a consumable and never starts over — generate a fresh one,"
+                  " or render fewer batches.", _unused, _total_caps, total_videos)
             )
 
     if voice_enabled and script_source == "generate":
         # "Up to": rows with their own Voiceover or Screen_Text take no script.
         from captions.pool import SCRIPT_CHUNK_SIZE
         st.caption(
-            f"Up to **{total_videos:,} scripts** to write — "
-            f"~{-(-total_videos // SCRIPT_CHUNK_SIZE):,} Gemini call(s), "
-            f"{settings.CAPTION_CONCURRENCY} at a time — then one voiceover "
-            f"per video, {settings.VOICE_WORKERS} at a time, before rendering "
-            "starts."
+            t("Up to **{0:,} scripts** to write — ~{1:,} Gemini call(s), {2} at a time — then "
+              "one voiceover per video, {3} at a time, before rendering starts.", total_videos, -(-total_videos // SCRIPT_CHUNK_SIZE), settings.CAPTION_CONCURRENCY, settings.VOICE_WORKERS)
         )
 
     # Google allows one account 750 GB per rolling 24 hours into Drive, and
@@ -2190,64 +2233,61 @@ if ready and df is not None:
     if _EST_GB > 750:
         _fits = int(750 * 1024 / (31 * _n_names))
         st.warning(
-            f"**About {_EST_GB:,.0f} GB into Drive — over the 750 GB that one "
-            f"account may upload per rolling 24 hours.** The last "
-            f"{total_videos - _fits:,} video(s) would fail with a rate-limit "
-            "error and need requeueing tomorrow."
-            + ("  \nPublishing **one** set of names instead would fit "
-               f"({_EST_GB / 2:,.0f} GB) — run this job again tomorrow for the "
-               "other." if _n_names == 2 else
-               "  \nRender fewer batches, or split this across two days.")
+            t("**About {0:,.0f} GB into Drive — over the 750 GB that one account may upload per "
+              "rolling 24 hours.** The last {1:,} video(s) would fail with a rate-limit error "
+              "and need requeueing tomorrow.", _EST_GB, total_videos - _fits)
+            + (t("  \nPublishing **one** set of names instead would fit ({0:,.0f} GB) — run this "
+                 "job again tomorrow for the other.", _EST_GB / 2) if _n_names == 2 else
+               t("  \nRender fewer batches, or split this across two days."))
         )
 
     if total_videos > 3000:
         st.warning(
-            f"{total_videos:,} videos is a long run — roughly "
-            f"{total_videos * 2 / 3600:.1f}–{total_videos * 3 / 3600:.1f} hours "
-            "of rendering. The VM must stay up for the whole job. It resumes "
-            "if interrupted, but it won't finish until it's back."
+            t("{0:,} videos is a long run — roughly {1:.1f}–{2:.1f} hours of rendering. The VM "
+              "must stay up for the whole job. It resumes if interrupted, but it won't finish "
+              "until it's back.", total_videos, total_videos * 2 / 3600, total_videos * 3 / 3600)
         )
 
 # Generation runs in the background worker, so the batch needs a name to find it
 # by later and an address to report back to.
 col_label, col_mail = st.columns(2)
 batch_label = col_label.text_input(
-    "Batch name (optional)", value="", disabled=not ready, key=keep("batch_label"),
-    placeholder="e.g. asmr-week32-set1",
-    help="Shown on the Jobs page and in the notification email. Defaults to the "
-         "Excel file name.",
+    t("Batch name (optional)"), value="", disabled=not ready, key=keep("batch_label"),
+    placeholder=t("e.g. asmr-week32-set1"),
+    help=t("Shown on the Jobs page and in the notification email. Defaults to the "
+         "Excel file name."),
 )
 drive_folder = st.text_input(
-    "Google Drive folder link (optional)", value="", disabled=not ready,
+    t("Google Drive folder link (optional)"), value=settings.DRIVE_ROOT_FOLDER_ID, disabled=not ready,
     key=keep("drive_folder"),
-    placeholder="https://drive.google.com/drive/folders/…",
-    help="Paste a folder link to send THIS batch somewhere specific. Leave "
+    placeholder=t("https://drive.google.com/drive/folders/…"),
+    help=t("Paste a folder link to send THIS batch somewhere specific. Leave "
          "blank to use the server's configured destination. It must sit inside "
-         "a Shared Drive — a service account cannot write to a personal My Drive.",
+         "a Shared Drive — a service account cannot write to a personal My Drive."),
 )
 if drive_folder.strip():
     from integrations import drive as _drv
     _did = _drv.extract_id(drive_folder)
-    st.caption(f"→ uploading this batch to `{_did}`"
+    st.caption(t("→ uploading this batch to `{0}`", _did)
                + ("" if _drv.looks_like_shared_drive(_did)
-                  else " (a folder — fine if it lives in a Shared Drive)"))
+                  else t(" (a folder — fine if it lives in a Shared Drive)")))
 
 notify_email = col_mail.text_input(
-    "Notify email (optional)", value=", ".join(settings.MAIL_TO), disabled=not ready,
+    t("Notify email (optional)"), value=", ".join(settings.MAIL_TO), disabled=not ready,
     key=keep("notify_email"),
-    placeholder="you@yourcompany.com",
-    help="Emailed when the batch finishes — on success and on failure. Leave "
-         "blank to use the server default.",
+    placeholder=t("you@yourcompany.com"),
+    help=t("Emailed when the batch finishes — on success and on failure. Leave "
+         "blank to use the server default."),
 )
 if not settings.mail_configured():
     st.caption(
-        "⚠️ Email isn't configured on the server yet, so no notification will be "
-        "sent — the Jobs page still shows live progress."
+        t("⚠️ Email isn't configured on the server yet, so no notification will be "
+        "sent — the Jobs page still shows live progress.")
     )
 
 generate_clicked = st.button(
-    "🚀 Generate All Videos", disabled=not ready, type="primary", width="stretch"
-)
+    t("🚀 Generate All Videos"), disabled=not ready, type="primary", width="stretch"
+, key='_ui_app_generate_all_videos')
 
 def _preview_workspace(tmp: Path) -> Workspace:
     """Stage what Preview and Render Row read. Every pool is copied, so a few
@@ -2260,13 +2300,20 @@ def _preview_workspace(tmp: Path) -> Workspace:
             bg_video_files, music_files, promo_alt_files)
     bar = ui_common.ByteProgress(staged_bytes(*args), "Copying files for the preview")
     try:
-        return build_workspace(tmp, *args, progress=bar)
+        if promo_source == "drive_folder":
+            from integrations import drive
+
+            entry = promo_drive_files[promo_choice]
+            with st.spinner(t("Downloading selected promo video from Drive…")):
+                drive.download_file(entry["id"], tmp / "input.mp4", entry["size"])
+        return build_workspace(tmp, *args, progress=bar,
+                               defer_promos=promo_source == "drive_folder")
     finally:
         bar.clear()
 
 
 if preview_clicked and ready:
-    with st.spinner(f"Rendering preview of row {preview_row}…"):
+    with st.spinner(t("Rendering preview of row {0}…", preview_row)):
         with tempfile.TemporaryDirectory(prefix="bvg_preview_") as tmp:
             try:
                 ws = _preview_workspace(Path(tmp))
@@ -2288,7 +2335,7 @@ if preview_clicked and ready:
                 st.session_state["preview_nonce"] = uuid.uuid4().hex
                 st.session_state["preview_row"] = int(preview_row)
                 st.session_state["preview_promo"] = (
-                    video_file.name if promo_files and len(promo_files) > 1 else "")
+                    promo_names[promo_choice] if len(promo_names) > 1 else "")
                 # The payload was built WITH this row's saved edits applied,
                 # so a later save reports changes relative to them — keep the
                 # snapshot to merge against (and to detect reverts).
@@ -2298,13 +2345,12 @@ if preview_clicked and ready:
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Preview failed")
                 st.session_state.pop("preview_payload", None)
-                st.error(f"Preview failed: {exc}")
+                st.error(t("Preview failed: {0}", exc))
 
 if render_row_clicked and ready:
     st.session_state.pop("row_render", None)
     with st.spinner(
-        f"Rendering row {preview_row} for real… (a full render — slower than "
-        "the static preview)"
+        t("Rendering row {0} for real… (a full render — slower than the static preview)", preview_row)
     ):
         with tempfile.TemporaryDirectory(prefix="bvg_rowrender_") as tmp:
             try:
@@ -2323,24 +2369,24 @@ if render_row_clicked and ready:
                     df_render, int(preview_row), script_file,
                     caption_params.get("script_prompt", ""), config)
                 for message in bg_warnings:
-                    st.warning(message)
+                    st.warning(t(message))
                 res = generator.render_row(
                     int(preview_row), df_render.iloc[int(preview_row) - 1])
                 if res.ok:
                     # Read the bytes before the TemporaryDirectory vanishes.
                     st.session_state["row_render"] = {
                         "row": int(preview_row),
-                        "promo": (video_file.name if promo_files
-                                  and len(promo_files) > 1 else ""),
+                        "promo": (promo_names[promo_choice]
+                                  if len(promo_names) > 1 else ""),
                         "name": res.filename,
                         "bytes": (Path(tmp) / "out" / res.filename).read_bytes(),
                         "warnings": list(res.warnings),
                     }
                 else:
-                    st.error(f"Row {preview_row} render failed: {res.error}")
+                    st.error(t("Row {0} render failed: {1}", preview_row, res.error))
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Row render failed")
-                st.error(f"Row render failed: {exc}")
+                st.error(t("Row render failed: {0}", exc))
 
 row_render = st.session_state.get("row_render")
 if row_render and not generate_clicked:
@@ -2351,38 +2397,38 @@ if row_render and not generate_clicked:
         st.video(row_render["bytes"])
     with col_side:
         st.caption(
-            f"Rendered video of row {row_render['row']}"
-            + (f" using promo **{row_render['promo']}**" if row_render.get("promo") else "")
-            + " — exactly what the batch would produce for this pairing, "
-              "including your saved edits."
+            t("Rendered video of row {0}", row_render['row'])
+            + (t(" using promo **{0}**", row_render['promo']) if row_render.get("promo") else "")
+            + t(" — exactly what the batch would produce for this pairing, "
+              "including your saved edits.")
         )
         for message in row_render.get("warnings") or []:
-            st.warning(f"Row {row_render['row']}: {message}")
+            st.warning(t("Row {0}: {1}", row_render['row'], message))
         st.download_button(
-            "⬇️ Download this video", data=row_render["bytes"],
+            t("⬇️ Download this video"), data=row_render["bytes"],
             file_name=row_render["name"], mime="video/mp4",
-        )
-        if st.button("✖ Close row video"):
+         key='_ui_app_download_this_video')
+        if st.button(t("✖ Close row video"), key='_ui_app_close_row_video'):
             st.session_state.pop("row_render", None)
             st.rerun()
 
 if "preview_payload" in st.session_state and not generate_clicked:
     st.caption(
-        (f"Promo: **{st.session_state.get('preview_promo')}** · " if
+        (t("Promo: **{0}** · ", st.session_state.get('preview_promo')) if
          st.session_state.get("preview_promo") else "")
-        + f"Row {st.session_state.get('preview_row', 1)} preview (1080x1920) — drag the "
-        "video, CTA, or texts to move them, drag the corner handle to resize, recolor "
-        "texts, and add a background box; click “Save to Excel” in the panel to apply the "
-        "changed values to that row for previews, generation, and the Excel download below."
+        + t("Row {0} preview (1080x1920) — drag the video, CTA, or texts to move them, drag the "
+            "corner handle to resize, recolor texts, and add a background box; click “Save to "
+            "Excel” in the panel to apply the changed values to that row for previews, "
+            "generation, and the Excel download below.", st.session_state.get('preview_row', 1))
     )
     if grid_overrides:
         st.caption(
-            "The "
-            + ", ".join(f"**{role}**" for role in sorted(grid_overrides))
-            + " wording above is this promo's, from your per-promo sheet. What "
+            t("The ")
+            + t(", ".join(f"**{t(role)}**" for role in sorted(grid_overrides)))
+            + t(" wording above is this promo's, from your per-promo sheet. What "
               "you change here — position, size, colour, background box — is "
               "saved against the row and so applies to every promo, which is "
-              "the point: one design, different words."
+              "the point: one design, different words.")
         )
     saved = preview_editor(
         st.session_state["preview_payload"], st.session_state["preview_nonce"]
@@ -2411,29 +2457,29 @@ row_edits = st.session_state.get("row_edits") or {}
 if row_edits and excel_file is not None and not generate_clicked:
     rows_txt = ", ".join(str(r) for r in sorted(row_edits))
     st.success(
-        f"Saved edits for row(s) {rows_txt} — applied to previews and generation. "
-        "Download the updated sheet to keep your Excel in sync."
+        t("Saved edits for row(s) {0} — applied to previews and generation. Download the updated"
+          " sheet to keep your Excel in sync.", rows_txt)
     )
     col_dl, col_clear = st.columns([2, 1], vertical_alignment="center")
     col_dl.download_button(
-        "⬇️ Download updated Excel",
+        t("⬇️ Download updated Excel"),
         data=updated_excel_bytes(excel_file.getvalue(), row_edits),
         file_name=excel_file.name,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-    if col_clear.button("🗑️ Discard saved edits"):
+     key='_ui_app_download_updated_excel')
+    if col_clear.button(t("🗑️ Discard saved edits"), key='_ui_app_discard_saved_edits'):
         st.session_state.pop("row_edits", None)
         st.rerun()
 
 if generate_clicked and ready and caption_mode == "generate"         and not caption_params.get("caption_theme", "").strip():
-    st.error("Not queued — set a caption theme first, or choose “Use the "
-             "active caption pool”.")
+    st.error(t("Not queued — set a caption theme first, or choose “Use the "
+             "active caption pool”."))
     generate_clicked = False
 
 if generate_clicked and ready and voice_enabled and script_source == "generate" \
         and not caption_params.get("script_prompt", "").strip():
-    st.error("Not queued — write a script prompt, or switch Scripts to an "
-             "uploaded file.")
+    st.error(t("Not queued — write a script prompt, or switch Scripts to an "
+             "uploaded file."))
     generate_clicked = False
 
 if generate_clicked and ready and clip_source == "drive_folder" and not any(
@@ -2442,34 +2488,34 @@ if generate_clicked and ready and clip_source == "drive_folder" and not any(
 ):
     # Queuing a job whose clips have nowhere to come from only moves the
     # failure into the worker, minutes later and on another page.
-    st.error("Not queued — paste at least one Google Drive folder link for the "
-             "clips, or choose a different clip source.")
+    st.error(t("Not queued — paste at least one Google Drive folder link for the "
+             "clips, or choose a different clip source."))
     generate_clicked = False
 
 # Same deferred-failure rule for the other two Drive-sourced pools: a blank
 # link would run the (potentially long) earlier pipeline stages and then die.
 if generate_clicked and ready and gif_source == "drive_folder" \
         and not clip_params.get("gifs_drive_folder"):
-    st.error("Not queued — paste the Google Drive folder link for the GIFs, "
-             "or switch the GIF source back to upload.")
+    st.error(t("Not queued — paste the Google Drive folder link for the GIFs, "
+             "or switch the GIF source back to upload."))
     generate_clicked = False
 
 if generate_clicked and ready and bg_image_source == "drive_folder" \
         and not clip_params.get("bg_images_drive_folder"):
-    st.error("Not queued — paste the Google Drive folder link for the "
-             "background images, or switch their source back to upload.")
+    st.error(t("Not queued — paste the Google Drive folder link for the "
+             "background images, or switch their source back to upload."))
     generate_clicked = False
 
 if generate_clicked and ready and bg_video_source == "drive_folder" \
         and not clip_params.get("bg_videos_drive_folder"):
-    st.error("Not queued — paste the Google Drive folder link for the "
-             "background videos, or switch their source back to upload.")
+    st.error(t("Not queued — paste the Google Drive folder link for the "
+             "background videos, or switch their source back to upload."))
     generate_clicked = False
 
 if generate_clicked and ready and music_source == "drive_folder" \
         and not clip_params.get("music_drive_folder"):
-    st.error("Not queued — paste the Google Drive folder link for the music, "
-             "or switch its source back to upload.")
+    st.error(t("Not queued — paste the Google Drive folder link for the music, "
+             "or switch its source back to upload."))
     generate_clicked = False
 
 if generate_clicked and ready and grid_errors:
@@ -2477,9 +2523,9 @@ if generate_clicked and ready and grid_errors:
     # onto thousands of videos and look entirely successful doing it. There is
     # no safe way to guess past it, so the batch does not start.
     st.error(
-        f"Not queued — {len(grid_errors)} problem(s) with the per-promo text "
-        "sheet(s). Fix them in the “Per-promo heading, subheading and footer "
-        "text” panel above, or remove the sheets to use the main Excel's text."
+        t("Not queued — {0} problem(s) with the per-promo text sheet(s). Fix them in the "
+          "“Per-promo heading, subheading and footer text” panel above, or remove the sheets to "
+          "use the main Excel's text.", len(grid_errors))
     )
     generate_clicked = False
 
@@ -2561,7 +2607,8 @@ if generate_clicked and ready:
         store.make_job_dirs(job_id)
         assets = store.assets_dir(job_id)
 
-        stage_uploads(assets, *_staged, progress=_progress)
+        stage_uploads(assets, *_staged, progress=_progress,
+                      defer_promos=promo_source == "drive_folder")
 
         if hashtag_file is not None:
             (assets / "hashtags.xlsx").write_bytes(hashtag_file.getvalue())
@@ -2581,7 +2628,8 @@ if generate_clicked and ready:
         # Anything that has to be fetched or generated before rendering makes
         # this a pipeline job rather than a plain render — including a gif pool
         # that still has to come down from Drive.
-        chained = (clip_source != "upload" or gif_source != "upload"
+        chained = (promo_source != "upload"
+                   or clip_source != "upload" or gif_source != "upload"
                    or bg_image_source != "upload"
                    or bg_video_source != "upload"
                    or music_source != "upload"
@@ -2603,6 +2651,9 @@ if generate_clicked and ready:
                 # staged as input.mp4 / input_N.mp4, so this list is the only
                 # way to read a job's per-promo text back against real names.
                 "promo_names": promo_names,
+                "promo_source": promo_source,
+                "promos_drive_folder": promos_drive_folder,
+                "promos_drive_files": promo_drive_files,
                 "text_grids": sorted(grid_overrides),
                 "clip_source": clip_source,
                 "gif_source": gif_source,
@@ -2623,7 +2674,7 @@ if generate_clicked and ready:
         logger.exception("Job submission failed")
         if _progress is not None:
             _progress.clear()
-        st.error(f"Could not queue the batch: {exc}")
+        st.error(t("Could not queue the batch: {0}", exc))
     else:
         logger.info("Queued render job %s (%d rows)", job_id, len(df))
         st.session_state["last_job_id"] = job_id
@@ -2641,35 +2692,30 @@ if generate_clicked and ready:
                 progress=_progress)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Saving job %s for reuse failed", job_id)
-            st.warning(f"The batch is queued, but its settings could not be "
-                       f"saved for reuse: {exc}")
+            st.warning(t("The batch is queued, but its settings could not be saved for reuse: {0}", exc))
         else:
-            _saved_note = (f" Saved as **{_save_name}** under ♻️ *Reuse a "
-                           "previous job* at the top of the page.")
+            _saved_note = t(" Saved as **{0}** under ♻️ *Reuse a previous job* at the top of the page.", _save_name)
             if _saved.get("missing"):
                 st.warning(
-                    f"{len(_saved['missing'])} file(s) from the loaded job had "
-                    "already been removed from the server, so the saved copy "
-                    "is missing them.")
+                    t("{0} file(s) from the loaded job had already been removed from the server,"
+                      " so the saved copy is missing them.", len(_saved['missing'])))
         # The bar has done its job; the message below says the rest.
         _progress.clear()
         st.success(
-            f"**Queued — {len(df) * int(n_batches):,} videos** "
-            f"({len(df):,} rows x {int(n_batches)} batches). "
-            "You can close this tab now; "
-            "rendering carries on in the background"
-            + (f" and an email goes to {notify_email.strip()} when it's done."
+            t("**Queued — {0:,} videos** ({1:,} rows x {2} batches). You can close this tab now;"
+              " rendering carries on in the background", len(df) * int(n_batches), len(df), int(n_batches))
+            + (t(" and an email goes to {0} when it's done.", notify_email.strip())
                if notify_email.strip() else ".")
-            + _saved_note
+            + t(_saved_note)
         )
-        st.page_link("pages/1_Jobs.py", label="📋 Track progress on the Jobs page",
+        st.page_link("pages/1_Jobs.py", label=t("📋 Track progress on the Jobs page"),
                      icon="➡️")
 
 if st.session_state.get("last_job_id"):
     job = store.get_job(st.session_state["last_job_id"])
     if job and job["status"] in (store.STATUS_QUEUED, store.STATUS_RUNNING):
         st.info(
-            f"Batch `{job['label'] or job['id']}` is {job['status']}"
-            + (f" — {job['stage']}" if job.get("stage") else "")
-            + ". Details are on the Jobs page."
+            t("Batch `{0}` is {1}", job['label'] or job['id'], t(job['status']))
+            + (f" — {stage_label(job['stage'])}" if job.get("stage") else "")
+            + t(". Details are on the Jobs page.")
         )

@@ -33,7 +33,7 @@ _SCRIPT = r"""
 (function () {
   "use strict";
   var w = window;
-  if (w.__bvgUploadProgress) return;
+  if (w.__bvgUploadProgress) { w.__bvgUploadProgressRender(); return; }
   w.__bvgUploadProgress = true;
 
   var MATCH = "/_stcore/upload_file";
@@ -51,10 +51,11 @@ _SCRIPT = r"""
   }
   function fmtTime(s) {
     s = Math.max(0, Math.round(s));
-    if (s < 60) return s + "s";
-    if (s < 3600) return Math.round(s / 60) + " min";
+    if (s < 60) return s + (w.__bvgLanguage === "zh-CN" ? " 秒" : "s");
+    if (s < 3600) return Math.round(s / 60) + (w.__bvgLanguage === "zh-CN" ? " 分钟" : " min");
     var h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
-    return h + "h " + (m < 10 ? "0" : "") + m + "m";
+    return h + (w.__bvgLanguage === "zh-CN" ? " 小时 " : "h ") +
+      (m < 10 ? "0" : "") + m + (w.__bvgLanguage === "zh-CN" ? " 分钟" : "m");
   }
 
   function settled() {
@@ -190,6 +191,7 @@ _SCRIPT = r"""
   }
 
   function render() {
+    var zh = w.__bvgLanguage === "zh-CN";
     var live = files.filter(function (f) { return !f.aborted; });
     if (!live.length) { if (panel) hide(0); return; }
     var total = 0, loaded = 0, ok = 0, failed = 0;
@@ -212,12 +214,15 @@ _SCRIPT = r"""
 
     if (finished) {
       paint(isDark(), failed ? "failed" : "done");
-      title.textContent = failed
-        ? "⚠ " + failed + " of " + live.length + " file" +
+      title.textContent = zh
+        ? (failed ? "⚠ " + live.length + " 个文件中有 " + failed + " 个上传失败"
+                  : "✓ 已上传 " + ok + " 个文件")
+        : (failed ? "⚠ " + failed + " of " + live.length + " file" +
           (live.length === 1 ? "" : "s") + " failed to upload"
-        : "✓ " + ok + " file" + (ok === 1 ? "" : "s") + " uploaded";
+                  : "✓ " + ok + " file" + (ok === 1 ? "" : "s") + " uploaded");
       detail.textContent = fmtBytes(loaded) + (failed
-        ? " arrived. Remove the failed files and add them again." : "");
+        ? (zh ? " 已到达。请移除失败文件后重新添加。"
+              : " arrived. Remove the failed files and add them again.") : "");
       current.textContent = "";
       hide(failed ? 15000 : 4000);
       return;
@@ -226,24 +231,28 @@ _SCRIPT = r"""
     paint(isDark(), "busy");
     // Streamlit sends several files at once, so "file 2 of 3" would be a
     // fiction — say how many are done instead.
-    title.textContent = "Uploading " + live.length + " file" +
-      (live.length === 1 ? "" : "s") + (ok ? " · " + ok + " done" : "");
-    var text = fmtBytes(loaded) + " of " + fmtBytes(total) + " · " +
+    title.textContent = zh
+      ? "正在上传 " + live.length + " 个文件" + (ok ? " · 已完成 " + ok + " 个" : "")
+      : "Uploading " + live.length + " file" +
+        (live.length === 1 ? "" : "s") + (ok ? " · " + ok + " done" : "");
+    var text = fmtBytes(loaded) + (zh ? " / " : " of ") + fmtBytes(total) + " · " +
       Math.floor(pct) + "%";
     if (samples.length > 1) {
       var dt = (now - samples[0][0]) / 1000, db = loaded - samples[0][1];
       if (dt >= 1 && db > 0) {
         var rate = db / dt;
-        text += " · " + fmtBytes(rate) + "/s · about " +
-          fmtTime((total - loaded) / rate) + " left";
+        text += " · " + fmtBytes(rate) + (zh ? "/秒 · 约剩 " : "/s · about ") +
+          fmtTime((total - loaded) / rate) + (zh ? "" : " left");
       }
     }
     detail.textContent = text;
     var active = live.filter(function (f) { return !f.done; });
     current.textContent = active.length ? active[0].name +
-      (active.length > 1 ? " and " + (active.length - 1) + " more" : "") +
-      " — keep this tab open until it finishes" : "";
+      (active.length > 1 ? (zh ? "，另有 " : " and ") + (active.length - 1) +
+        (zh ? " 个文件" : " more") : "") +
+      (zh ? " — 请保持标签页打开，直到上传完成" : " — keep this tab open until it finishes") : "";
   }
+  w.__bvgUploadProgressRender = render;
 })();
 """
 
@@ -256,16 +265,20 @@ def install() -> None:
     components iframe, so there the iframe hands the same source to its parent
     as a <script> element — same-origin, which Streamlit's component sandbox
     allows."""
+    run_in_page(_SCRIPT)
+
+
+def run_in_page(script: str) -> None:
     if "unsafe_allow_javascript" in inspect.signature(st.html).parameters:
-        st.html(f"<script>{_SCRIPT}</script>", unsafe_allow_javascript=True)
+        st.html(f"<script>{script}</script>", unsafe_allow_javascript=True)
         return
     from streamlit.components.v1 import html as components_html
 
     loader = (
         "<script>(function(){var p=window.parent;"
-        "if(!p||p.__bvgUploadProgress)return;"
+        "if(!p)return;"
         "var s=p.document.createElement('script');"
-        f"s.textContent={json.dumps(_SCRIPT)};"
+        f"s.textContent={json.dumps(script)};"
         "p.document.head.appendChild(s);})();</script>"
     )
     components_html(loader, height=0)
