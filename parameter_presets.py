@@ -101,6 +101,7 @@ def parameters() -> dict[str, Parameter]:
         "crf": Parameter("Quality (CRF)", "Output", 18, 16, 28),
         "encoder_preset": Parameter("Encoder speed", "Output", defaults.ENCODER_PRESET, options=("veryfast", "faster", "fast", "medium", "slow")),
         "workers": Parameter("Parallel renders", "Output", defaults.max_workers(), 1, defaults.max_workers()),
+        "promo_source": Parameter("Promo video source", "Sources", "upload", options=("upload", "drive_folder")),
         "clip_source": Parameter("Where do the clips come from?", "Sources", "upload", options=("upload", "drive_folder", "scrape_job", "scrape_now")),
         "drive_clip_layout": Parameter("Folder layout", "Sources", "per_slot", options=("per_slot", "pooled")),
         "scrape_limit": Parameter("Max videos to scan", "Sources", 200, 10, 5000),

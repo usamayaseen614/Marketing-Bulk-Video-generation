@@ -118,6 +118,7 @@ _NATIVE_SCRIPT = r"""
 
 
 _STAGE_PREFIXES = (
+    "downloading promo videos from Drive", "downloading promo videos",
     "downloading background images from Drive", "downloading background videos from Drive",
     "downloading clips from Drive", "downloading GIFs from Drive", "downloading music from Drive",
     "downloading background images", "downloading background videos", "downloading clips",

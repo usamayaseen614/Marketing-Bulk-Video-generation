@@ -505,6 +505,21 @@ pick are not saved — the scrapes on the server change over time.
 
 ### Upload progress
 
+Promo videos can also come from a **Google Drive folder**. Upload the originals
+to Drive before starting the VM, share the folder with the app's service account
+(Viewer access is enough), then choose **Google Drive folder** under **Promo video
+source**, paste its link, and click **Read promo video list**. This reads filenames
+and sizes without downloading the videos. Submit the job to download them directly
+to the server in the background; the browser can be closed once the job is queued.
+Preview and Render Row download only the selected promo.
+
+The list includes videos in subfolders, up to 600 originals. Batch defaults and
+per-promo text sheets use this list just as they use uploaded filenames. The job
+keeps the submitted file IDs and order, and a restarted worker skips complete
+downloads. A failed promo download stops the job before rendering, keeping batch
+and text assignments intact. After loading a saved job, read the folder list again
+before submitting.
+
 While the browser is uploading, a panel in the bottom-right corner shows every file in
 flight together: how many are done, how many MB of the total, speed and time left. While
 an upload is running the browser asks before leaving the page, because Streamlit cannot

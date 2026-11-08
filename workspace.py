@@ -193,11 +193,13 @@ def stage_uploads(dest: Path, video_file, zip_file, cta_file, font_file,
                   cta_video_slot_files=None, gif_files=None,
                   bg_video_files=None, music_files=None,
                   promo_alt_files=None, *,
+                  defer_promos: bool = False,
                   progress: Optional[Callable[[int], None]] = None) -> None:
     """Write the in-memory uploads to disk where FFmpeg/PIL can read them.
 
     `video_file` may be a single upload or a list of up to MAX_PROMO_VIDEOS —
     a multi-batch render uses a different promo video per batch.
+    `defer_promos` leaves promos for the pipeline's Drive download stage.
 
     Any "upload" may also be a file loaded from a saved job (presets.py); it
     is copied from disk rather than from memory.
@@ -227,7 +229,7 @@ def stage_uploads(dest: Path, video_file, zip_file, cta_file, font_file,
     promos = [f for f in promos if f is not None][:MAX_PROMO_VIDEOS]
     # Promo Alternate mode stages no promo at all — the pool IS the picture.
     # Requiring one anyway would mean uploading a file the render never reads.
-    if not promos and not any(alt_dir.iterdir()):
+    if not promos and not any(alt_dir.iterdir()) and not defer_promos:
         raise ValueError(
             "At least one promo video is required (or a Promo Alternate clip)."
         )
@@ -378,9 +380,10 @@ def build_workspace(tmp: Path, video_file, zip_file, cta_file, font_file,
                     cta_video_slot_files=None, gif_files=None,
                     bg_video_files=None, music_files=None,
                     promo_alt_files=None, *,
+                    defer_promos: bool = False,
                     progress: Optional[Callable[[int], None]] = None) -> Workspace:
     """Stage the uploads into `tmp` and return the Workspace over them."""
     stage_uploads(tmp, video_file, zip_file, cta_file, font_file,
                   cta_video_slot_files, gif_files, bg_video_files, music_files,
-                  promo_alt_files, progress=progress)
+                  promo_alt_files, defer_promos=defer_promos, progress=progress)
     return workspace_from_dir(tmp, tmp / "work")
