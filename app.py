@@ -54,6 +54,7 @@ from video_generator import (
     TEXT_FIT_MIN_SIZE,
     TEXT_ROLES,
     TEXT_STYLES,
+    CTA_CAPTION_ROLE,
     RenderConfig,
     VideoGenerator,
     missing_optional_columns,
@@ -724,6 +725,18 @@ with st.sidebar:
     # not thrown away when the box is unticked (see Promo Alternate below).
     with st.expander(t("CTA clips after the promo — captions"),
                      expanded=bool(cta_after_promo) and not is_split):
+        st.caption(t(
+            "**CTA copy** (one column per promo video) is uploaded next to the "
+            "per-promo headline sheets in the main area. It shows from the time "
+            "below until the video ends; a cell with several lines shows them "
+            "one after another, splitting that time evenly."))
+        cta_caption_start = st.number_input(
+            t("CTA copy appears at (s)"), 0.0, 600.0, 0.0, 0.5,
+            key=keep("cta_caption_start"),
+            help=t("Counted from the very start of the video, so 3 = three seconds "
+                   "in, even while the promo is still playing. Per-row override: "
+                   "`CTA_Caption_Start`."),
+        )
         cta_after_show_texts = st.checkbox(
             t("Show Headline / Subheading / Footer during the CTA clips"),
             value=True, key=keep("cta_after_show_texts"),
@@ -735,7 +748,8 @@ with st.sidebar:
             help=t("Excel/CSV: captions in the first column, under a header row. "
                    "Text: one caption per line. Each CTA clip shows one caption "
                    "picked at random from this pool (repeats allowed). Put a `|` "
-                   "in a caption to break the line there."),
+                   "in a caption to break the line there. Only used for videos "
+                   "with no CTA copy."),
         )
         cta_caption_file = presets_ui.with_saved("cta_captions", cta_caption_file,
                                                  multiple=False)
@@ -1116,6 +1130,7 @@ config = RenderConfig(
     cta_after_show_texts=bool(cta_after_show_texts),
     cta_captions=list(cta_captions),
     cta_caption_x=int(cta_caption_x), cta_caption_y=int(cta_caption_y),
+    cta_caption_start=float(cta_caption_start),
     gif_x=int(gif_x), gif_y=int(gif_y),
     gif_w=int(gif_w), gif_h=int(gif_h),
     gif_min_seconds=float(gif_min_seconds),
@@ -1330,11 +1345,17 @@ if st.session_state.get("_promo_key", promo_key) != promo_key:
         st.session_state.pop(stale, None)
 st.session_state["_promo_key"] = promo_key
 sheet_rows = len(df) if df is not None else 0
-grid_keys = {role: f"text_grid_{role}" for role in TEXT_ROLES}
+grid_keys = {role: f"text_grid_{role}" for role in text_grids.ROLES}
+
+
+def _role_label(role: str) -> str:
+    return t("CTA copy") if role == CTA_CAPTION_ROLE else t(role)
+
+
 grid_uploads: dict[str, object] = {}
 
 with st.expander(
-    t("Per-promo heading, subheading and footer text (optional)"),
+    t("Per-promo heading, subheading, footer and CTA copy (optional)"),
     # Opened once something is in it, so a blocking error is never hidden
     # behind a collapsed panel.
     expanded=any(st.session_state.get(presets_ui.uploader_key(k)) is not None
@@ -1348,6 +1369,11 @@ with st.expander(
         "font, colour, position and background box still come from the main "
         "Excel and the sidebar. Leave a cell blank to keep the main Excel's "
         "text for that one.")
+    )
+    st.caption(
+        t("**CTA copy** cells can hold several lines (Alt+Enter in Excel). They "
+          "show one after another, splitting the time from *CTA copy appears at* "
+          "(sidebar) to the end of the video.")
     )
     if promo_alt:
         st.info(
@@ -1363,9 +1389,9 @@ with st.expander(
     # names every column is unmatched, which text_grids treats as an error that
     # refuses the batch outright, so anyone with a grid uploaded could not
     # submit at all.
-    for column, role in zip(st.columns(len(TEXT_ROLES)), TEXT_ROLES):
+    for column, role in zip(st.columns(len(text_grids.ROLES)), text_grids.ROLES):
         upload = column.file_uploader(
-            t("{0} by promo (.xlsx)", t(role)), type=["xlsx"],
+            t("{0} by promo (.xlsx)", _role_label(role)), type=["xlsx"],
             on_change=presets_ui.upload_changed, args=(grid_keys[role],),
             key=presets_ui.uploader_key(grid_keys[role]),
             disabled=promo_alt,
@@ -1381,9 +1407,9 @@ with st.expander(
     elif promo_names and sheet_rows:
         st.caption(t("Templates below already carry the right headers and row "
                    "count — fill one in and upload it back."))
-        for column, role in zip(st.columns(len(TEXT_ROLES)), TEXT_ROLES):
+        for column, role in zip(st.columns(len(text_grids.ROLES)), text_grids.ROLES):
             column.download_button(
-                t("⬇️ {0} template", t(role)),
+                t("⬇️ {0} template", _role_label(role)),
                 data=text_grids.template_bytes(role, promo_names, sheet_rows),
                 file_name=f"{role.lower()}_by_promo.xlsx", mime=XLSX_MIME,
                 key=f"text_grid_template_{role}", width="stretch",
@@ -1411,19 +1437,19 @@ with st.expander(
             pairing = []
             for index, name in enumerate(promo_names):
                 entry = {"#": index + 1, t("Promo video"): name}
-                for role in TEXT_ROLES:
+                for role in text_grids.ROLES:
                     if role not in grid_reports:
-                        entry[t(role)] = t("— not uploaded")
+                        entry[_role_label(role)] = t("— not uploaded")
                         continue
                     column = matched[role].get(index)
-                    entry[t(role)] = (t("✅ column “{0}”", column) if column
+                    entry[_role_label(role)] = (t("✅ column “{0}”", column) if column
                                           else t("⚠️ falls back to the main Excel"))
                 pairing.append(entry)
             st.dataframe(pd.DataFrame(pairing), hide_index=True, width="stretch")
             if grid_reports:
                 st.caption(t(" · ".join(
                     t("**{0}**: {1} row(s) vs the main Excel's {2}, {3}/{4} promo(s) matched",
-                      t(role), r.grid_rows, r.sheet_rows, r.matched, len(promo_names)) for role, r in grid_reports.items())))
+                      _role_label(role), r.grid_rows, r.sheet_rows, r.matched, len(promo_names)) for role, r in grid_reports.items())))
         for message in grid_errors:
             st.error(t(message))
         if checked or grid_errors:
@@ -1433,7 +1459,7 @@ with st.expander(
         if checked and grid_overrides and not grid_errors:
             st.success(
                 t("Every column matches a promo video — ")
-                + t(", ".join(f"{t(role)} ✓" for role in sorted(grid_overrides)))
+                + t(", ".join(f"{_role_label(role)} ✓" for role in sorted(grid_overrides)))
                 + t(". These sheets will be used instead of the main Excel's "
                   "text."))
 

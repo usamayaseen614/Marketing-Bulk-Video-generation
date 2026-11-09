@@ -89,6 +89,7 @@ def parameters() -> dict[str, Parameter]:
         "cta_after_show_texts": Parameter("Show Headline / Subheading / Footer during the CTA clips", "CTA video", True),
         "cta_caption_x": Parameter("Caption X (centre)", "CTA video", 0, 0, CANVAS_W, unit="px"),
         "cta_caption_y": Parameter("Caption Y (centre)", "CTA video", 0, 0, CANVAS_H, unit="px"),
+        "cta_caption_start": Parameter("CTA copy appears at", "CTA video", 0.0, 0, 600, unit="s"),
         "gif_min_seconds": Parameter("Minimum seconds per gif", "GIF", 5.0, 1, 30, unit="s"),
         "default_font": Parameter("Default font", "Text", FONT_CHOICES[0], options=tuple(FONT_CHOICES)),
         "default_style": Parameter("Default artistic style", "Text", TEXT_STYLES[0], options=tuple(TEXT_STYLES)),

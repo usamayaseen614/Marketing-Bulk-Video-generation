@@ -166,7 +166,6 @@
   "Upload one to use it in every video. Upload several and a multi-batch render gives each batch its own promo video, cycling if there are fewer promos than batches.": "上传一个时，所有视频均使用它。上传多个时，多批次渲染会为每批分配一个宣传视频；宣传视频少于批次时循环使用。",
   "Background images (ZIP, optional)": "背景图片（ZIP，可选）",
   "Without a ZIP, videos render on the solid background color set in the sidebar (Layout section). The images can also come from a Drive folder — see 'Background images' under 3. CTA clips.": "未上传 ZIP 时，使用侧边栏“布局”中的纯色背景。也可在“3. 引导片段”下的“背景图片”中选择云端硬盘来源。",
-  "Per-promo heading, subheading and footer text (optional)": "按宣传视频设置主标题、副标题和页脚（可选）",
   "Upload a sheet whose **column headers are your promo video filenames** and whose rows are the text for each row of the main Excel — so the same row can say something different on every promo. Row 1 here is row 1 there. A sheet you upload replaces **only** that text: size, font, colour, position and background box still come from the main Excel and the sidebar. Leave a cell blank to keep the main Excel's text for that one.": "上传表格，**列标题填写宣传视频文件名**，各行对应主 Excel 的各行文字，同一行可为不同宣传视频设置不同内容。此表格仅替换文字内容；字号、字体、颜色、位置和底色框仍来自主 Excel 和侧边栏。单元格留空时保留主 Excel 中的文字。",
   "Upload the Excel sheet and ": "请上传 Excel 表格以及",
   "Promo Alternate clips (sidebar)": "替代宣传片段（侧边栏）",
@@ -860,12 +859,18 @@
   "Show Headline / Subheading / Footer during the CTA clips": "播放引导片段时显示标题 / 副标题 / 页脚",
   "Off: only the CTA caption is on screen once the promo ends.": "关闭后，宣传视频结束后屏幕上只显示引导片段字幕。",
   "Caption pool (.xlsx / .csv / .txt)": "字幕池（.xlsx / .csv / .txt）",
-  "Excel/CSV: captions in the first column, under a header row. Text: one caption per line. Each CTA clip shows one caption picked at random from this pool (repeats allowed). Put a `|` in a caption to break the line there.": "Excel/CSV：字幕放在第一列，位于表头行下方。文本文件：每行一条字幕。每个引导片段从此池中随机选取一条字幕（允许重复）。在字幕中加入 `|` 可在该处换行。",
   "**{0}** caption(s) — first one: “{1}”": "共 **{0}** 条字幕，第一条：“{1}”",
   "No captions found in `{0}`.": "在 `{0}` 中未找到字幕。",
   "Caption position — 0 = centred on the CTA box, near its top. Drag it in the preview to set one row; `CTA_Caption_X`/`CTA_Caption_Y` (and `_Size`, `_Color`, `_Font`, `_Style`, …) override per row.": "字幕位置：0 表示在引导视频区域内水平居中并靠近顶部。在预览中拖动可设置单行；`CTA_Caption_X`/`CTA_Caption_Y`（以及 `_Size`、`_Color`、`_Font`、`_Style` 等）可逐行覆盖。",
   "Caption X (centre)": "字幕 X 坐标（中心）",
   "Caption Y (centre)": "字幕 Y 坐标（中心）",
   "CTA caption pool": "引导片段字幕池",
-  "CTA caption pools": "引导片段字幕池"
+  "CTA caption pools": "引导片段字幕池",
+  "Per-promo heading, subheading, footer and CTA copy (optional)": "按宣传视频设置标题、副标题、页脚和引导文案（可选）",
+  "CTA copy": "引导文案",
+  "CTA copy appears at (s)": "引导文案出现时间（秒）",
+  "Counted from the very start of the video, so 3 = three seconds in, even while the promo is still playing. Per-row override: `CTA_Caption_Start`.": "从视频开头开始计时，3 表示第 3 秒，即使宣传视频仍在播放。逐行覆盖列：`CTA_Caption_Start`。",
+  "**CTA copy** (one column per promo video) is uploaded next to the per-promo headline sheets in the main area. It shows from the time below until the video ends; a cell with several lines shows them one after another, splitting that time evenly.": "**引导文案**（每个宣传视频一列）在主区域中与按宣传视频的标题表一起上传。文案从下方设置的时间开始显示，直到视频结束；单元格中有多行时依次显示，平均分配这段时间。",
+  "**CTA copy** cells can hold several lines (Alt+Enter in Excel). They show one after another, splitting the time from *CTA copy appears at* (sidebar) to the end of the video.": "**引导文案**单元格可以包含多行（在 Excel 中按 Alt+Enter 换行）。多行会依次显示，平均分配从“引导文案出现时间”（侧边栏）到视频结束的时间。",
+  "Excel/CSV: captions in the first column, under a header row. Text: one caption per line. Each CTA clip shows one caption picked at random from this pool (repeats allowed). Put a `|` in a caption to break the line there. Only used for videos with no CTA copy.": "Excel/CSV：字幕放在第一列，位于表头行下方。文本文件：每行一条字幕。每个引导片段从此池中随机选取一条字幕（允许重复）。在字幕中加入 `|` 可在该处换行。仅用于没有引导文案的视频。"
 }

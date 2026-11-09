@@ -248,10 +248,11 @@ TEXT_ROLES = ["Headline", "Subheading", "Footer"]
 # (text_grids.ROLES) and the sidebar's per-role fit-box controls, and the
 # caption's text comes from the spoken script rather than from either.
 SCREEN_TEXT_ROLE = "Screen_Text"
-# The caption shown over each CTA clip when the clips play AFTER the promo
-# (RenderConfig.cta_after_promo). Same TextSpec machinery as every other text;
-# its words come from the uploaded caption pool, one random pick per clip, so
-# there is no `CTA_Caption` text column — only the styling/placement ones.
+# The CTA caption ("CTA copy"). Same TextSpec machinery as every other text.
+# Its words come from the row's `CTA_Caption` cell — usually filled per promo by
+# the CTA copy table (text_grids) — and show from a start time to the end of the
+# video, one line of the cell after another. A row with no copy falls back, in
+# after-promo mode, to the caption pool: one random pick per CTA clip.
 CTA_CAPTION_ROLE = "CTA_Caption"
 TEXT_BOX_COLUMNS = [f"{role}_{dim}"
                     for role in TEXT_ROLES for dim in ("Width", "Height")]
@@ -305,8 +306,8 @@ OPTIONAL_COLUMNS = [
     "Screen_Text_X", "Screen_Text_Y", "Screen_Text_Font",
     "Screen_Text_BgColor", "Screen_Text_BgOpacity", "Screen_Text_Style",
     "Screen_Text_Width", "Screen_Text_Height",
-    # Styling/placement of the caption over each after-promo CTA clip. No text
-    # column: the words come from the uploaded caption pool.
+    # The CTA copy, when it shows, and its styling/placement.
+    CTA_CAPTION_ROLE, f"{CTA_CAPTION_ROLE}_Start",
     *(f"{CTA_CAPTION_ROLE}_{s}" for s in (
         "Size", "Color", "Opacity", "X", "Y", "Font", "BgColor", "BgOpacity",
         "Style", "Width", "Height")),
@@ -679,6 +680,11 @@ def _clean_str(value) -> str:
     return "" if text.lower() == "nan" else text
 
 
+def _copy_lines(text: str) -> list[str]:
+    """A CTA copy cell's lines, in the order they show. Blank lines dropped."""
+    return [line.strip() for line in str(text).splitlines() if line.strip()]
+
+
 def _parse_opt_int(value, warnings: list[str], label: str) -> Optional[int]:
     """Parse a numeric cell. Blank => None (an automatic value is chosen later);
     garbage => warn + None."""
@@ -941,6 +947,9 @@ class RenderConfig:
     # on the CTA box, near its top. A row's CTA_Caption_X/Y cells win.
     cta_caption_x: int = 0
     cta_caption_y: int = 0
+    # Seconds into the video (from its very start) when a row's CTA copy
+    # appears; it stays until the video ends. A row's CTA_Caption_Start wins.
+    cta_caption_start: float = 0.0
     # Optional GIF layer: a flat pool of short looping clips shown one after
     # another in their own box. Independent of the CTA video in every respect —
     # own pool, own box, own fade, own z-index — because the two answer
@@ -1168,6 +1177,10 @@ class RowSpec:
     cta_caption: TextSpec = field(default_factory=lambda: TextSpec(
         text="", role=CTA_CAPTION_ROLE, size=None, color=None, x=None, y=None))
     cta_caption_texts: Optional[list] = None
+    # The row's CTA copy (its CTA_Caption cell, one line per timed step) and
+    # when it appears. Copy wins over the caption pool.
+    cta_copy: str = ""
+    cta_caption_start: Optional[float] = None
     # After-promo mode: seconds each chosen CTA clip holds the box (its video
     # length / its speed), index-aligned with cta_video_clips. None = mode off.
     cta_after_durations: Optional[list] = None
@@ -1299,8 +1312,12 @@ class RowSpec:
             subheading=text_spec("Subheading"),
             footer=text_spec("Footer"),
             screen_text=text_spec(SCREEN_TEXT_ROLE),
-            # Text blanked: it comes from the caption pool, not the sheet.
+            # Text set in _resolve_positions: the copy's longest line, or the
+            # longest caption-pool pick.
             cta_caption=replace(text_spec(CTA_CAPTION_ROLE), text=""),
+            cta_copy=_clean_str(row.get(CTA_CAPTION_ROLE)),
+            cta_caption_start=_parse_opt_float(row.get(f"{CTA_CAPTION_ROLE}_Start"),
+                                               warnings, f"{CTA_CAPTION_ROLE}_Start"),
             voiceover=_clean_str(row.get("Voiceover")),
             voice_name=_clean_str(row.get("Voiceover_Voice")) or None,
             voice_speed=_parse_opt_float(row.get("Voiceover_Speed"), warnings,
@@ -2124,6 +2141,9 @@ class VideoGenerator:
             # the preview can still show and place the caption. The render
             # never draws it without clips.
             self._pick_cta_captions(spec, max(1, len(cfg.cta_video_speeds)))
+        if spec.cta_copy:
+            # Sized and placed for its longest line, like the pool's longest pick.
+            spec.cta_caption.text = max(_copy_lines(spec.cta_copy), key=len, default="")
 
         # Gif box (resolved unconditionally, same reasoning as the CTA video box
         # above: the editor needs concrete numbers whether or not a pool exists).
@@ -2488,40 +2508,100 @@ class VideoGenerator:
         canvas (None)."""
         return spec.cta_video_w if element.role == CTA_CAPTION_ROLE else None
 
-    def _cta_caption_layers(self, spec: RowSpec, static: Image.Image) -> list:
-        """After-promo mode: one full-canvas text frame per CTA clip, timed to
-        that clip — its caption over the static texts, or over nothing when the
-        texts are hidden during the clips. Same (start, end, image) shape as
-        _caption_layers, so both feed the one concat-demuxer text timeline.
+    def _cta_copy_segments(self, spec: RowSpec) -> list:
+        """(start, end, text) for the CTA caption.
 
-        A clip with no caption and the texts still showing needs no entry: the
-        timeline's gap frame IS the static texts."""
+        A row's copy runs from its start time (counted from the very start of
+        the video) to the end, its lines splitting that time evenly: a 2-line
+        copy shows line 1 for the first half, line 2 for the second. Without
+        copy, after-promo mode shows one caption-pool pick per CTA clip."""
+        if spec.cta_copy:
+            lines = _copy_lines(spec.cta_copy)
+            end = self._render_duration(spec) or 0.0
+            start = (spec.cta_caption_start if spec.cta_caption_start is not None
+                     else self.config.cta_caption_start)
+            start = max(0.0, float(start or 0.0))
+            if not lines or start >= end:
+                spec.warnings.append(
+                    f"CTA copy starts at {start:g}s but the video is only "
+                    f"{end:.1f}s long, so it never shows.")
+                return []
+            step = (end - start) / len(lines)
+            return [(start + i * step, start + (i + 1) * step, line)
+                    for i, line in enumerate(lines)]
         durations = spec.cta_after_durations or []
-        start = self._main_duration(spec)
-        if not (self._cta_after and durations and start):
+        t = self._main_duration(spec)
+        if not (self._cta_after and durations and t):
             return []
-        self._resolve_positions(spec)
-        show = self.config.cta_after_show_texts
-        base = static if show else Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
         texts = spec.cta_caption_texts or []
         out = []
         for k, dur in enumerate(durations):
-            text = texts[k] if k < len(texts) else ""
-            if text:
-                # Re-laid out per clip, exactly like a caption-band beat: a
-                # boxed caption re-fits, an unboxed one keeps the size pinned
-                # against the row's longest pick.
-                cap = replace(spec.cta_caption, text=text)
-                if cap.box_w and cap.box_h:
-                    self._fit_text_box(cap, [])
-                else:
-                    self._wrap_text(cap, self._wrap_width(spec, cap))
-                layer = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
-                self._paint_text(layer, cap.x, cap.y, cap, "full")
-                out.append((start, start + dur, Image.alpha_composite(base, layer)))
-            elif not show:
-                out.append((start, start + dur, base))
-            start += dur
+            if k < len(texts) and texts[k]:
+                out.append((t, t + dur, texts[k]))
+            t += dur
+        return out
+
+    def _cta_caption_frame(self, spec: RowSpec, base: Image.Image,
+                           text: str) -> Image.Image:
+        """`base` with one CTA caption painted on it. Re-laid out per text,
+        exactly like a caption-band beat: a boxed caption re-fits, an unboxed
+        one keeps the size pinned against the row's longest line."""
+        cap = replace(spec.cta_caption, text=text)
+        if cap.box_w and cap.box_h:
+            self._fit_text_box(cap, [])
+        else:
+            self._wrap_text(cap, self._wrap_width(spec, cap))
+        layer = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
+        self._paint_text(layer, cap.x, cap.y, cap, "full")
+        return Image.alpha_composite(base, layer)
+
+    def _cta_caption_layers(self, spec: RowSpec, static: Image.Image,
+                            beats: list = ()) -> list:
+        """The text timeline with the CTA caption merged in.
+
+        `beats` are the narration's caption frames (each already carrying the
+        static texts). The CTA caption can overlap them, since copy may start
+        while the promo is still playing, so the timeline is cut at every
+        boundary and each piece gets its beat (or the static texts, or nothing
+        while after-promo mode hides the texts) with the CTA caption on top.
+        Same (start, end, image) shape as _caption_layers. A piece that is just
+        the static texts needs no entry: the timeline's gap frame IS them."""
+        self._resolve_positions(spec)
+        main = self._main_duration(spec) or 0.0
+        after = bool(self._cta_after and spec.cta_after_durations and main)
+        if after:
+            # Narration belongs to the main part: a long script cut short can
+            # never run into the clips.
+            beats = [(s, min(e, main), im) for s, e, im in beats if s < main]
+        hide_from = main if after and not self.config.cta_after_show_texts else None
+        segs = self._cta_copy_segments(spec)
+        if not segs and hide_from is None:
+            return list(beats)
+        blank = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
+        cuts = {0.0, self._render_duration(spec) or 0.0}
+        for s0, e0, _x in [*segs, *beats]:
+            cuts.update((s0, e0))
+        if hide_from is not None:
+            cuts.add(hide_from)
+        cuts = sorted(cuts)
+        out, last_key = [], None
+        for a, b in zip(cuts, cuts[1:]):
+            if b - a < 1e-6:
+                continue
+            mid = (a + b) / 2
+            base = next((im for s0, e0, im in beats if s0 <= mid < e0), None)
+            if base is None:
+                base = blank if hide_from is not None and mid >= hide_from else static
+            text = next((x for s0, e0, x in segs if s0 <= mid < e0), "")
+            if not text and base is static:
+                last_key = None
+                continue
+            key = (id(base), text)
+            if key == last_key and out[-1][1] == a:
+                out[-1] = (out[-1][0], b, out[-1][2])   # same picture: one entry
+                continue
+            out.append((a, b, self._cta_caption_frame(spec, base, text) if text else base))
+            last_key = key
         return out
 
     def _resolve_cta_after(self, spec: RowSpec, chosen: list,
@@ -4726,14 +4806,9 @@ class VideoGenerator:
             # concat demuxer does not normalise its inputs, and a list whose
             # frames disagree renders the layer as nothing at all, with exit 0.
             layers, _static = self._caption_layers(spec)
-            # After-promo CTA captions join the same timeline, after the main
-            # part. Narration beats are clipped to the main part first, so a
-            # long script cut short can never push the CTA captions late.
-            cta_layers = self._cta_caption_layers(spec, overlay)
-            if cta_layers:
-                main = self._main_duration(spec)
-                layers = [(s, min(e, main), im) for s, e, im in layers
-                          if s < main] + cta_layers
+            # The CTA caption (copy or after-promo pool picks) joins the same
+            # timeline, merged with the narration beats where they overlap.
+            layers = self._cta_caption_layers(spec, overlay, layers)
             if layers:
                 render_dur = self._render_duration(spec) or 0.0
                 for e, (_start, _end, image) in enumerate(layers):

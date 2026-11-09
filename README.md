@@ -142,7 +142,9 @@ rows alone determines how many videos are generated:
 | `GIF_Fade_Start` / `GIF_Fade_Duration` | Fade-in timing for the gif layer, in **seconds**. Applies to the first gif only. **Blank/absent = the sidebar default (0/0 = visible immediately)** | `0.5` / `0.5` |
 | `BG_Video_X` / `BG_Video_Y` | **Top-left corner** of the translucent background-video box, per row. **Blank/absent = the sidebar default (0/0)** | `0` / `0` |
 | `BG_Video_Width` / `BG_Video_Height` | Size of the background-video box (every clip in the row's sequence is cover-filled to it — scaled and center-cropped, never stretched). **Blank/absent = the sidebar default (the full 1080 × 1920 canvas)** | `1080` / `1920` |
-| `CTA_Caption_X` / `_Y` / `_Size` / `_Color` / `_Opacity` / `_Font` / `_BgColor` / `_BgOpacity` / `_Style` / `_Width` / `_Height` | Styling and placement of the caption shown over each CTA clip in *Play CTA clips after the promo* mode. The words come from the uploaded caption pool, so there is no `CTA_Caption` text column. **Blank/absent = centred on the CTA box near its top, other values randomized like a headline's** | `540` / `1250` |
+| `CTA_Caption` | The row's **CTA copy**, usually filled per promo by the *CTA copy by promo* sheet (see [CTA copy](#cta-copy-per-promo)). Several lines in one cell show one after another. **Blank = no copy** (after-promo mode then falls back to the caption pool) | `Can I really do this?` ⏎ `Ohhhh I really can!` |
+| `CTA_Caption_Start` | Seconds from the start of the video when the CTA copy appears. **Blank = the sidebar's *CTA copy appears at*** | `3` |
+| `CTA_Caption_X` / `_Y` / `_Size` / `_Color` / `_Opacity` / `_Font` / `_BgColor` / `_BgOpacity` / `_Style` / `_Width` / `_Height` | Styling and placement of the CTA copy, and of the caption-pool captions shown over each CTA clip in *Play CTA clips after the promo* mode. **Blank/absent = centred on the CTA box near its top, other values randomized like a headline's** | `540` / `1250` |
 | `Headline` | Headline text (empty = skipped) | `Summer Mega Sale` |
 | `Headline_Width` / `Headline_Height` | Optional **fit box**, in canvas pixels, **centred on `Headline_X`/`Headline_Y`**. Set both and the box drives the type: the text re-wraps to the width and the font size is chosen so the painted block (glyphs *plus* any outline/shadow/glow) fills the box. `Headline_Size` is then ignored — the box computes it. **Blank/absent, or either one alone = the sidebar default, else the classic behaviour** (`Headline_Size`, wrapped to the canvas). Same columns exist for Subheading and Footer | `800` / `300` |
 | `Headline_Size` | Font size in px. **Blank/absent = random** within a sensible range per element (headline 56–88, subheading 34–52, footer 24–36) | `72` |
@@ -562,6 +564,31 @@ render. Captions wrap to the CTA box's width, and `|` forces a line break.
   to show, but it still shows the caption where the CTA box will be, so you can place it.
 - CTA video fade-in and *Keep clips playing to fill the whole video* are ignored in this
   mode. It is not available in split-screen, where the CTA box is the side panel.
+
+### CTA copy per promo
+
+The CTA copy is text written for each promo video, uploaded like the per-promo headline
+sheets: open *Per-promo heading, subheading, footer and CTA copy* in the main area and
+upload a **CTA copy by promo (.xlsx)** sheet.
+
+- **Row 1 holds the promo video filenames**, one column per promo. The same forgiving
+  match as the headline sheets applies (case, spaces, separators and `.mp4` are ignored).
+- **Row N below is the copy for row N of the main Excel**, so the sheet needs exactly as
+  many rows as the main Excel. 140 promos x 100 rows = 14,000 videos, each with its own
+  copy.
+- Every column must match a promo in the batch, or the batch is refused. Press **🔍 Check
+  promo names against these sheets** to see which column feeds which promo.
+- **Timing.** The copy appears at *CTA copy appears at (s)* (sidebar, inside *CTA clips
+  after the promo — captions*), counted from the very start of the video, and stays until
+  the video ends. A cell with several lines (Alt+Enter in Excel) shows them one after
+  another, splitting that time evenly. With a 3s start on a 9s video, a 2-line copy shows
+  line 1 from 3s to 6s and line 2 from 6s to 9s. `CTA_Caption_Start` overrides it per row.
+- It works with or without *Play CTA clips after the promo*. With it on, "the end of the
+  video" is the end of the last CTA clip, and a video with copy shows the copy instead of
+  the caption pool. The pool is still used for videos with no copy.
+- **Position and style** are the CTA caption's: centred on the CTA box near its top by
+  default, set with *Caption X / Y* or by dragging in the preview, styled with the
+  `CTA_Caption_*` columns. The preview shows the copy's longest line.
 
 ### Where the CTA clips come from
 

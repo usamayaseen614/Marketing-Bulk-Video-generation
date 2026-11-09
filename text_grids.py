@@ -1,5 +1,5 @@
 """
-text_grids.py — per-promo Headline / Subheading / Footer text.
+text_grids.py — per-promo Headline / Subheading / Footer text and CTA copy.
 
 ## The problem
 
@@ -52,12 +52,14 @@ from typing import Iterable, Optional, Union
 
 import pandas as pd
 
-from video_generator import TEXT_ROLES, _clean_str
+from video_generator import CTA_CAPTION_ROLE, TEXT_ROLES, _clean_str
 from workspace import VIDEO_SUFFIXES
 
-# Roles a grid can be uploaded for — the same three the sheet and the renderer
-# already know about, imported rather than re-listed so they cannot drift.
-ROLES: tuple[str, ...] = tuple(TEXT_ROLES)
+# Roles a grid can be uploaded for — the three texts plus the CTA copy, the
+# same names the sheet and the renderer already know, imported rather than
+# re-listed so they cannot drift. A CTA copy cell may hold several lines; the
+# renderer shows them one after another.
+ROLES: tuple[str, ...] = (*TEXT_ROLES, CTA_CAPTION_ROLE)
 
 # What the resolved mapping is called inside a job's assets/ folder. Resolved
 # and index-keyed, so the worker needs none of this module's matching logic —

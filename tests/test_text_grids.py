@@ -29,7 +29,8 @@ PROMOS = ["video 1.mp4", "video 2.mp4", "video 3.mp4"]
 SHEET_ROWS = 3
 
 # ---------- roles cannot drift from the renderer's ----------
-assert tg.ROLES == tuple(TEXT_ROLES), (tg.ROLES, TEXT_ROLES)
+from video_generator import CTA_CAPTION_ROLE
+assert tg.ROLES == (*TEXT_ROLES, CTA_CAPTION_ROLE), (tg.ROLES, TEXT_ROLES)
 print("roles:", tg.ROLES)
 
 # ---------- match_key ----------

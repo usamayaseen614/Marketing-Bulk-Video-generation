@@ -155,8 +155,9 @@ cfg.cta_after_show_texts = True
 spec3 = gen._spec_for(row, 1)
 static = gen.build_overlay_image(spec3, include_cta=False)
 frames = gen._cta_caption_layers(spec3, static)
+# All three picks are "BUY": identical pictures merge into one entry.
 assert [(round(s, 2), round(e, 2)) for s, e, _ in frames] == \
-    [(2.0, 3.0), (3.0, 4.5), (4.5, 5.0)], [(s, e) for s, e, _ in frames]
+    [(2.0, 5.0)], [(s, e) for s, e, _ in frames]
 for _s, _e, im in frames:
     rgb = im.convert("RGB")
     assert count(rgb, head_box, cyan) > 200 and count(rgb, cap_box, yellow) > 100
@@ -188,6 +189,70 @@ assert count(still, cap_box, yellow) > 100, "caption missing from the preview"
 s7b = drv._spec_for(row, 1)
 assert drv._cta_caption_layers(s7b, drv.build_overlay_image(s7b, include_cta=False)) == []
 assert abs(drv._render_duration(s7b) - 2.0) < 0.1
+
+# ---------- 8. CTA copy: from its start time to the end, lines split evenly ---
+# Start counts from the very start of the video, so 1.0 is during the promo.
+# The copy wins over the caption pool. "I" then "WWWW": told apart by width.
+row8 = pd.concat([row, pd.Series({CTA_CAPTION_ROLE: "I\nWWWW",
+                                  f"{CTA_CAPTION_ROLE}_Start": 1.0})])
+s8 = gen._spec_for(row8, 1)
+gen._resolve_positions(s8)
+assert s8.cta_copy == "I\nWWWW" and s8.cta_caption.text == "WWWW"
+assert [(round(a, 2), round(b, 2), x) for a, b, x in gen._cta_copy_segments(s8)] == \
+    [(1.0, 3.0, "I"), (3.0, 5.0, "WWWW")]
+res8 = gen.render_row(1, row8, "copy.mp4")
+assert res8.ok, res8.error
+box8 = (360, s8.cta_caption.y - 40, 720, s8.cta_caption.y + 40)
+before, line1, line2 = (count(frame(res8.output_path, t), box8, yellow)
+                        for t in (0.5, 1.5, 4.0))
+assert before == 0, "copy showing before its start time"
+assert 30 < line1 < line2 / 2, (line1, line2)    # "I" first, then "WWWW"
+
+# ---------- 9. no after-promo mode: copy still runs; start override; too late -
+cfg9 = replace(cfg, cta_after_promo=False, cta_caption_start=0.0)
+gen9 = VideoGenerator(cfg9, bg_dir, promo, None, TMP / "work9", TMP / "out9")
+s9 = gen9._spec_for(pd.concat([row, pd.Series({CTA_CAPTION_ROLE: "A\nB\nC"})]), 1)
+assert [(round(a, 2), round(b, 2)) for a, b, _x in gen9._cta_copy_segments(s9)] == \
+    [(0.0, 0.67), (0.67, 1.33), (1.33, 2.0)]
+late = gen9._spec_for(pd.concat([row, pd.Series({CTA_CAPTION_ROLE: "A",
+                                                 f"{CTA_CAPTION_ROLE}_Start": 9})]), 1)
+assert gen9._cta_copy_segments(late) == [] and any("never shows" in w for w in late.warnings)
+
+# ---------- 10. copy overlapping narration captions: both on screen ----------
+s10 = gen9._spec_for(pd.concat([row, pd.Series({CTA_CAPTION_ROLE: "GO",
+                                                f"{CTA_CAPTION_ROLE}_Start": 0.5})]), 1)
+static10 = Image.new("RGBA", (1080, 1920), (0, 0, 0, 0))
+beat = Image.new("RGBA", (1080, 1920), (0, 0, 0, 0))
+beat.paste((0, 255, 255, 255), (0, 0, 1080, 60))          # a cyan "narration" bar
+merged = gen9._cta_caption_layers(s10, static10, [(0.2, 0.9, beat)])
+assert [(round(a, 2), round(b, 2)) for a, b, _ in merged] == \
+    [(0.2, 0.5), (0.5, 0.9), (0.9, 2.0)], [(a, b) for a, b, _ in merged]
+bar = (0, 0, 1080, 60)
+box10 = (360, s10.cta_caption.y - 40, 720, s10.cta_caption.y + 40)
+for (_a, _b, im), has_bar, has_cap in zip(merged, (1, 1, 0), (0, 1, 1)):
+    rgb = im.convert("RGB")
+    assert (count(rgb, bar, cyan) > 1000) == bool(has_bar)
+    assert (count(rgb, box10, yellow) > 30) == bool(has_cap)
+
+# ---------- 11. the per-promo table fills CTA_Caption, lines intact ----------
+import io
+import text_grids
+from openpyxl import Workbook
+wb = Workbook()
+wb.active.append(["promo_a.mp4", "Promo B"])
+wb.active.append(["Setup line\nPunch line", "b1"])
+wb.active.append(["a2", "b2"])
+buf = io.BytesIO()
+wb.save(buf)
+grid = text_grids.read_grid(buf.getvalue(), CTA_CAPTION_ROLE)
+report = text_grids.check_grid(grid, ["promo_a.mp4", "promo_b.mp4"], 2)
+assert report.ok, report.errors
+overrides = {CTA_CAPTION_ROLE: text_grids.resolve(grid, report)}
+sheet = pd.DataFrame({"Headline": ["h1", "h2"]})
+for promo_index, first in ((0, "Setup line\nPunch line"), (1, "b1")):
+    df_promo = text_grids.apply_overrides(sheet, overrides, promo_index)
+    from video_generator import RowSpec
+    assert RowSpec.from_row(df_promo.iloc[0], 1).cta_copy == first
 
 print(f"OK: {total:.2f}s, captions {spec.cta_caption_texts}, "
       f"warnings {res.warnings}")
